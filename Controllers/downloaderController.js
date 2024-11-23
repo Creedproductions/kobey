@@ -1,14 +1,15 @@
-// controllers/downloaderController.js
-
-const { igdl, ttdl, fbdown, twitter, youtube } = require('btch-downloader');
+const { igdl, ttdl, twitter, youtube } = require('btch-downloader');
+const { facebook } = require('@mrnima/facebook-downloader'); // Import the Facebook downloader
+const { pinterestdl } = require('imran-servar');  // Import the Pinterest downloader
 
 // Helper function to identify the platform from a URL
 const identifyPlatform = (url) => {
   if (url.includes('instagram.com')) return 'instagram';
   if (url.includes('tiktok.com')) return 'tiktok';
   if (url.includes('facebook.com') || url.includes('fb.watch')) return 'facebook';
-  if (url.includes('x.com')) return 'twitter';
+  if (url.includes('x.com') || url.includes('twitter.com')) return 'twitter';
   if (url.includes('youtube.com') || url.includes('youtu.be')) return 'youtube';
+  if (url.includes('pinterest.com') || url.includes('pin.it')) return 'pinterest'; // Pinterest detection
   return null; // Unsupported platform
 };
 
@@ -37,13 +38,16 @@ exports.downloadMedia = async (req, res) => {
         data = await ttdl(url);
         break;
       case 'facebook':
-        data = await fbdown(url);
+        data = await facebook(url); // Using @mrnima/facebook-downloader for Facebook
         break;
       case 'twitter':
         data = await twitter(url);
         break;
       case 'youtube':
         data = await youtube(url);
+        break;
+      case 'pinterest':
+        data = await pinterestdl(url); // Using imran-servar for Pinterest
         break;
       default:
         return res.status(500).json({ error: 'Platform identification failed' });
