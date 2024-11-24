@@ -1,5 +1,8 @@
-const { pinterestdl } = require('imran-servar');
+const { Download } = require("nima-threads-dl-api")
 
-(async () => {
-  console.log(await pinterestdl('https://pin.it/6xQbzRhDx'));
-})();
+Download('https://www.threads.net/t/Cujx6ryoYx6/?igshid=NTc4MTIwNjQ2YQ==').then((result) => {
+console.log(result)
+})
+  .catch((error) => {
+console.log(error)
+})

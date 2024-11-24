@@ -17,6 +17,8 @@
     "btch-downloader": "^2.8.1",
     "express": "^4.21.1",
     "imran-servar": "^1.0.4",
+    "nima-threads-dl-api": "^0.0.4",
+    "punycode": "^2.3.1",
     "rahad-all-downloader": "^2.1.17",
     "shaon-media-downloader": "^2.5.0",
     "social-downloader-cherry": "^1.0.0"
