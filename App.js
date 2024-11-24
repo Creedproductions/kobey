@@ -1,21 +1,22 @@
 const express = require('express');
-const cors = require('cors');  // Importing the CORS package
-const app = express();
+const cors = require('cors');
+const config = require('./Config/config');  // Import config file
 const downloaderRoutes = require('./Routes/downloaderRoutes');
+
+const app = express();
 
 // Middleware to parse JSON
 app.use(express.json());
 
 // Use CORS middleware to allow requests from specific origins
 app.use(cors({
-  origin: 'http://127.0.0.1:5500'  // Allow only requests from this origin (adjust as needed)
+  origin: config.CORS_ORIGINS  // Use the CORS origin from the config
 }));
 
 // Use routes
 app.use('/api', downloaderRoutes);
 
-// Start the server
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Server running on http://localhost:${PORT}`);
+// Start the server using the port from the config
+app.listen(config.PORT, () => {
+  console.log(`Server running on http://localhost:${config.PORT}`);
 });
