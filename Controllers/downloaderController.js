@@ -1,8 +1,21 @@
+const axios = require('axios');
 const { igdl, ttdl, twitter, youtube } = require('btch-downloader');
 const { facebook } = require('@mrnima/facebook-downloader'); // Import the Facebook downloader
 const { pinterestdl } = require('imran-servar');  // Import the Pinterest downloader
 
-
+// Helper function to shorten URLs using TinyURL API
+const shortenUrl = async (url) => {
+  try {
+    const response = await axios.get(`https://api.tinyurl.com/create?url=${encodeURIComponent(url)}`);
+    if (response.data && response.data.result) {
+      return response.data.result;
+    }
+  } catch (error) {
+    console.error('Error shortening URL:', error);
+    return url;  // Return the original URL if the shortening fails
+  }
+  return url;  // Return the original URL if TinyURL API doesn't respond as expected
+};
 
 // Function to identify platform
 const identifyPlatform = (url) => {
@@ -16,14 +29,15 @@ const identifyPlatform = (url) => {
 };
 
 // Standardizing the response for different platforms
-const formatData = (platform, data) => {
+const formatData = async (platform, data) => {
   console.log('Formatting data:', platform, data);  // Debug log to see the raw data
 
   // Handle YouTube-specific data
   if (platform === 'youtube') {
+    const videoUrl = data.mp4 || data.mp3 || '';
     return {
       title: data.title || 'Untitled Video',
-      url: data.mp4 || data.mp3 || '',  // Prefer MP4 if available, otherwise MP3
+      url: await shortenUrl(videoUrl),  // Shorten the URL
       thumbnail: data.thumbnail || 'https://via.placeholder.com/300x150',
       sizes: ['Original Quality'],
       source: platform,
@@ -32,12 +46,13 @@ const formatData = (platform, data) => {
 
   // Standardize data for TikTok
   if (platform === 'tiktok') {
+    const videoUrl = data.video && data.video[0] || '';
     return {
       title: data.title || 'Untitled Video',
-      url: data.video && data.video[0] || '', // Using the first video URL
+      url: await shortenUrl(videoUrl),  // Shorten the URL
       thumbnail: data.thumbnail || 'https://via.placeholder.com/300x150',
       sizes: ['Original Quality'],
-      audio: data.audio && data.audio[0] || '', // Using the first audio URL
+      audio: data.audio && data.audio[0] || '',
       source: platform,
     };
   }
@@ -46,9 +61,9 @@ const formatData = (platform, data) => {
   if (platform === 'instagram') {
     const videoUrl = data[0].url || '';  // Using the URL provided in the Instagram data
     return {
-      title: data[0].wm || 'Untitled Video',  // Using the watermark (username) as title if available
-      url: videoUrl || '',  // Ensure URL is extracted properly
-      thumbnail: data[0].thumbnail || 'https://via.placeholder.com/300x150',  // Extract the thumbnail
+      title: data[0].wm || 'Untitled Video',
+      url: await shortenUrl(videoUrl),  // Shorten the URL
+      thumbnail: data[0].thumbnail || 'https://via.placeholder.com/300x150',
       sizes: ['Original Quality'],
       source: platform,
     };
@@ -59,7 +74,7 @@ const formatData = (platform, data) => {
     const videoUrl = data.url && data.url.find(v => v.hd) ? data.url.find(v => v.hd).hd : '';
     return {
       title: data.title || 'Untitled Video',
-      url: videoUrl || '',
+      url: await shortenUrl(videoUrl),  // Shorten the URL
       thumbnail: data.thumbnail || 'https://via.placeholder.com/300x150',
       sizes: ['Original Quality'],
       source: platform,
@@ -68,9 +83,10 @@ const formatData = (platform, data) => {
 
   // Standardize data for Facebook
   if (platform === 'facebook') {
+    const videoUrl = data.result.links.HD || data.result.links.SD || '';
     return {
       title: data.title || 'Untitled Video',
-      url: data.result.links.HD || data.result.links.SD || '', // Prefer HD if available
+      url: await shortenUrl(videoUrl),  // Shorten the URL
       thumbnail: data.result.thumbnail || 'https://via.placeholder.com/300x150',
       sizes: ['Original Quality'],
       source: platform,
@@ -80,20 +96,20 @@ const formatData = (platform, data) => {
   // Standardize Pinterest (image data)
   if (platform === 'pinterest') {
     return {
-      title: data.imran.title || 'Untitled Image',  // Default title if not provided
-      url: data.imran.url || '',  // Pinterest image URL
-      thumbnail: data.imran.url || 'https://via.placeholder.com/300x150',  // Use image URL as thumbnail
-      sizes: ['Original Quality'],  // Pinterest doesn't typically have video sizes
+      title: data.imran.title || 'Untitled Image',
+      url: await shortenUrl(data.imran.url || ''),  // Shorten the URL
+      thumbnail: data.imran.url || 'https://via.placeholder.com/300x150',
+      sizes: ['Original Quality'],
       source: platform,
     };
   }
 
-  // For other platforms (e.g., Pinterest), the previous logic applies
+  // Handle other cases where URL shortening is needed
   const sizes = data.sizes && data.sizes.length > 0 ? data.sizes : ['Original Quality'];
 
   const response = {
     title: data.title || 'Untitled Video',
-    url: data.url || '',
+    url: await shortenUrl(data.url || ''),  // Shorten the URL
     thumbnail: data.thumbnail || 'https://via.placeholder.com/300x150',
     sizes: sizes,
   };
@@ -150,7 +166,7 @@ exports.downloadMedia = async (req, res) => {
     console.log('Fetched data:', data);  // Debug log for fetched data
 
     // Standardize and format the data before sending to frontend
-    const formattedData = formatData(platform, data);
+    const formattedData = await formatData(platform, data);
 
     res.json({
       success: true,
