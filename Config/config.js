@@ -8,7 +8,7 @@ module.exports = {
   CACHE_EXPIRATION_TIME: parseInt(process.env.CACHE_EXPIRATION_TIME) || 60000,
 
   // CORS Configuration (whitelist origins)
-  CORS_ORIGINS: process.env.CORS_ORIGINS || 'http://127.0.0.1:5500'|| 'https://savemock2.vercel.app/',
+  CORS_ORIGINS: process.env.CORS_ORIGINS || 'http://127.0.0.1:5500,https://savemock2.vercel.app', // Multiple origins allowed
 
   // API keys and third-party service configurations
   API_KEYS: {
