@@ -1,7 +1,8 @@
-const twitter = require("x-scrapper").Twitter
-   
-twitter.getVideoInfo("https://x.com/galaxyfmug/status/1859888110143988138?s=46") // returns a Promise
-.then((res) => {
-   console.log(res) // Video info.
-   console.log(res.media.formats[0].url) // Get the video .mp4 url (you can download it.)
-})
+// const {GDLink} = require("nayan-media-downloader");
+
+// const url = 'https://drive.google.com/file/d/1aSdqK2QC5NfEf0LqX7-2Le6x41N4-RjH/view?usp=drive_link' // Public Google Drive Url
+
+// GDLink(url).then(data => {
+//   console.log(data)
+
+// });

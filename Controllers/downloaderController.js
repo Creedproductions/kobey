@@ -2,8 +2,8 @@ const { igdl, ttdl, twitter, youtube } = require('btch-downloader');
 const { facebook } = require('@mrnima/facebook-downloader');
 const { pinterestdl } = require('imran-servar');
 const { BitlyClient } = require('bitly');
-
-const config = require('../Config/config');  // Import the config file
+const { threads, GDLink } = require("nayan-media-downloader");
+const config = require('../Config/config'); // Import the config file
 
 // Initialize Bitly client with your access token from config
 const bitly = new BitlyClient(config.BITLY_ACCESS_TOKEN);
@@ -12,10 +12,10 @@ const bitly = new BitlyClient(config.BITLY_ACCESS_TOKEN);
 const shortenUrl = async (url) => {
   try {
     const response = await bitly.shorten(url);
-    return response.link; // returns the shortened URL
+    return response.link; // Returns the shortened URL
   } catch (error) {
     console.error('Error shortening URL:', error);
-    return url; // fallback to original URL if shortening fails
+    return url; // Fallback to the original URL if shortening fails
   }
 };
 
@@ -27,90 +27,91 @@ const identifyPlatform = (url) => {
   if (url.includes('x.com') || url.includes('twitter.com')) return 'twitter';
   if (url.includes('youtube.com') || url.includes('youtu.be')) return 'youtube';
   if (url.includes('pinterest.com') || url.includes('pin.it')) return 'pinterest';
-  
+  if (url.includes('threads.net')) return 'threads';
+  if (url.includes('drive.google.com')) return 'googleDrive';
   return null;
 };
 
-// Standardizing the response for different platforms
+// Standardize the response for different platforms
 const formatData = async (platform, data) => {
-  // Handle YouTube-specific data
-  if (platform === 'youtube') {
-    return {
-      title: data.title || 'Untitled Video',
-      url: data.mp4 || data.mp3 || '',
-      thumbnail: data.thumbnail || 'https://via.placeholder.com/300x150',
-      sizes: ['Original Quality'],
-      source: platform,
-    };
-  }
+  const placeholderThumbnail = 'https://via.placeholder.com/300x150';
 
-  // Standardize data for TikTok
-  if (platform === 'tiktok') {
-    return {
-      title: data.title || 'Untitled Video',
-      url: data.video && data.video[0] || '',
-      thumbnail: data.thumbnail || 'https://via.placeholder.com/300x150',
-      sizes: ['Original Quality'],
-      audio: data.audio && data.audio[0] || '',
-      source: platform,
-    };
+  switch (platform) {
+    case 'youtube':
+      return {
+        title: data.title || 'Untitled Video',
+        url: data.mp4 || data.mp3 || '',
+        thumbnail: data.thumbnail || placeholderThumbnail,
+        sizes: ['Original Quality'],
+        source: platform,
+      };
+    case 'tiktok':
+      return {
+        title: data.title || 'Untitled Video',
+        url: data.video?.[0] || '',
+        thumbnail: data.thumbnail || placeholderThumbnail,
+        sizes: ['Original Quality'],
+        audio: data.audio?.[0] || '',
+        source: platform,
+      };
+    case 'instagram':
+      return {
+        title: data[0]?.wm || 'Untitled Video',
+        url: data[0]?.url || '',
+        thumbnail: data[0]?.thumbnail || placeholderThumbnail,
+        sizes: ['Original Quality'],
+        source: platform,
+      };
+    case 'twitter':
+      const videoUrl = data.url?.find((v) => v.hd)?.hd || '';
+      return {
+        title: data.title || 'Untitled Video',
+        url: videoUrl,
+        thumbnail: data.thumbnail || placeholderThumbnail,
+        sizes: ['Original Quality'],
+        source: platform,
+      };
+    case 'facebook':
+      return {
+        title: data.title || 'Untitled Video',
+        url: data.result.links?.HD || data.result.links?.SD || '',
+        thumbnail: data.result.thumbnail || placeholderThumbnail,
+        sizes: ['Original Quality'],
+        source: platform,
+      };
+    case 'pinterest':
+      return {
+        title: data.imran?.title || 'Untitled Image',
+        url: data.imran?.url || '',
+        thumbnail: data.imran?.url || placeholderThumbnail,
+        sizes: ['Original Quality'],
+        source: platform,
+      };
+    case 'threads':
+      return {
+        title: data.title || 'Untitled Post',
+        url: data.data?.video || '',
+        thumbnail: data.thumbnail || placeholderThumbnail,
+        sizes: ['Original Quality'],
+        source: platform,
+      };
+    case 'googleDrive':
+      return {
+        title: data.title || 'Untitled File',
+        url: data.data || '',
+        thumbnail: placeholderThumbnail,
+        sizes: ['Original Quality'],
+        source: platform,
+      };
+    default:
+      return {
+        title: data.title || 'Untitled Media',
+        url: data.url || '',
+        thumbnail: data.thumbnail || placeholderThumbnail,
+        sizes: data.sizes?.length > 0 ? data.sizes : ['Original Quality'],
+        source: platform,
+      };
   }
-
-  // Standardize data for Instagram
-  if (platform === 'instagram') {
-    const videoUrl = data[0].url || '';
-    return {
-      title: data[0].wm || 'Untitled Video',
-      url: videoUrl || '',
-      thumbnail: data[0].thumbnail || 'https://via.placeholder.com/300x150',
-      sizes: ['Original Quality'],
-      source: platform,
-    };
-  }
-
-  // Standardize data for Twitter
-  if (platform === 'twitter') {
-    const videoUrl = data.url && data.url.find(v => v.hd) ? data.url.find(v => v.hd).hd : '';
-    return {
-      title: data.title || 'Untitled Video',
-      url: videoUrl || '',
-      thumbnail: data.thumbnail || 'https://via.placeholder.com/300x150',
-      sizes: ['Original Quality'],
-      source: platform,
-    };
-  }
-
-  // Standardize data for Facebook
-  if (platform === 'facebook') {
-    return {
-      title: data.title || 'Untitled Video',
-      url: data.result.links.HD || data.result.links.SD || '',
-      thumbnail: data.result.thumbnail || 'https://via.placeholder.com/300x150',
-      sizes: ['Original Quality'],
-      source: platform,
-    };
-  }
-
-  // Standardize Pinterest (image data)
-  if (platform === 'pinterest') {
-    return {
-      title: data.imran.title || 'Untitled Image',
-      url: data.imran.url || '',
-      thumbnail: data.imran.url || 'https://via.placeholder.com/300x150',
-      sizes: ['Original Quality'],
-      source: platform,
-    };
-  }
-
-  // Default return for other platforms
-  const sizes = data.sizes && data.sizes.length > 0 ? data.sizes : ['Original Quality'];
-  return {
-    title: data.title || 'Untitled Video',
-    url: data.url || '',
-    thumbnail: data.thumbnail || 'https://via.placeholder.com/300x150',
-    sizes: sizes,
-    source: platform,
-  };
 };
 
 // Main media download function
@@ -150,6 +151,12 @@ exports.downloadMedia = async (req, res) => {
       case 'pinterest':
         data = await pinterestdl(url);
         break;
+      case 'threads':
+        data = await threads(url);
+        break;
+      case 'googleDrive':
+        data = await GDLink(url);
+        break;
       default:
         return res.status(500).json({ error: 'Platform identification failed' });
     }
@@ -157,13 +164,15 @@ exports.downloadMedia = async (req, res) => {
     // Format the data
     let formattedData = await formatData(platform, data);
 
-    // Shorten the media URL
+    // Shorten the media URL for all platforms
     const shortenedUrl = await shortenUrl(formattedData.url);
     formattedData.url = shortenedUrl;
 
-    // Shorten the thumbnail URL
-    const shortenedThumbnail = await shortenUrl(formattedData.thumbnail);
-    formattedData.thumbnail = shortenedThumbnail;
+    // Shorten the thumbnail URL for all platforms except Google Drive
+    if (platform !== 'googleDrive') {
+      const shortenedThumbnail = await shortenUrl(formattedData.thumbnail);
+      formattedData.thumbnail = shortenedThumbnail;
+    }
 
     // Send the response
     res.json({

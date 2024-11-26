@@ -25,6 +25,7 @@
     "imran-servar": "^1.0.4",
     "memory-cache": "^0.2.0",
     "meta-data-fetcher": "^2.0.0",
+    "nayan-media-downloader": "^2.6.7",
     "nima-threads-dl-api": "^0.0.4",
     "punycode": "^2.3.1",
     "puppeteer": "^23.9.0",

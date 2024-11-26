@@ -52,7 +52,7 @@ const identifyPlatform = (url) => {
       };
     }
   
-    if (platform === 'twitter') {
+    if (platform === 'X') {
       return {
         title: data.title || 'Untitled Video',
         url: data.url ? data.url.find(v => v.hd) ? data.url.find(v => v.hd).hd : '' : '',
