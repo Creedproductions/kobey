@@ -11,6 +11,7 @@ const identifyPlatform = (url) => {
   if (url.includes('x.com') || url.includes('twitter.com')) return 'twitter';
   if (url.includes('youtube.com') || url.includes('youtu.be')) return 'youtube';
   if (url.includes('pinterest.com') || url.includes('pin.it')) return 'pinterest';
+  
   return null;
 };
 
