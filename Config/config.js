@@ -12,11 +12,12 @@ module.exports = {
 
   // API keys and third-party service configurations
   API_KEYS: {
-    // For services that require API keys (if applicable)
     INSTAGRAM_API_KEY: process.env.INSTAGRAM_API_KEY || 'default-instagram-api-key',
     YOUTUBE_API_KEY: process.env.YOUTUBE_API_KEY || 'default-youtube-api-key',
-    // You can add more APIs as needed
   },
+
+  // Bitly Configuration
+  BITLY_ACCESS_TOKEN: process.env.BITLY_ACCESS_TOKEN,  // Add the Bitly access token from .env
 
   // Optional: Configure logging settings (to log into a file or use an external service)
   LOGGING: {

@@ -1,7 +1,23 @@
-// Import necessary dependencies and functions
 const { igdl, ttdl, twitter, youtube } = require('btch-downloader');
 const { facebook } = require('@mrnima/facebook-downloader');
 const { pinterestdl } = require('imran-servar');
+const { BitlyClient } = require('bitly');
+
+const config = require('../Config/config');  // Import the config file
+
+// Initialize Bitly client with your access token from config
+const bitly = new BitlyClient(config.BITLY_ACCESS_TOKEN);
+
+// Function to shorten URL
+const shortenUrl = async (url) => {
+  try {
+    const response = await bitly.shorten(url);
+    return response.link; // returns the shortened URL
+  } catch (error) {
+    console.error('Error shortening URL:', error);
+    return url; // fallback to original URL if shortening fails
+  }
+};
 
 // Function to identify platform
 const identifyPlatform = (url) => {
@@ -16,7 +32,7 @@ const identifyPlatform = (url) => {
 };
 
 // Standardizing the response for different platforms
-const formatData = (platform, data) => {
+const formatData = async (platform, data) => {
   // Handle YouTube-specific data
   if (platform === 'youtube') {
     return {
@@ -138,8 +154,18 @@ exports.downloadMedia = async (req, res) => {
         return res.status(500).json({ error: 'Platform identification failed' });
     }
 
-    const formattedData = formatData(platform, data);
+    // Format the data
+    let formattedData = await formatData(platform, data);
 
+    // Shorten the media URL
+    const shortenedUrl = await shortenUrl(formattedData.url);
+    formattedData.url = shortenedUrl;
+
+    // Shorten the thumbnail URL
+    const shortenedThumbnail = await shortenUrl(formattedData.thumbnail);
+    formattedData.thumbnail = shortenedThumbnail;
+
+    // Send the response
     res.json({
       success: true,
       data: formattedData,
