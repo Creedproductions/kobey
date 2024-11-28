@@ -46,9 +46,11 @@ const formatData = async (platform, data) => {
 
   switch (platform) {
     case 'youtube':
+      // Check for available URLs and prioritize mp4 (video) or mp3 (audio) if available
+      const videoUrl = data.mp4 || data.mp3 || data.url || '';
       return {
         title: data.title || 'Untitled Video',
-        url: data.mp4 || data.mp3 || '',
+        url: videoUrl,
         thumbnail: data.thumbnail || placeholderThumbnail,
         sizes: ['Original Quality'],
         source: platform,
@@ -71,10 +73,10 @@ const formatData = async (platform, data) => {
         source: platform,
       };
     case 'twitter':
-      const videoUrl = data.url?.find((v) => v.hd)?.hd || '';
+      const videoUrlTwitter = data.url?.find((v) => v.hd)?.hd || '';
       return {
         title: data.title || 'Untitled Video',
-        url: videoUrl,
+        url: videoUrlTwitter,
         thumbnail: data.thumbnail || placeholderThumbnail,
         sizes: ['Original Quality'],
         source: platform,
