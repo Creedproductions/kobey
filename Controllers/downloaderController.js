@@ -3,19 +3,27 @@ const { facebook } = require('@mrnima/facebook-downloader');
 const { pinterestdl } = require('imran-servar');
 const { BitlyClient } = require('bitly');
 const { threads, GDLink } = require("nayan-media-downloader");
+const tinyurl = require('tinyurl'); // TinyURL package
 const config = require('../Config/config'); // Import the config file
 
 // Initialize Bitly client with your access token from config
 const bitly = new BitlyClient(config.BITLY_ACCESS_TOKEN);
 
-// Function to shorten URL
+// Function to shorten URL with fallback
 const shortenUrl = async (url) => {
   try {
+    // Attempt shortening with Bitly
     const response = await bitly.shorten(url);
-    return response.link; // Returns the shortened URL
-  } catch (error) {
-    console.error('Error shortening URL:', error);
-    return url; // Fallback to the original URL if shortening fails
+    return response.link; // Return shortened URL if successful
+  } catch {
+    try {
+      // If Bitly fails, attempt shortening with TinyURL
+      const tinyResponse = await tinyurl.shorten(url);
+      return tinyResponse; // Return shortened URL from TinyURL
+    } catch {
+      // Fallback to the original URL if both services fail
+      return url;
+    }
   }
 };
 
@@ -114,7 +122,6 @@ const formatData = async (platform, data) => {
   }
 };
 
-// Main media download function
 exports.downloadMedia = async (req, res) => {
   const { url } = req.body;
 
@@ -164,14 +171,16 @@ exports.downloadMedia = async (req, res) => {
     // Format the data
     let formattedData = await formatData(platform, data);
 
-    // Shorten the media URL for all platforms
-    const shortenedUrl = await shortenUrl(formattedData.url);
-    formattedData.url = shortenedUrl;
+    // Skip shortening for Threads platform, otherwise shorten the URL
+    if (platform !== 'threads') {
+      const shortenedUrl = await shortenUrl(formattedData.url);
+      formattedData.url = shortenedUrl;
 
-    // Shorten the thumbnail URL for all platforms except Google Drive
-    if (platform !== 'googleDrive') {
-      const shortenedThumbnail = await shortenUrl(formattedData.thumbnail);
-      formattedData.thumbnail = shortenedThumbnail;
+      // Shorten the thumbnail URL for all platforms except Google Drive
+      if (platform !== 'googleDrive') {
+        const shortenedThumbnail = await shortenUrl(formattedData.thumbnail);
+        formattedData.thumbnail = shortenedThumbnail;
+      }
     }
 
     // Send the response
@@ -181,6 +190,6 @@ exports.downloadMedia = async (req, res) => {
     });
   } catch (error) {
     console.error('Error downloading media:', error);
-    res.status(500).json({ error: 'Failed to download media', details: error.message });
+    res.status(500).json({ error: 'Failed to download media' });
   }
 };

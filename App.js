@@ -8,6 +8,8 @@ const app = express();
 // Middleware to parse JSON
 app.use(express.json());
 
+
+
 // Use CORS middleware to allow requests from specific origins
 const corsOptions = {
   origin: config.CORS_ORIGINS.split(','),  // Allow multiple origins from the config

@@ -33,6 +33,7 @@
     "rahad-all-downloader": "^2.1.17",
     "shaon-media-downloader": "^2.5.0",
     "social-downloader-cherry": "^1.0.0",
+    "tinyurl": "^1.1.7",
     "x-scrapper": "^1.0.1"
   },
   "devDependencies": {

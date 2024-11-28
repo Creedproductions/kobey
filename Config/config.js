@@ -18,6 +18,8 @@ module.exports = {
 
   // Bitly Configuration
   BITLY_ACCESS_TOKEN: process.env.BITLY_ACCESS_TOKEN,  // Add the Bitly access token from .env
+  //Tiny url configurations
+  TINY_URL_API: process.env.TINY_URL_API,
 
   // Optional: Configure logging settings (to log into a file or use an external service)
   LOGGING: {
