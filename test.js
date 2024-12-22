@@ -1,11 +1,6 @@
-const { alldl } = require('imran-dlmedia');
+const { threads } = require("shaon-media-downloader");
 
-const url = 'https://youtu.be/l3zvl_yDX4M?si=3Rdx0kY6t_Jbsb-k'; //past video link
-
-alldl(url)
-  .then(data => {
-    console.log(data);
-  })
-  .catch(error => {
-    console.error('Error:', error.message);
-  });
+ const url = "https://www.threads.net/@exclusive_bizz/post/DC6HK6oNcp_?xmt=AQGzzpj5veYoM6LiSxRw1--PwUN1dcmhlARy0xDaWumhoQ" // past url
+threads(url).then(data => { 
+  console.log(data) 
+});
