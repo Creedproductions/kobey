@@ -1,4 +1,4 @@
-const { alldl } = require('imran-dlmedia'); // For YouTube video downloads
+const {alldown} = require("shaon-media-downloader") // For YouTube video downloads
 const { igdl, ttdl, twitter } = require('btch-downloader');
 const { facebook } = require('@mrnima/facebook-downloader');
 const { pinterestdl } = require('imran-servar');
@@ -142,7 +142,7 @@ exports.downloadMedia = async (req, res) => {
       case 'youtube':
         console.log("Fetching YouTube data...");
         try {
-          data = await alldl(url);
+          data = await alldown(url);
           console.log("YouTube data fetched successfully:", data);
         } catch (error) {
           console.error("Error fetching YouTube data:", error);
