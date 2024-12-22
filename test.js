@@ -1,6 +1,6 @@
 const { alldl } = require('imran-dlmedia');
 
-const url = 'https://youtu.be/XnFOORuOk8I?si=VZIZ6UXtL1vTA5V9'; //past video link
+const url = 'https://youtu.be/l3zvl_yDX4M?si=3Rdx0kY6t_Jbsb-k'; //past video link
 
 alldl(url)
   .then(data => {
