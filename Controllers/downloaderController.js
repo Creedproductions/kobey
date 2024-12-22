@@ -59,7 +59,7 @@ const formatData = async (platform, data) => {
       console.log("Processing YouTube data...");
       const youtubeData = data.data;
       if (!youtubeData || (!youtubeData.low && !youtubeData.high)) {
-        throw new Error("YouTube data is incomplete or improperly formatted");
+        throw new Error("YouTube data is incomplete or improperly formatte");
       }
 
       return {
