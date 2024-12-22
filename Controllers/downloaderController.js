@@ -12,26 +12,24 @@ const bitly = new BitlyClient(config.BITLY_ACCESS_TOKEN);
 
 // Function to shorten URL with fallback
 const shortenUrl = async (url) => {
-  if (!url) {
-    console.error("Invalid or missing URL, skipping shortening:", url);
-    return url;
-  }
-
   try {
+    // Attempt shortening with Bitly
     console.log("Attempting to shorten URL with Bitly:", url);
     const response = await bitly.shorten(url);
     console.log("Bitly shortened URL:", response.link);
-    return response.link;
+    return response.link; // Return shortened URL if successful
   } catch (error) {
-    console.error("Bitly shortening failed:", error.message);
+    console.error("Bitly shortening failed:", error);
     try {
+      // If Bitly fails, attempt shortening with TinyURL
       console.log("Attempting to shorten URL with TinyURL:", url);
       const tinyResponse = await tinyurl.shorten(url);
       console.log("TinyURL shortened URL:", tinyResponse);
-      return tinyResponse;
+      return tinyResponse; // Return shortened URL from TinyURL
     } catch (error) {
-      console.error("TinyURL shortening failed:", error.message);
-      return url; // Fallback to the original URL if all shortening attempts fail
+      console.error("TinyURL shortening failed:", error);
+      // Fallback to the original URL if both services fail
+      return url;
     }
   }
 };
@@ -59,7 +57,7 @@ const formatData = async (platform, data) => {
   switch (platform) {
     case 'youtube':
       console.log("Processing YouTube data...");
-      const youtubeData = data.data; // Ensure proper data access
+      const youtubeData = data.data;
       if (!youtubeData || (!youtubeData.low && !youtubeData.high)) {
         throw new Error("YouTube data is incomplete or improperly formatted");
       }
@@ -72,21 +70,72 @@ const formatData = async (platform, data) => {
         source: platform,
       };
 
-    case 'pinterest':
-      console.log("Processing Pinterest data...");
-      const pinterestData = data.imran || {}; // Default to an empty object
-      if (!pinterestData.url) {
-        console.warn("No valid media URL found in Pinterest data");
-      }
-
+    case 'tiktok':
+      console.log("Processing TikTok data...");
       return {
-        title: pinterestData.title || 'Untitled Media',
-        url: pinterestData.url || '', // Handle empty URLs gracefully
-        thumbnail: pinterestData.url || placeholderThumbnail,
+        title: data.title || 'Untitled Video',
+        url: data.video?.[0] || '',
+        thumbnail: data.thumbnail || placeholderThumbnail,
+        sizes: ['Original Quality'],
+        audio: data.audio?.[0] || '',
+        source: platform,
+      };
+    case 'instagram':
+      console.log("Processing Instagram data...");
+      return {
+        title: data[0]?.wm || 'Untitled Video',
+        url: data[0]?.url || '',
+        thumbnail: data[0]?.thumbnail || placeholderThumbnail,
         sizes: ['Original Quality'],
         source: platform,
       };
-
+    case 'twitter':
+      console.log("Processing Twitter data...");
+      const videoUrlTwitter = data.url?.find((v) => v.hd)?.hd || '';
+      console.log("Twitter video URL:", videoUrlTwitter);
+      return {
+        title: data.title || 'Untitled Video',
+        url: videoUrlTwitter,
+        thumbnail: data.thumbnail || placeholderThumbnail,
+        sizes: ['Original Quality'],
+        source: platform,
+      };
+    case 'facebook':
+      console.log("Processing Facebook data...");
+      return {
+        title: data.title || 'Untitled Video',
+        url: data.result.links?.HD || data.result.links?.SD || '',
+        thumbnail: data.result.thumbnail || placeholderThumbnail,
+        sizes: ['Original Quality'],
+        source: platform,
+      };
+    case 'pinterest':
+      console.log("Processing Pinterest data...");
+      return {
+        title: data.imran?.title || 'Untitled Image',
+        url: data.imran?.url || '',
+        thumbnail: data.imran?.url || placeholderThumbnail,
+        sizes: ['Original Quality'],
+        source: platform,
+      };
+    case 'threads':
+      console.log("Processing Threads data...");
+      return {
+        title: data.title || 'Untitled Post',
+        url: data.data?.video || '',
+        thumbnail: data.thumbnail || placeholderThumbnail,
+        sizes: ['Original Quality'],
+        source: platform,
+      };
+    case 'googleDrive':
+      console.log("Processing Google Drive data...");
+      return {
+        title: data.title || 'Untitled File',
+        url: data.data || '',
+        thumbnail: placeholderThumbnail,
+        sizes: ['Original Quality'],
+        source: platform,
+      };
     default:
       console.log("Processing generic data...");
       return {
@@ -146,13 +195,7 @@ exports.downloadMedia = async (req, res) => {
         break;
       case 'pinterest':
         console.log("Fetching Pinterest data...");
-        try {
-          data = await pinterestdl(url);
-          console.log("Raw Pinterest data:", data);
-        } catch (error) {
-          console.error("Error fetching Pinterest data:", error.message);
-          return res.status(500).json({ error: 'Failed to fetch Pinterest data' });
-        }
+        data = await pinterestdl(url);
         break;
       case 'threads':
         console.log("Fetching Threads data...");
@@ -173,17 +216,22 @@ exports.downloadMedia = async (req, res) => {
     }
 
     // Format the data
-    let formattedData;
-    try {
-      formattedData = await formatData(platform, data);
-    } catch (error) {
-      console.error("Error formatting data:", error.message);
-      return res.status(500).json({ error: error.message });
-    }
+    let formattedData = await formatData(platform, data);
+    console.log("Formatted data:", formattedData);
 
-    // Shorten URLs for all platforms, including YouTube
-    formattedData.url = await shortenUrl(formattedData.url);
-    formattedData.thumbnail = await shortenUrl(formattedData.thumbnail);
+    // Skip shortening for Threads platform, otherwise shorten the URL
+    if (platform !== 'threads') {
+      const shortenedUrl = await shortenUrl(formattedData.url);
+      formattedData.url = shortenedUrl;
+      console.log("Shortened URL:", formattedData.url);
+
+      // Shorten the thumbnail URL for all platforms except Google Drive
+      if (platform !== 'googleDrive') {
+        const shortenedThumbnail = await shortenUrl(formattedData.thumbnail);
+        formattedData.thumbnail = shortenedThumbnail;
+        console.log("Shortened Thumbnail:", formattedData.thumbnail);
+      }
+    }
 
     // Send the response
     res.json({
