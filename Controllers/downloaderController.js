@@ -1,4 +1,5 @@
-const { igdl, ttdl, twitter, youtube } = require('btch-downloader');
+const { alldl } = require('imran-dlmedia'); // For YouTube video downloads
+const { igdl, ttdl, twitter } = require('btch-downloader');
 const { facebook } = require('@mrnima/facebook-downloader');
 const { pinterestdl } = require('imran-servar');
 const { BitlyClient } = require('bitly');
@@ -11,24 +12,33 @@ const bitly = new BitlyClient(config.BITLY_ACCESS_TOKEN);
 
 // Function to shorten URL with fallback
 const shortenUrl = async (url) => {
+  if (!url) {
+    console.error("Invalid or missing URL, skipping shortening:", url);
+    return url;
+  }
+
   try {
-    // Attempt shortening with Bitly
+    console.log("Attempting to shorten URL with Bitly:", url);
     const response = await bitly.shorten(url);
-    return response.link; // Return shortened URL if successful
-  } catch {
+    console.log("Bitly shortened URL:", response.link);
+    return response.link;
+  } catch (error) {
+    console.error("Bitly shortening failed:", error.message);
     try {
-      // If Bitly fails, attempt shortening with TinyURL
+      console.log("Attempting to shorten URL with TinyURL:", url);
       const tinyResponse = await tinyurl.shorten(url);
-      return tinyResponse; // Return shortened URL from TinyURL
-    } catch {
-      // Fallback to the original URL if both services fail
-      return url;
+      console.log("TinyURL shortened URL:", tinyResponse);
+      return tinyResponse;
+    } catch (error) {
+      console.error("TinyURL shortening failed:", error.message);
+      return url; // Fallback to the original URL if all shortening attempts fail
     }
   }
 };
 
 // Function to identify platform
 const identifyPlatform = (url) => {
+  console.log("Identifying platform for URL:", url);
   if (url.includes('instagram.com')) return 'instagram';
   if (url.includes('tiktok.com')) return 'tiktok';
   if (url.includes('facebook.com') || url.includes('fb.watch')) return 'facebook';
@@ -44,74 +54,41 @@ const identifyPlatform = (url) => {
 const formatData = async (platform, data) => {
   const placeholderThumbnail = 'https://via.placeholder.com/300x150';
 
+  console.log(`Formatting data for platform: ${platform}`);
+
   switch (platform) {
     case 'youtube':
+      console.log("Processing YouTube data...");
+      const youtubeData = data.data; // Ensure proper data access
+      if (!youtubeData || (!youtubeData.low && !youtubeData.high)) {
+        throw new Error("YouTube data is incomplete or improperly formatted");
+      }
+
       return {
-        title: data.title || 'Untitled Video',
-        url: data.mp4 || data.mp3 || '',
-        thumbnail: data.thumbnail || placeholderThumbnail,
-        sizes: ['Original Quality'],
+        title: youtubeData.title || 'Untitled Video',
+        url: youtubeData.low || youtubeData.high || '',
+        thumbnail: youtubeData.thumbnail || placeholderThumbnail,
+        sizes: ['Low Quality', 'High Quality'],
         source: platform,
       };
-    case 'tiktok':
-      return {
-        title: data.title || 'Untitled Video',
-        url: data.video?.[0] || '',
-        thumbnail: data.thumbnail || placeholderThumbnail,
-        sizes: ['Original Quality'],
-        audio: data.audio?.[0] || '',
-        source: platform,
-      };
-    case 'instagram':
-      return {
-        title: data[0]?.wm || 'Untitled Video',
-        url: data[0]?.url || '',
-        thumbnail: data[0]?.thumbnail || placeholderThumbnail,
-        sizes: ['Original Quality'],
-        source: platform,
-      };
-    case 'twitter':
-      const videoUrl = data.url?.find((v) => v.hd)?.hd || '';
-      return {
-        title: data.title || 'Untitled Video',
-        url: videoUrl,
-        thumbnail: data.thumbnail || placeholderThumbnail,
-        sizes: ['Original Quality'],
-        source: platform,
-      };
-    case 'facebook':
-      return {
-        title: data.title || 'Untitled Video',
-        url: data.result.links?.HD || data.result.links?.SD || '',
-        thumbnail: data.result.thumbnail || placeholderThumbnail,
-        sizes: ['Original Quality'],
-        source: platform,
-      };
+
     case 'pinterest':
+      console.log("Processing Pinterest data...");
+      const pinterestData = data.imran || {}; // Default to an empty object
+      if (!pinterestData.url) {
+        console.warn("No valid media URL found in Pinterest data");
+      }
+
       return {
-        title: data.imran?.title || 'Untitled Image',
-        url: data.imran?.url || '',
-        thumbnail: data.imran?.url || placeholderThumbnail,
+        title: pinterestData.title || 'Untitled Media',
+        url: pinterestData.url || '', // Handle empty URLs gracefully
+        thumbnail: pinterestData.url || placeholderThumbnail,
         sizes: ['Original Quality'],
         source: platform,
       };
-    case 'threads':
-      return {
-        title: data.title || 'Untitled Post',
-        url: data.data?.video || '',
-        thumbnail: data.thumbnail || placeholderThumbnail,
-        sizes: ['Original Quality'],
-        source: platform,
-      };
-    case 'googleDrive':
-      return {
-        title: data.title || 'Untitled File',
-        url: data.data || '',
-        thumbnail: placeholderThumbnail,
-        sizes: ['Original Quality'],
-        source: platform,
-      };
+
     default:
+      console.log("Processing generic data...");
       return {
         title: data.title || 'Untitled Media',
         url: data.url || '',
@@ -136,52 +113,77 @@ exports.downloadMedia = async (req, res) => {
   }
 
   try {
+    console.log(`Identified platform: ${platform} for URL: ${url}`);
     let data;
 
     // Fetch data based on the identified platform
     switch (platform) {
       case 'instagram':
+        console.log("Fetching Instagram data...");
         data = await igdl(url);
         break;
       case 'tiktok':
+        console.log("Fetching TikTok data...");
         data = await ttdl(url);
         break;
       case 'facebook':
+        console.log("Fetching Facebook data...");
         data = await facebook(url);
         break;
       case 'twitter':
+        console.log("Fetching Twitter data...");
         data = await twitter(url);
         break;
       case 'youtube':
-        data = await youtube(url);
+        console.log("Fetching YouTube data...");
+        try {
+          data = await alldl(url);
+          console.log("YouTube data fetched successfully:", data);
+        } catch (error) {
+          console.error("Error fetching YouTube data:", error);
+          return res.status(500).json({ error: 'Failed to fetch YouTube data' });
+        }
         break;
       case 'pinterest':
-        data = await pinterestdl(url);
+        console.log("Fetching Pinterest data...");
+        try {
+          data = await pinterestdl(url);
+          console.log("Raw Pinterest data:", data);
+        } catch (error) {
+          console.error("Error fetching Pinterest data:", error.message);
+          return res.status(500).json({ error: 'Failed to fetch Pinterest data' });
+        }
         break;
       case 'threads':
+        console.log("Fetching Threads data...");
         data = await threads(url);
         break;
       case 'googleDrive':
+        console.log("Fetching Google Drive data...");
         data = await GDLink(url);
         break;
       default:
         return res.status(500).json({ error: 'Platform identification failed' });
     }
 
-    // Format the data
-    let formattedData = await formatData(platform, data);
-
-    // Skip shortening for Threads platform, otherwise shorten the URL
-    if (platform !== 'threads') {
-      const shortenedUrl = await shortenUrl(formattedData.url);
-      formattedData.url = shortenedUrl;
-
-      // Shorten the thumbnail URL for all platforms except Google Drive
-      if (platform !== 'googleDrive') {
-        const shortenedThumbnail = await shortenUrl(formattedData.thumbnail);
-        formattedData.thumbnail = shortenedThumbnail;
-      }
+    // Check if data was successfully fetched
+    if (!data) {
+      console.error("No data returned for platform:", platform);
+      return res.status(500).json({ error: 'Failed to fetch data for the platform' });
     }
+
+    // Format the data
+    let formattedData;
+    try {
+      formattedData = await formatData(platform, data);
+    } catch (error) {
+      console.error("Error formatting data:", error.message);
+      return res.status(500).json({ error: error.message });
+    }
+
+    // Shorten URLs for all platforms, including YouTube
+    formattedData.url = await shortenUrl(formattedData.url);
+    formattedData.thumbnail = await shortenUrl(formattedData.thumbnail);
 
     // Send the response
     res.json({
