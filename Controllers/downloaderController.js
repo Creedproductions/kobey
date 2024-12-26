@@ -1,5 +1,6 @@
-const {alldown} = require("shaon-media-downloader") // For YouTube video downloads
-const { igdl, ttdl, twitter } = require('btch-downloader');
+const { alldown } = require('shaon-media-downloader'); // Updated YouTube downloader
+const {  ttdl, twitter } = require('btch-downloader');
+const { igdl } = require('btch-downloader');
 const { facebook } = require('@mrnima/facebook-downloader');
 const { pinterestdl } = require('imran-servar');
 const { threads } = require('shaon-media-downloader'); // Updated Threads downloader
@@ -71,6 +72,7 @@ const formatData = async (platform, data) => {
         source: platform,
       };
 
+
     case 'threads':
       console.log("Processing Threads data...");
       const threadsData = data.data;
@@ -81,6 +83,56 @@ const formatData = async (platform, data) => {
         sizes: ['Original Quality'],
         source: platform,
       };
+      case 'tiktok':
+        console.log("Processing TikTok data...");
+        return {
+          title: data.title || 'Untitled Video',
+          url: data.video?.[0] || '',
+          thumbnail: data.thumbnail || placeholderThumbnail,
+          sizes: ['Original Quality'],
+          audio: data.audio?.[0] || '',
+          source: platform,
+        };
+        case 'instagram':
+        console.log("Processing Instagram data...");
+        console.log("Instagram response data:", data);
+
+        if (!data || !data[0]?.url) {
+          console.error("Invalid Instagram data:", data);
+          throw new Error("Instagram data is missing or invalid");
+        }
+
+  return {
+    title: data[0]?.wm || 'Untitled Video',
+    url: data[0]?.url, // Access the correct field for the video URL
+    thumbnail: data[0]?.thumbnail || 'https://via.placeholder.com/300x150', // Use placeholder if missing
+    sizes: ['Original Quality'],
+    source: platform,
+  };
+
+          case 'twitter':
+            console.log("Processing Twitter data...");
+            const twitterData = data?.data; // Extract the data object from the response
+            const videoUrlTwitter = twitterData?.high || twitterData?.low || ''; // Prefer 'high', fallback to 'low'
+          
+            console.log("Twitter video URL:", videoUrlTwitter);
+          
+            return {
+              title: twitterData?.title || 'Untitled Video',
+              url: videoUrlTwitter,
+              thumbnail: placeholderThumbnail, // Use placeholder as the response doesn't provide a thumbnail
+              sizes: twitterData?.high && twitterData?.low ? ['High Quality', 'Low Quality'] : ['Original Quality'],
+              source: platform,
+            };
+        case 'facebook':
+          console.log("Processing Facebook data...");
+          return {
+            title: data.title || 'Untitled Video',
+            url: data.result.links?.HD || data.result.links?.SD || '',
+            thumbnail: data.result.thumbnail || placeholderThumbnail,
+            sizes: ['Original Quality'],
+            source: platform,
+          };
 
     case 'pinterest':
       console.log("Processing Pinterest data...");
@@ -137,12 +189,12 @@ exports.downloadMedia = async (req, res) => {
         break;
       case 'twitter':
         console.log("Fetching Twitter data...");
-        data = await twitter(url);
+        data = await alldown(url);
         break;
       case 'youtube':
         console.log("Fetching YouTube data...");
         try {
-          data = await alldown(url);
+          data = await alldown(url); // Using alldown for YouTube
           console.log("YouTube data fetched successfully:", data);
         } catch (error) {
           console.error("Error fetching YouTube data:", error);
