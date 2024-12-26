@@ -1,5 +1,5 @@
 const { alldown } = require('shaon-media-downloader'); // Updated YouTube downloader
-const {  ttdl, twitter } = require('btch-downloader');
+const { ttdl, twitter } = require('btch-downloader');
 const { igdl } = require('btch-downloader');
 const { facebook } = require('@mrnima/facebook-downloader');
 const { pinterestdl } = require('imran-servar');
@@ -8,30 +8,29 @@ const { BitlyClient } = require('bitly');
 const tinyurl = require('tinyurl'); // TinyURL package
 const config = require('../Config/config'); // Import the config file
 
-// Initialize Bitly client with your access token from config
+// Initialize Bitly client with your access token
 const bitly = new BitlyClient(config.BITLY_ACCESS_TOKEN);
 
 // Function to shorten URL with fallback
 const shortenUrl = async (url) => {
   if (!url) {
-    console.error("Invalid or missing URL, skipping shortening:", url);
+    console.warn("Shorten URL: No URL provided.");
     return url;
   }
 
   try {
-    console.log("Attempting to shorten URL with Bitly:", url);
+    console.info("Shorten URL: Attempting to shorten with Bitly.");
     const response = await bitly.shorten(url);
-    console.log("Bitly shortened URL:", response.link);
+    console.info("Shorten URL: Successfully shortened with Bitly.");
     return response.link; // Return shortened URL if successful
   } catch (error) {
-    console.error("Bitly shortening failed:", error.message);
+    console.warn("Shorten URL: Bitly failed, falling back to TinyURL.");
     try {
-      console.log("Attempting to shorten URL with TinyURL:", url);
       const tinyResponse = await tinyurl.shorten(url);
-      console.log("TinyURL shortened URL:", tinyResponse);
+      console.info("Shorten URL: Successfully shortened with TinyURL.");
       return tinyResponse; // Return shortened URL from TinyURL
-    } catch (error) {
-      console.error("TinyURL shortening failed:", error.message);
+    } catch (fallbackError) {
+      console.error("Shorten URL: Both shortening methods failed.");
       return url; // Fallback to the original URL if all shortening attempts fail
     }
   }
@@ -39,7 +38,7 @@ const shortenUrl = async (url) => {
 
 // Function to identify platform
 const identifyPlatform = (url) => {
-  console.log("Identifying platform for URL:", url);
+  console.info("Platform Identification: Determining the platform for the given URL.");
   if (url.includes('instagram.com')) return 'instagram';
   if (url.includes('tiktok.com')) return 'tiktok';
   if (url.includes('facebook.com') || url.includes('fb.watch')) return 'facebook';
@@ -47,23 +46,22 @@ const identifyPlatform = (url) => {
   if (url.includes('youtube.com') || url.includes('youtu.be')) return 'youtube';
   if (url.includes('pinterest.com') || url.includes('pin.it')) return 'pinterest';
   if (url.includes('threads.net')) return 'threads';
+  console.warn("Platform Identification: Unable to identify the platform.");
   return null;
 };
 
 // Standardize the response for different platforms
 const formatData = async (platform, data) => {
+  console.info(`Data Formatting: Formatting data for platform '${platform}'.`);
   const placeholderThumbnail = 'https://via.placeholder.com/300x150';
 
-  console.log(`Formatting data for platform: ${platform}`);
-
   switch (platform) {
-    case 'youtube':
-      console.log("Processing YouTube data...");
+    case 'youtube': {
       const youtubeData = data.data;
       if (!youtubeData || (!youtubeData.low && !youtubeData.high)) {
-        throw new Error("YouTube data is incomplete or improperly formatted");
+        throw new Error("Data Formatting: YouTube data is incomplete or improperly formatted.");
       }
-
+      console.info("Data Formatting: YouTube data formatted successfully.");
       return {
         title: youtubeData.title || 'Untitled Video',
         url: youtubeData.low || youtubeData.high || '',
@@ -71,71 +69,49 @@ const formatData = async (platform, data) => {
         sizes: ['Low Quality', 'High Quality'],
         source: platform,
       };
+    }
 
-
-    case 'threads':
-      console.log("Processing Threads data...");
-      const threadsData = data.data;
+    case 'instagram': {
+      if (!data || !data[0]?.url) {
+        console.error("Data Formatting: Instagram data is missing or invalid.");
+        throw new Error("Instagram data is missing or invalid.");
+      }
+      console.info("Data Formatting: Instagram data formatted successfully.");
       return {
-        title: threadsData?.title || 'Untitled Post',
-        url: threadsData?.video || '',
-        thumbnail: placeholderThumbnail, // Threads typically don't have thumbnails
+        title: data[0]?.wm || 'Untitled Media',
+        url: data[0]?.url,
+        thumbnail: data[0]?.thumbnail || placeholderThumbnail,
         sizes: ['Original Quality'],
         source: platform,
       };
-      case 'tiktok':
-        console.log("Processing TikTok data...");
-        return {
-          title: data.title || 'Untitled Video',
-          url: data.video?.[0] || '',
-          thumbnail: data.thumbnail || placeholderThumbnail,
-          sizes: ['Original Quality'],
-          audio: data.audio?.[0] || '',
-          source: platform,
-        };
-        case 'instagram':
-        console.log("Processing Instagram data...");
-        console.log("Instagram response data:", data);
+    }
 
-        if (!data || !data[0]?.url) {
-          console.error("Invalid Instagram data:", data);
-          throw new Error("Instagram data is missing or invalid");
-        }
+    case 'twitter': {
+      const twitterData = data?.data;
+      const videoUrl = twitterData?.high || twitterData?.low || '';
+      console.info("Data Formatting: Twitter data formatted successfully.");
+      return {
+        title: twitterData?.title || 'Untitled Video',
+        url: videoUrl,
+        thumbnail: placeholderThumbnail,
+        sizes: twitterData?.high && twitterData?.low ? ['High Quality', 'Low Quality'] : ['Original Quality'],
+        source: platform,
+      };
+    }
 
-  return {
-    title: data[0]?.wm || 'Untitled Video',
-    url: data[0]?.url, // Access the correct field for the video URL
-    thumbnail: data[0]?.thumbnail || 'https://via.placeholder.com/300x150', // Use placeholder if missing
-    sizes: ['Original Quality'],
-    source: platform,
-  };
+    case 'facebook': {
+      console.info("Data Formatting: Facebook data formatted successfully.");
+      return {
+        title: data.title || 'Untitled Video',
+        url: data.result.links?.HD || data.result.links?.SD || '',
+        thumbnail: data.result.thumbnail || placeholderThumbnail,
+        sizes: ['Original Quality'],
+        source: platform,
+      };
+    }
 
-          case 'twitter':
-            console.log("Processing Twitter data...");
-            const twitterData = data?.data; // Extract the data object from the response
-            const videoUrlTwitter = twitterData?.high || twitterData?.low || ''; // Prefer 'high', fallback to 'low'
-          
-            console.log("Twitter video URL:", videoUrlTwitter);
-          
-            return {
-              title: twitterData?.title || 'Untitled Video',
-              url: videoUrlTwitter,
-              thumbnail: placeholderThumbnail, // Use placeholder as the response doesn't provide a thumbnail
-              sizes: twitterData?.high && twitterData?.low ? ['High Quality', 'Low Quality'] : ['Original Quality'],
-              source: platform,
-            };
-        case 'facebook':
-          console.log("Processing Facebook data...");
-          return {
-            title: data.title || 'Untitled Video',
-            url: data.result.links?.HD || data.result.links?.SD || '',
-            thumbnail: data.result.thumbnail || placeholderThumbnail,
-            sizes: ['Original Quality'],
-            source: platform,
-          };
-
-    case 'pinterest':
-      console.log("Processing Pinterest data...");
+    case 'pinterest': {
+      console.info("Data Formatting: Pinterest data formatted successfully.");
       return {
         title: data.imran?.title || 'Untitled Image',
         url: data.imran?.url || '',
@@ -143,9 +119,10 @@ const formatData = async (platform, data) => {
         sizes: ['Original Quality'],
         source: platform,
       };
+    }
 
     default:
-      console.log("Processing generic data...");
+      console.warn("Data Formatting: Generic formatting applied.");
       return {
         title: data.title || 'Untitled Media',
         url: data.url || '',
@@ -156,83 +133,59 @@ const formatData = async (platform, data) => {
   }
 };
 
+// Main function to handle media download
 exports.downloadMedia = async (req, res) => {
   const { url } = req.body;
 
   if (!url) {
+    console.warn("Download Media: No URL provided in the request.");
     return res.status(400).json({ error: 'No URL provided' });
   }
 
   const platform = identifyPlatform(url);
 
   if (!platform) {
+    console.warn("Download Media: Unsupported platform for the given URL.");
     return res.status(400).json({ error: 'Unsupported platform' });
   }
 
   try {
-    console.log(`Identified platform: ${platform} for URL: ${url}`);
+    console.info(`Download Media: Fetching data for platform '${platform}'.`);
     let data;
 
-    // Fetch data based on the identified platform
     switch (platform) {
       case 'instagram':
-        console.log("Fetching Instagram data...");
         data = await igdl(url);
         break;
       case 'tiktok':
-        console.log("Fetching TikTok data...");
         data = await ttdl(url);
         break;
       case 'facebook':
-        console.log("Fetching Facebook data...");
         data = await facebook(url);
         break;
       case 'twitter':
-        console.log("Fetching Twitter data...");
         data = await alldown(url);
         break;
       case 'youtube':
-        console.log("Fetching YouTube data...");
-        try {
-          data = await alldown(url); // Using alldown for YouTube
-          console.log("YouTube data fetched successfully:", data);
-        } catch (error) {
-          console.error("Error fetching YouTube data:", error);
-          return res.status(500).json({ error: 'Failed to fetch YouTube data' });
-        }
+        data = await alldown(url);
         break;
       case 'pinterest':
-        console.log("Fetching Pinterest data...");
         data = await pinterestdl(url);
         break;
       case 'threads':
-        console.log("Fetching Threads data...");
-        try {
-          data = await threads(url);
-          console.log("Threads data fetched successfully:", data);
-        } catch (error) {
-          console.error("Error fetching Threads data:", error.message);
-          return res.status(500).json({ error: 'Failed to fetch Threads data' });
-        }
+        data = await threads(url);
         break;
       default:
+        console.error("Download Media: Platform identification failed unexpectedly.");
         return res.status(500).json({ error: 'Platform identification failed' });
     }
 
-    // Check if data was successfully fetched
     if (!data) {
-      console.error("No data returned for platform:", platform);
-      return res.status(500).json({ error: 'Failed to fetch data for the platform' });
+      console.error("Download Media: No data returned for the platform.");
+      return res.status(404).json({ error: 'Data not found for the platform' });
     }
 
-    // Format the data
-    let formattedData;
-    try {
-      formattedData = await formatData(platform, data);
-    } catch (error) {
-      console.error("Error formatting data:", error.message);
-      return res.status(500).json({ error: error.message });
-    }
+    const formattedData = await formatData(platform, data);
 
     // Shorten URLs for all platforms except Threads
     if (platform !== 'threads') {
@@ -240,13 +193,15 @@ exports.downloadMedia = async (req, res) => {
       formattedData.thumbnail = await shortenUrl(formattedData.thumbnail);
     }
 
-    // Send the response
-    res.json({
+    console.info("Download Media: Media successfully downloaded and formatted.");
+
+    // 200 OK: Successful response
+    res.status(200).json({
       success: true,
       data: formattedData,
     });
   } catch (error) {
-    console.error('Error downloading media:', error);
+    console.error(`Download Media: Error occurred - ${error.message}`);
     res.status(500).json({ error: 'Failed to download media' });
   }
 };
