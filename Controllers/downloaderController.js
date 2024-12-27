@@ -99,8 +99,8 @@ const formatData = async (platform, data) => {
       };
     }
 
-    case 'facebook': {
-      console.info("Data Formatting: Facebook data formatted successfully.");
+    case 'facebook':
+      console.log("Processing Facebook data...");
       return {
         title: data.title || 'Untitled Video',
         url: data.result.links?.HD || data.result.links?.SD || '',
@@ -108,7 +108,6 @@ const formatData = async (platform, data) => {
         sizes: ['Original Quality'],
         source: platform,
       };
-    }
 
     case 'pinterest': {
       console.info("Data Formatting: Pinterest data formatted successfully.");
@@ -120,6 +119,26 @@ const formatData = async (platform, data) => {
         source: platform,
       };
     }
+    case 'tiktok':
+      console.log("Processing TikTok data...");
+      return {
+        title: data.title || 'Untitled Video',
+        url: data.video?.[0] || '',
+        thumbnail: data.thumbnail || placeholderThumbnail,
+        sizes: ['Original Quality'],
+        audio: data.audio?.[0] || '',
+        source: platform,
+      };
+
+      case 'threads':
+        console.log("Processing Threads data...");
+        return {
+          title: data.title || 'Untitled Post',
+          url: data.data?.video || '',
+          thumbnail: data.thumbnail || placeholderThumbnail,
+          sizes: ['Original Quality'],
+          source: platform,
+        };
 
     default:
       console.warn("Data Formatting: Generic formatting applied.");
@@ -205,3 +224,4 @@ exports.downloadMedia = async (req, res) => {
     res.status(500).json({ error: 'Failed to download media' });
   }
 };
+

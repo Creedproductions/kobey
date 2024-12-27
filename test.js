@@ -1,11 +1,11 @@
-const { ndown } = require('shaon-media-downloader');
+const { facebook } = require('@mrnima/facebook-downloader')
 
 const fetchInstagramData = async () => {
   try {
-    const url = 'https://www.instagram.com/p/ByxKbUSnubS/?utm_source=ig_web_copy_link';
+   const url = 'https://www.facebook.com/share/v/1AQRQzYXTi/?mibextid=nvWvQA'
 
     // Fetch data using igdl
-    const data = await ndown(url);
+    const data = await facebook(url);
 
     // Log the JSON response
     console.log('Instagram Data:', data);
