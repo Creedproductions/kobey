@@ -18,7 +18,8 @@ module.exports = {
 
   // Bitly Configuration
   BITLY_ACCESS_TOKEN: process.env.BITLY_ACCESS_TOKEN,  // Add the Bitly access token from .env
-  //Tiny url configurations
+
+  // Tiny URL configurations
   TINY_URL_API: process.env.TINY_URL_API,
 
   // Optional: Configure logging settings (to log into a file or use an external service)
@@ -32,4 +33,9 @@ module.exports = {
   DATABASE: {
     URI: process.env.DATABASE_URI || 'mongodb://localhost:27017/my-downloader-app',
   },
+
+  // Add NeonDB configuration
+  NEONDB: {
+    CONNECTION_STRING: process.env.DATABASE_URL,  // NeonDB connection string from .env
+  }
 };
