@@ -1,36 +1,49 @@
-// Import necessary modules
 const { Client } = require('pg');
-const fetch = require('node-fetch'); // Correct way to import node-fetch in CommonJS
-require('dotenv').config(); // Load environment variables
-const config = require('../Config/config');  // Import the config
+const fetch = require('node-fetch');
+require('dotenv').config();
+const config = require('../Config/config');
 
 // Set up the connection to NeonDB
 const client = new Client({
-  connectionString: config.NEONDB.CONNECTION_STRING,  // Access from the config
-  ssl: {
-    rejectUnauthorized: false,
-  },
+  connectionString: config.NEONDB.CONNECTION_STRING,
+  ssl: { rejectUnauthorized: false },
 });
 
-client.connect();
+client.connect()
+  .then(() => console.log("Connected to the database successfully!"))
+  .catch(err => {
+    console.error("Failed to connect to the database:", err);
+    setTimeout(connectToDatabase, 5000); // Retry after 5 seconds
+  });
+
+// Reconnect function
+function connectToDatabase() {
+  client.connect()
+    .then(() => console.log("Reconnected to the database"))
+    .catch(err => {
+      console.error("Failed to reconnect:", err);
+      setTimeout(connectToDatabase, 5000); // Retry after 5 seconds
+    });
+}
+
 
 // Store the push token in NeonDB
 module.exports.storeToken = async (req, res) => {
   const { token } = req.body;  // Get the token from the request body
 
   try {
-    // Insert the token into the database, if it does not already exist
+    // Insert the token into the database if it does not already exist
     const result = await client.query(
       'INSERT INTO push_tokens (token) VALUES ($1) ON CONFLICT (token) DO NOTHING RETURNING id',
       [token]
     );
 
-    // Check if the token was successfully stored
     if (result.rowCount > 0) {
       console.log('Push token stored:', token);
       res.status(200).send('Token stored successfully');
     } else {
-      res.status(200).send('Token already exists');
+      // If the token already exists, you can return a 200 status to indicate no changes
+      res.status(200).send('Token already exists, no changes made');
     }
   } catch (error) {
     console.error('Error storing token:', error);
@@ -94,9 +107,11 @@ module.exports.sendNotification = async (req, res) => {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify(message),
-        
+
       });
+
   
+
       const notificationResult = await response.json();
       console.log('Notification sent:', notificationResult);
       res.status(200).send('Notification sent');

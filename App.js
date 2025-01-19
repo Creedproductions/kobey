@@ -36,7 +36,7 @@ const client = new Client({
 
 client.connect()
   .then(() => {
-    console.log("Connected to the database successfully!");  // Log success message when connected
+    // console.log("Connected to the database successfully!");  // Log success message when connected
   })
   .catch(err => {
     console.error("Error connecting to the database:", err);  // Log an error message if connection fails
