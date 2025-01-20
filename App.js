@@ -14,10 +14,9 @@ app.use(express.json());
 
 // Use CORS middleware to allow requests from specific origins
 const corsOptions = {
-  origin: config.CORS_ORIGINS.split(','),  // Allow multiple origins from the config
-  methods: ['GET', 'POST', 'OPTIONS'],  // Specify allowed methods
-  allowedHeaders: ['Content-Type', 'Authorization'], // Add any headers you want to allow
-  credentials: true // If you need to support cookies or credentials
+  origin: '*',  // Adjust this to your app's domain
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
 };
 
 app.use(cors(corsOptions));

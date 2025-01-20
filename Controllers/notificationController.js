@@ -23,6 +23,7 @@ async function executeQuery(query, params) {
     const result = await client.query(query, params); // Execute the query
     return result; // Return the result
   } catch (error) {
+    
     console.error('Query error:', error); // Log query errors
     throw error; // Rethrow the error to be handled by the caller
   } finally {
