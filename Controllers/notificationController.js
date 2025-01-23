@@ -222,6 +222,7 @@ cron.schedule('* * * * *', async () => {
       }
     } else {
       console.log('No notifications to send at this time');
+      
     }
   } catch (error) {
     console.error('Error sending scheduled notifications:', error);

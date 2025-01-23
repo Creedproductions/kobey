@@ -7,6 +7,8 @@ const { threads } = require('shaon-media-downloader'); // Updated Threads downlo
 const { BitlyClient } = require('bitly');
 const tinyurl = require('tinyurl'); // TinyURL package
 const config = require('../Config/config'); // Import the config file
+const fs = require('fs'); // File system module to save files locally
+const axios = require('axios'); // Axios for HTTP requests
 
 // Initialize Bitly client with your access token
 const bitly = new BitlyClient(config.BITLY_ACCESS_TOKEN);
@@ -152,7 +154,29 @@ const formatData = async (platform, data) => {
   }
 };
 
+// Function to download large YouTube videos with streaming
+const downloadLargeVideo = async (videoUrl, filename) => {
+  const writer = fs.createWriteStream(`./downloads/${filename}`);
 
+  try {
+    const response = await axios({
+      method: 'get',
+      url: videoUrl,
+      responseType: 'stream',
+      timeout: 0, // No timeout for large downloads
+    });
+
+    response.data.pipe(writer);
+
+    return new Promise((resolve, reject) => {
+      writer.on('finish', () => resolve('Download completed'));
+      writer.on('error', reject);
+    });
+  } catch (error) {
+    console.error("Error downloading large video:", error);
+    throw new Error("Failed to download the video");
+  }
+};
 
 // Main function to handle media download
 exports.downloadMedia = async (req, res) => {
@@ -216,6 +240,11 @@ exports.downloadMedia = async (req, res) => {
 
     console.info("Download Media: Media successfully downloaded and formatted.");
 
+    // Download the large YouTube video
+    if (platform === 'youtube') {
+      await downloadLargeVideo(formattedData.url, 'large_video.mp4');
+    }
+
     // 200 OK: Successful response
     res.status(200).json({
       success: true,
@@ -226,4 +255,3 @@ exports.downloadMedia = async (req, res) => {
     res.status(500).json({ error: 'Failed to download media' });
   }
 };
-
