@@ -10,5 +10,13 @@ router.post('/store-token', notificationController.storeToken);
 // Route to send a push notification
 router.post('/send-notification', notificationController.sendNotification);
 
+// schedule a notification
+router.post('/schedule-notification', notificationController.storeScheduledNotification);
+
+// Route to get all scheduled notifications
+router.get('/scheduled-notifications', notificationController.getScheduledNotifications);
+
+
+
 module.exports = router;
 

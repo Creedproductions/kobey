@@ -5,7 +5,9 @@ const config = require('./Config/config');  // Import config file
 const downloaderRoutes = require('./Routes/downloaderRoutes'); // Import the routes for downloading media
 const notificationRoutes = require('./Routes/notificationRoutes'); // Import the new notification routes
 const adminRoutes = require('./Routes/adminRoutes'); // Import the new admin routes
-const userRoutes = require('./Routes/userRoutes'); // Import the new user routes
+const userRoutes = require('./Routes/userRoutes'); // Import the new user 
+
+
 
 const app = express();
 
@@ -14,7 +16,7 @@ app.use(express.json());
 
 // Use CORS middleware to allow requests from specific origins
 const corsOptions = {
-  origin: '*',  // Adjust this to your app's domain
+  origin: ['http://localhost:5173'], // Add more origins if needed
   methods: ['GET', 'POST', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
 };
@@ -26,6 +28,7 @@ app.use('/api', downloaderRoutes);
 
 // Use routes for handling push notifications
 app.use('/api/notifications', notificationRoutes);  // Add the new notifications route
+
 
 // Use routes for admin operations
 app.use('/api/admin', adminRoutes);  // Add the new admin routes

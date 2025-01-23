@@ -3,6 +3,7 @@ require('dotenv').config();  // Load environment variables from .env file
 module.exports = {
   // Port configuration (use environment variable or default to 3000)
   PORT: process.env.PORT || 3000,
+  
 
   // Cache expiration time (in milliseconds, default is 60 seconds)
   CACHE_EXPIRATION_TIME: parseInt(process.env.CACHE_EXPIRATION_TIME) || 60000,

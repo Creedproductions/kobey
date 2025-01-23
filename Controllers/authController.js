@@ -157,3 +157,14 @@ module.exports.resetPassword = async (req, res) => {
     res.status(500).send('Failed to reset password');
   }
 };
+
+module.exports.logout = async (req, res) => {
+  try {
+    const userEmail = req.user ? req.user.email : "unknown user"; // Fallback if req.user is undefined
+    console.log('User logged out:', userEmail); // Log user email if available
+    res.status(200).send('Logout successful');
+  } catch (error) {
+    console.error('Error during logout:', error);
+    res.status(500).send('Logout failed');
+  }
+};
