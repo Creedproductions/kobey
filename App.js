@@ -16,7 +16,7 @@ app.use(express.json());
 
 // Use CORS middleware to allow requests from specific origins
 const corsOptions = {
-  origin: ['https://savedownloader.vercel.app','https://savedownloaderweb.vercel.app'],
+  origin: ['https://savedownloader.vercel.app','https://savedownloaderweb.vercel.app','http://localhost:5173'],
   methods: ['GET', 'POST', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
 };
