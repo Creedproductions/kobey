@@ -16,7 +16,7 @@ app.use(express.json());
 
 // Use CORS middleware to allow requests from specific origins
 const corsOptions = {
-  origin: ['https://savedownloader.vercel.app','http://localhost:5173'], // Add more origins if needed
+  origin: ['https://savedownloader.vercel.app','https://savedownloaderweb.vercel.app'],
   methods: ['GET', 'POST', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
 };
@@ -35,7 +35,7 @@ app.use('/api/admin', adminRoutes);  // Add the new admin routes
 
 // Use routes for user operations
 
-app.use('/api/user', userRoutes);  // Add the new user routes
+app.use('/api/user', userRoutes); 
 
 // Set up the connection to NeonDB
 const client = new Client({
