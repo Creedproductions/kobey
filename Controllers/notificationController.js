@@ -1,41 +1,38 @@
-// Import necessary modules
-const { Pool } = require('pg'); // Pool is used to manage connections efficiently
+const { Pool } = require('pg'); 
 const fetch = require('node-fetch');
-const cron = require('node-cron'); // Import the node-cron package
-require('dotenv').config(); // Load environment variables
-const config = require('../Config/config'); // Import config for your database connection string
+const cron = require('node-cron'); 
+require('dotenv').config();
+const config = require('../Config/config'); 
 
-// Set up the connection to NeonDB using Pool
 const pool = new Pool({
-  connectionString: config.NEONDB.CONNECTION_STRING,  // Database connection string
+  connectionString: config.NEONDB.CONNECTION_STRING,  
   ssl: {
-    rejectUnauthorized: false,  // Adjust based on your SSL settings
+    rejectUnauthorized: false,  
   },
-  max: 20,  // Maximum number of connections in the pool (adjust based on your needs)
-  idleTimeoutMillis: 30000, // Time to wait before closing idle connections (in ms)
-  connectionTimeoutMillis: 2300000, // Time to wait before failing to connect (in ms)
+  max: 20, 
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 2300000, 
 });
 
 // Function to execute a query using the pool
 async function executeQuery(query, params) {
-  const client = await pool.connect();  // Get a connection from the pool
+  const client = await pool.connect(); 
   try {
-    const result = await client.query(query, params); // Execute the query
-    return result; // Return the result
+    const result = await client.query(query, params);
+    return result; 
   } catch (error) {
-    console.error('Query error:', error); // Log query errors
-    throw error; // Rethrow the error to be handled by the caller
+    console.error('Query error:', error); 
+    throw error; 
   } finally {
-    client.release(); // Release the connection back to the pool
+    client.release();
   }
 }
 
 // Store the push token in NeonDB
 module.exports.storeToken = async (req, res) => {
-  const { token } = req.body;  // Get the token from the request body
+  const { token } = req.body;  
 
   try {
-    // Insert the token into the database if it does not already exist
     const result = await executeQuery(
       'INSERT INTO push_tokens (token) VALUES ($1) ON CONFLICT (token) DO NOTHING RETURNING id',
       [token]
@@ -45,7 +42,6 @@ module.exports.storeToken = async (req, res) => {
       console.log('Push token stored:', token);
       res.status(200).send('Token stored successfully');
     } else {
-      // If the token already exists, you can return a 200 status to indicate no changes
       res.status(200).send('Token already exists, no changes made');
     }
   } catch (error) {
@@ -172,7 +168,7 @@ module.exports.getScheduledNotifications = async (req, res) => {
     );
 
     if (result.rows.length > 0) {
-      res.status(200).json(result.rows); // Send the notifications to the client
+      res.status(200).json(result.rows); 
     } else {
       res.status(404).send('No scheduled notifications found');
     }

@@ -1,5 +1,5 @@
 const { Pool } = require('pg');
-require('dotenv').config(); // Load environment variables
+require('dotenv').config(); 
 
 // Set up the connection pool to NeonDB
 const pool = new Pool({
@@ -9,7 +9,7 @@ const pool = new Pool({
 
 // Fetch user details by ID
 module.exports.getUserDetails = async (req, res) => {
-  const userId = req.userId;  // Assuming the user ID is stored in the JWT token
+  const userId = req.userId;  
 
   try {
     const result = await pool.query('SELECT id, username, created_at FROM users WHERE id = $1', [userId]);
@@ -27,7 +27,7 @@ module.exports.getUserDetails = async (req, res) => {
 
 // Update user details
 module.exports.updateUserDetails = async (req, res) => {
-  const userId = req.userId;  // Assuming the user ID is stored in the JWT token
+  const userId = req.userId;  
   const { username, password } = req.body;
 
   try {

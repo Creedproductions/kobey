@@ -1,16 +1,15 @@
-const { alldown } = require('shaon-media-downloader'); // Updated YouTube downloader
+const { alldown } = require('shaon-media-downloader'); 
 const { ttdl, twitter } = require('btch-downloader');
 const { igdl } = require('btch-downloader');
 const { facebook } = require('@mrnima/facebook-downloader');
 const { pinterestdl } = require('imran-servar');
-const { threads } = require('shaon-media-downloader'); // Updated Threads downloader
+const { threads } = require('shaon-media-downloader'); 
 const { BitlyClient } = require('bitly');
-const tinyurl = require('tinyurl'); // TinyURL package
-const config = require('../Config/config'); // Import the config file
-const fs = require('fs'); // File system module to save files locally
-const axios = require('axios'); // Axios for HTTP requests
+const tinyurl = require('tinyurl'); 
+const config = require('../Config/config'); 
+const fs = require('fs'); 
+const axios = require('axios'); 
 
-// Initialize Bitly client with your access token
 const bitly = new BitlyClient(config.BITLY_ACCESS_TOKEN);
 
 // Function to shorten URL with fallback
@@ -24,16 +23,16 @@ const shortenUrl = async (url) => {
     console.info("Shorten URL: Attempting to shorten with Bitly.");
     const response = await bitly.shorten(url);
     console.info("Shorten URL: Successfully shortened with Bitly.");
-    return response.link; // Return shortened URL if successful
+    return response.link; 
   } catch (error) {
     console.warn("Shorten URL: Bitly failed, falling back to TinyURL.");
     try {
       const tinyResponse = await tinyurl.shorten(url);
       console.info("Shorten URL: Successfully shortened with TinyURL.");
-      return tinyResponse; // Return shortened URL from TinyURL
+      return tinyResponse; 
     } catch (fallbackError) {
       console.error("Shorten URL: Both shortening methods failed.");
-      return url; // Fallback to the original URL if all shortening attempts fail
+      return url; 
     }
   }
 };
@@ -163,7 +162,7 @@ const downloadLargeVideo = async (videoUrl, filename) => {
       method: 'get',
       url: videoUrl,
       responseType: 'stream',
-      timeout: 0, // No timeout for large downloads
+      timeout: 0, 
     });
 
     response.data.pipe(writer);

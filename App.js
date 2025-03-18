@@ -1,12 +1,11 @@
 const express = require('express');
 const cors = require('cors');
 const { Client } = require('pg');
-const config = require('./Config/config');  // Import config file
-const downloaderRoutes = require('./Routes/downloaderRoutes'); // Import the routes for downloading media
-const notificationRoutes = require('./Routes/notificationRoutes'); // Import the new notification routes
-const adminRoutes = require('./Routes/adminRoutes'); // Import the new admin routes
-const userRoutes = require('./Routes/userRoutes'); // Import the new user 
-
+const config = require('./Config/config');  
+const downloaderRoutes = require('./Routes/downloaderRoutes'); 
+const notificationRoutes = require('./Routes/notificationRoutes'); 
+const adminRoutes = require('./Routes/adminRoutes');
+const userRoutes = require('./Routes/userRoutes'); 
 
 
 const app = express();
@@ -27,11 +26,11 @@ app.use(cors(corsOptions));
 app.use('/api', downloaderRoutes);
 
 // Use routes for handling push notifications
-app.use('/api/notifications', notificationRoutes);  // Add the new notifications route
+app.use('/api/notifications', notificationRoutes); 
 
 
 // Use routes for admin operations
-app.use('/api/admin', adminRoutes);  // Add the new admin routes
+app.use('/api/admin', adminRoutes);  
 
 // Use routes for user operations
 
@@ -47,10 +46,10 @@ const client = new Client({
 
 client.connect()
   .then(() => {
-    console.log("Connected to the database successfully!");  // Log success message when connected
+    console.log("Connected to the database successfully!"); 
   })
   .catch(err => {
-    console.error("Error connecting to the database:", err);  // Log an error message if connection fails
+    console.error("Error connecting to the database:", err);  
   });
 
 // Start the server using the port from the config

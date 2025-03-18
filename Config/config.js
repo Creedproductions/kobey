@@ -9,7 +9,7 @@ module.exports = {
   CACHE_EXPIRATION_TIME: parseInt(process.env.CACHE_EXPIRATION_TIME) || 60000,
 
   // CORS Configuration (whitelist origins)
-  CORS_ORIGINS: process.env.CORS_ORIGINS || 'http://127.0.0.1:5500,https://savemock2.vercel.app', // Multiple origins allowed
+  CORS_ORIGINS: process.env.CORS_ORIGINS || 'http://127.0.0.1:5500,https://savemock2.vercel.app', 
 
   // API keys and third-party service configurations
   API_KEYS: {
@@ -18,15 +18,15 @@ module.exports = {
   },
 
   // Bitly Configuration
-  BITLY_ACCESS_TOKEN: process.env.BITLY_ACCESS_TOKEN,  // Add the Bitly access token from .env
+  BITLY_ACCESS_TOKEN: process.env.BITLY_ACCESS_TOKEN, 
 
   // Tiny URL configurations
   TINY_URL_API: process.env.TINY_URL_API,
 
   // Optional: Configure logging settings (to log into a file or use an external service)
   LOGGING: {
-    LEVEL: process.env.LOGGING_LEVEL || 'debug',  // You can set this to 'info', 'warn', 'error', etc.
-    ENABLE_FILE_LOGGING: process.env.ENABLE_FILE_LOGGING === 'true', // Whether to log to a file
+    LEVEL: process.env.LOGGING_LEVEL || 'debug', 
+    ENABLE_FILE_LOGGING: process.env.ENABLE_FILE_LOGGING === 'true',
     LOG_FILE_PATH: process.env.LOG_FILE_PATH || './logs/app.log',
   },
 
@@ -37,6 +37,6 @@ module.exports = {
 
   // Add NeonDB configuration
   NEONDB: {
-    CONNECTION_STRING: process.env.DATABASE_URL,  // NeonDB connection string from .env
+    CONNECTION_STRING: process.env.DATABASE_URL, 
   }
 };
