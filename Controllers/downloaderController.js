@@ -1,13 +1,17 @@
 const { alldown } = require('shaon-media-downloader'); 
 const { ttdl, twitter } = require('btch-downloader');
 const { igdl } = require('btch-downloader');
-const { facebook } = require('@mrnima/facebook-downloader');
-const { pinterestdl } = require('imran-servar');
+// const { facebook } = require('@mrnima/facebook-downloader');
+const { ytdown } = require("nayan-videos-downloader");
+const { ndown } = require("nayan-videos-downloader");
+const { twitterdown } = require("nayan-videos-downloader");
+// const {pintarest} = require("nayan-videos-downloader");
+
+const { pinterest } = require('ironman-api');
 const { threads } = require('shaon-media-downloader'); 
 const { BitlyClient } = require('bitly');
 const tinyurl = require('tinyurl'); 
 const config = require('../Config/config'); 
-const fs = require('fs'); 
 const axios = require('axios'); 
 
 const bitly = new BitlyClient(config.BITLY_ACCESS_TOKEN);
@@ -59,14 +63,14 @@ const formatData = async (platform, data) => {
   switch (platform) {
     case 'youtube': {
       const youtubeData = data.data;
-      if (!youtubeData || (!youtubeData.low && !youtubeData.high)) {
-        throw new Error("Data Formatting: YouTube data is incomplete or improperly formatted.");
+      if (!youtubeData || !youtubeData.video) {
+        throw new Error("Data Formatting: YouTube video data is incomplete or improperly formatted.");
       }
       console.info("Data Formatting: YouTube data formatted successfully.");
       return {
         title: youtubeData.title || 'Untitled Video',
-        url: youtubeData.low || youtubeData.high || '',
-        thumbnail: youtubeData.thumbnail || placeholderThumbnail,
+        url: youtubeData.video_hd || '',
+        thumbnail: youtubeData.thumb || placeholderThumbnail,
         sizes: ['Low Quality', 'High Quality'],
         source: platform,
       };
@@ -88,27 +92,46 @@ const formatData = async (platform, data) => {
     }
 
     case 'twitter': {
-      const twitterData = data?.data;
-      const videoUrl = twitterData?.high || twitterData?.low || '';
+      const twitterData = data.data;
+      if (!twitterData || !twitterData.HD || !twitterData.SD) {
+        throw new Error("Data Formatting: Twitter video data is incomplete or improperly formatted.");
+      }
       console.info("Data Formatting: Twitter data formatted successfully.");
       return {
-        title: twitterData?.title || 'Untitled Video',
-        url: videoUrl,
-        thumbnail: placeholderThumbnail,
-        sizes: twitterData?.high && twitterData?.low ? ['High Quality', 'Low Quality'] : ['Original Quality'],
+        title: 'Untitled Video',  // No title provided in the given data
+        url: twitterData.HD || twitterData.SD || '',  // HD first, fall back to SD
+        thumbnail: twitterData.thumbnail || placeholderThumbnail,
+        sizes: twitterData.HD ? ['HD'] : ['SD'],
         source: platform,
       };
     }
+    
+    
+    
 
     case 'facebook':
-      console.log("Processing Facebook data...");
-      return {
-        title: data.title || 'Untitled Video',
-        url: data.result.links?.HD || data.result.links?.SD || '',
-        thumbnail: data.result.thumbnail || placeholderThumbnail,
-        sizes: ['Original Quality'],
-        source: platform,
-      };
+  console.log("Processing Facebook data...");
+
+  // Extract 720p or fallback to 360p
+  let fbUrl = '';
+  const fbData = data.data || [];
+
+  const hdVideo = fbData.find(video => video.resolution.includes('720p'));
+  const sdVideo = fbData.find(video => video.resolution.includes('360p'));
+
+  if (hdVideo) {
+    fbUrl = hdVideo.url;
+  } else if (sdVideo) {
+    fbUrl = sdVideo.url;
+  }
+
+  return {
+    title: data.title || 'Untitled Video',
+    url: fbUrl || '',
+    thumbnail: (hdVideo?.thumbnail || sdVideo?.thumbnail || placeholderThumbnail),
+    sizes: [hdVideo ? '720p' : '360p'],
+    source: platform,
+  };
 
     case 'pinterest': {
       console.info("Data Formatting: Pinterest data formatted successfully.");
@@ -120,6 +143,7 @@ const formatData = async (platform, data) => {
         source: platform,
       };
     }
+
     case 'tiktok':
       console.log("Processing TikTok data...");
       return {
@@ -131,15 +155,15 @@ const formatData = async (platform, data) => {
         source: platform,
       };
 
-      case 'threads':
-        console.log("Processing Threads data...");
-        return {
-          title: data.title || 'Untitled Post',
-          url: data.data?.video || '',
-          thumbnail: data.thumbnail || placeholderThumbnail,
-          sizes: ['Original Quality'],
-          source: platform,
-        };
+    case 'threads':
+      console.log("Processing Threads data...");
+      return {
+        title: data.title || 'Untitled Post',
+        url: data.data?.video || '',
+        thumbnail: data.thumbnail || placeholderThumbnail,
+        sizes: ['Original Quality'],
+        source: platform,
+      };
 
     default:
       console.warn("Data Formatting: Generic formatting applied.");
@@ -150,30 +174,6 @@ const formatData = async (platform, data) => {
         sizes: data.sizes?.length > 0 ? data.sizes : ['Original Quality'],
         source: platform,
       };
-  }
-};
-
-// Function to download large YouTube videos with streaming
-const downloadLargeVideo = async (videoUrl, filename) => {
-  const writer = fs.createWriteStream(`./downloads/${filename}`);
-
-  try {
-    const response = await axios({
-      method: 'get',
-      url: videoUrl,
-      responseType: 'stream',
-      timeout: 0, 
-    });
-
-    response.data.pipe(writer);
-
-    return new Promise((resolve, reject) => {
-      writer.on('finish', () => resolve('Download completed'));
-      writer.on('error', reject);
-    });
-  } catch (error) {
-    console.error("Error downloading large video:", error);
-    throw new Error("Failed to download the video");
   }
 };
 
@@ -205,16 +205,16 @@ exports.downloadMedia = async (req, res) => {
         data = await ttdl(url);
         break;
       case 'facebook':
-        data = await facebook(url);
+        data = await ndown(url);
         break;
       case 'twitter':
-        data = await alldown(url);
+        data = await twitterdown(url);
         break;
       case 'youtube':
-        data = await alldown(url);
+        data = await ytdown(url);
         break;
       case 'pinterest':
-        data = await pinterestdl(url);
+        data = await pinterest(url);
         break;
       case 'threads':
         data = await threads(url);
@@ -238,11 +238,6 @@ exports.downloadMedia = async (req, res) => {
     }
 
     console.info("Download Media: Media successfully downloaded and formatted.");
-
-    // Download the large YouTube video
-    if (platform === 'youtube') {
-      await downloadLargeVideo(formattedData.url, 'large_video.mp4');
-    }
 
     // 200 OK: Successful response
     res.status(200).json({
