@@ -1,11 +1,9 @@
-const { ytdown } = require("shaon-media-downloader");
+const { pinterest } = require('btch-downloader')
 
-(async () => {
-  try {
-    const url = 'https://youtu.be/aRSuyrZFu_Q?si=bsfzgeeGmRpsHqnF';
-    const data = await ytdown(url);
-    console.log("✅ YouTube media details:\n", data);
-  } catch (error) {
-    console.error("❌ YouTube Error:", error.message || error);
-  }
-})();
+const url = 'https://pin.it/4CVodSq'
+pinterest(url).then(data => console.log(data)).catch(err => console.error(err)); // JSON
+
+// Using a search query
+pinterest('Zhao Lusi')
+  .then(data => console.log(data))
+  .catch(err => console.error(err)); //JSON

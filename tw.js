@@ -1,10 +1,10 @@
-const { twitterdown } = require("nayan-videos-downloader");
+const btch = require("btch-downloader");
 
 (async () => {
   try {
-    const URL = await twitterdown("https://x.com/alema_harold/status/1913598917846979036");
-    console.log("✅ YouTube media details:\n", URL);
+    const data = await btch.social.pinterest("https://pin.it/4CVodSq");
+    console.log("✅ Pinterest media details:\n", data);
   } catch (error) {
-    console.error("❌ YouTube Error:", error.message || error);
+    console.error("❌ Pinterest Error:", error.message || error);
   }
 })();

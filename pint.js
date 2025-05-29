@@ -1,10 +1,14 @@
-const { pintarest } = require("nayan-videos-downloader");
+const { pinterestDownloader } = require("happy-dl");
 
-(async () => {
+async function fetchPinterestData() {
   try {
-    const URL = await pintarest("https://pin.it/gmumPgDKJl");
-    console.log("✅ pinterest details:\n", URL);
+    const result = await pinterestDownloader(
+      "https://in.pinterest.com/pin/37858453112938677/"
+    );
+    console.log("Fetched Pinterest media details:", result);
   } catch (error) {
-    console.error("❌ Facebook Error:", error.message || error);
+    console.error("Error fetching Pinterest media details:", error.message || error);
   }
-})();
+}
+
+fetchPinterestData();

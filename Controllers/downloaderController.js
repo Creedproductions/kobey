@@ -13,6 +13,7 @@ const { BitlyClient } = require('bitly');
 const tinyurl = require('tinyurl'); 
 const config = require('../Config/config'); 
 const axios = require('axios'); 
+const { pindl } = require('jer-api'); // Add this line
 
 const bitly = new BitlyClient(config.BITLY_ACCESS_TOKEN);
 
@@ -134,11 +135,12 @@ const formatData = async (platform, data) => {
   };
 
     case 'pinterest': {
-      console.info("Data Formatting: Pinterest data formatted successfully.");
+      // Support jer-api style response
+      let pinterestData = data?.data || data;
       return {
-        title: data.imran?.title || 'Untitled Image',
-        url: data.imran?.url || '',
-        thumbnail: data.imran?.url || placeholderThumbnail,
+        title: 'Pinterest Image',
+        url: pinterestData.result || pinterestData.url || '',
+        thumbnail: pinterestData.result || pinterestData.url || placeholderThumbnail,
         sizes: ['Original Quality'],
         source: platform,
       };
@@ -214,7 +216,7 @@ exports.downloadMedia = async (req, res) => {
         data = await ytdown(url);
         break;
       case 'pinterest':
-        data = await pinterest(url);
+        data = await pindl(url); // Use jer-api for Pinterest
         break;
       case 'threads':
         data = await threads(url);
