@@ -2,7 +2,7 @@ const { alldown } = require('shaon-media-downloader');
 const { ttdl, twitter } = require('btch-downloader');
 const { igdl } = require('btch-downloader');
 // const { facebook } = require('@mrnima/facebook-downloader');
-const { ytdown } = require("nayan-videos-downloader");
+const { ytdl, pindl } = require('jer-api'); // Use ytdl and pindl from jer-api
 const { ndown } = require("nayan-videos-downloader");
 const { twitterdown } = require("nayan-videos-downloader");
 // const {pintarest} = require("nayan-videos-downloader");
@@ -13,7 +13,7 @@ const { BitlyClient } = require('bitly');
 const tinyurl = require('tinyurl'); 
 const config = require('../Config/config'); 
 const axios = require('axios'); 
-const { pindl } = require('jer-api'); // Add this line
+// const { pindl } = require('jer-api'); // Remove this line as pindl is already imported
 
 const bitly = new BitlyClient(config.BITLY_ACCESS_TOKEN);
 
@@ -63,16 +63,16 @@ const formatData = async (platform, data) => {
 
   switch (platform) {
     case 'youtube': {
-      const youtubeData = data.data;
-      if (!youtubeData || !youtubeData.video) {
-        throw new Error("Data Formatting: YouTube video data is incomplete or improperly formatted.");
+      const ytData = data.data;
+      if (!ytData || !ytData.info) {
+        throw new Error("Data Formatting: YouTube data is incomplete or improperly formatted.");
       }
-      console.info("Data Formatting: YouTube data formatted successfully.");
       return {
-        title: youtubeData.title || 'Untitled Video',
-        url: youtubeData.video_hd || '',
-        thumbnail: youtubeData.thumb || placeholderThumbnail,
-        sizes: ['Low Quality', 'High Quality'],
+        title: ytData.info.title || 'Untitled Video',
+        url: ytData.mp4 || '',
+        thumbnail: ytData.info.thumbnail || placeholderThumbnail,
+        sizes: ['mp4', 'mp3'],
+        audio: ytData.mp3 || '',
         source: platform,
       };
     }
@@ -213,7 +213,7 @@ exports.downloadMedia = async (req, res) => {
         data = await twitterdown(url);
         break;
       case 'youtube':
-        data = await ytdown(url);
+        data = await ytdl(url); // Use jer-api for YouTube
         break;
       case 'pinterest':
         data = await pindl(url); // Use jer-api for Pinterest

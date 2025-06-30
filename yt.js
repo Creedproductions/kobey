@@ -1,8 +1,8 @@
-const { pindl } = require('jer-api');
+const { ytdl } = require('jer-api');
 
-const url = 'https://pin.it/4CVodSq';
+const url = 'https://youtu.be/aRSuyrZFu_Q?si=bsfzgeeGmRpsHqnF';
 
 (async () => {
-  let data = await pindl(url);
+  let data = await ytdl(url);
   console.log(data);
 })();
