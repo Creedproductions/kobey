@@ -2,7 +2,7 @@ const { alldown } = require('shaon-media-downloader');
 const { ttdl, twitter } = require('btch-downloader');
 const { igdl } = require('btch-downloader');
 // const { facebook } = require('@mrnima/facebook-downloader');
-const { ytdl, pindl } = require('jer-api'); // Use ytdl and pindl from jer-api
+const { ytdown } = require("nayan-videos-downloader");
 const { ndown } = require("nayan-videos-downloader");
 const { twitterdown } = require("nayan-videos-downloader");
 // const {pintarest} = require("nayan-videos-downloader");
@@ -13,7 +13,9 @@ const { BitlyClient } = require('bitly');
 const tinyurl = require('tinyurl'); 
 const config = require('../Config/config'); 
 const axios = require('axios'); 
-// const { pindl } = require('jer-api'); // Remove this line as pindl is already imported
+const { pindl } = require('jer-api'); 
+const threadsDownloader = require('../Services/threadsService');
+const fetchLinkedinData = require('../Services/linkedinService'); // Add this import
 
 const bitly = new BitlyClient(config.BITLY_ACCESS_TOKEN);
 
@@ -51,7 +53,8 @@ const identifyPlatform = (url) => {
   if (url.includes('x.com') || url.includes('twitter.com')) return 'twitter';
   if (url.includes('youtube.com') || url.includes('youtu.be')) return 'youtube';
   if (url.includes('pinterest.com') || url.includes('pin.it')) return 'pinterest';
-  if (url.includes('threads.net')) return 'threads';
+  if (url.includes('threads.net') || url.includes('threads.com')) return 'threads'; // <-- add threads.com support
+  if (url.includes('linkedin.com')) return 'linkedin'; // Add LinkedIn support
   console.warn("Platform Identification: Unable to identify the platform.");
   return null;
 };
@@ -63,16 +66,16 @@ const formatData = async (platform, data) => {
 
   switch (platform) {
     case 'youtube': {
-      const ytData = data.data;
-      if (!ytData || !ytData.info) {
-        throw new Error("Data Formatting: YouTube data is incomplete or improperly formatted.");
+      const youtubeData = data.data;
+      if (!youtubeData || !youtubeData.video) {
+        throw new Error("Data Formatting: YouTube video data is incomplete or improperly formatted.");
       }
+      console.info("Data Formatting: YouTube data formatted successfully.");
       return {
-        title: ytData.info.title || 'Untitled Video',
-        url: ytData.mp4 || '',
-        thumbnail: ytData.info.thumbnail || placeholderThumbnail,
-        sizes: ['mp4', 'mp3'],
-        audio: ytData.mp3 || '',
+        title: youtubeData.title || 'Untitled Video',
+        url: youtubeData.video_hd || '',
+        thumbnail: youtubeData.thumb || placeholderThumbnail,
+        sizes: ['Low Quality', 'High Quality'],
         source: platform,
       };
     }
@@ -107,9 +110,6 @@ const formatData = async (platform, data) => {
       };
     }
     
-    
-    
-
     case 'facebook':
   console.log("Processing Facebook data...");
 
@@ -160,9 +160,21 @@ const formatData = async (platform, data) => {
     case 'threads':
       console.log("Processing Threads data...");
       return {
-        title: data.title || 'Untitled Post',
-        url: data.data?.video || '',
-        thumbnail: data.thumbnail || placeholderThumbnail,
+        title: 'Threads Post',
+        url: data.download,
+        thumbnail: data.thumbnail,
+        sizes: [data.quality || 'Unknown'],
+        source: platform,
+      };
+
+    case 'linkedin':
+      console.log("Processing LinkedIn data...");
+      // Extract the first video URL from the LinkedIn API response
+      const videoUrl = Array.isArray(data?.data?.videos) && data.data.videos.length > 0 ? data.data.videos[0] : '';
+      return {
+        title: 'LinkedIn Video',
+        url: videoUrl,
+        thumbnail: videoUrl ? 'https://via.placeholder.com/300x150' : 'Error',
         sizes: ['Original Quality'],
         source: platform,
       };
@@ -182,6 +194,7 @@ const formatData = async (platform, data) => {
 // Main function to handle media download
 exports.downloadMedia = async (req, res) => {
   const { url } = req.body;
+  console.log("Received URL:", url); // Add this line
 
   if (!url) {
     console.warn("Download Media: No URL provided in the request.");
@@ -193,6 +206,12 @@ exports.downloadMedia = async (req, res) => {
   if (!platform) {
     console.warn("Download Media: Unsupported platform for the given URL.");
     return res.status(400).json({ error: 'Unsupported platform' });
+  }
+
+  // Normalize YouTube Shorts URLs
+  let processedUrl = url;
+  if (platform === 'youtube') {
+    processedUrl = normalizeYouTubeUrl(url);
   }
 
   try {
@@ -213,13 +232,16 @@ exports.downloadMedia = async (req, res) => {
         data = await twitterdown(url);
         break;
       case 'youtube':
-        data = await ytdl(url); // Use jer-api for YouTube
+        data = await ytdl(processedUrl);
         break;
       case 'pinterest':
-        data = await pindl(url); // Use jer-api for Pinterest
+        data = await pindl(url); 
         break;
       case 'threads':
-        data = await threads(url);
+        data = await threadsDownloader(url); // Use new service
+        break;
+      case 'linkedin':
+        data = await fetchLinkedinData(url);
         break;
       default:
         console.error("Download Media: Platform identification failed unexpectedly.");
@@ -241,7 +263,6 @@ exports.downloadMedia = async (req, res) => {
 
     console.info("Download Media: Media successfully downloaded and formatted.");
 
-    // 200 OK: Successful response
     res.status(200).json({
       success: true,
       data: formattedData,
@@ -251,3 +272,5 @@ exports.downloadMedia = async (req, res) => {
     res.status(500).json({ error: 'Failed to download media' });
   }
 };
+
+
