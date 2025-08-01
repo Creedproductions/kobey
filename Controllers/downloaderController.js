@@ -1,4 +1,3 @@
-const { alldown } = require('shaon-media-downloader'); 
 const { ttdl, twitter } = require('btch-downloader');
 const { igdl } = require('btch-downloader');
 // const { facebook } = require('@mrnima/facebook-downloader');
@@ -7,13 +6,12 @@ const { ndown } = require("nayan-videos-downloader");
 const { twitterdown } = require("nayan-videos-downloader");
 // const {pintarest} = require("nayan-videos-downloader");
 
-const { pinterest } = require('ironman-api');
-const { threads } = require('shaon-media-downloader'); 
+const { pinterest } = require('ironman-api'); 
 const { BitlyClient } = require('bitly');
 const tinyurl = require('tinyurl'); 
 const config = require('../Config/config'); 
 const axios = require('axios'); 
-const { pindl } = require('jer-api'); 
+const { ytdl, pindl } = require('jer-api'); 
 const threadsDownloader = require('../Services/threadsService');
 const fetchLinkedinData = require('../Services/linkedinService'); // Add this import
 
