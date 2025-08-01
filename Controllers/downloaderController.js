@@ -1,9 +1,6 @@
 const { ttdl, twitter } = require('btch-downloader');
 const { igdl } = require('btch-downloader');
 // const { facebook } = require('@mrnima/facebook-downloader');
-const { ytdown } = require("nayan-videos-downloader");
-const { ndown } = require("nayan-videos-downloader");
-const { twitterdown } = require("nayan-videos-downloader");
 // const {pintarest} = require("nayan-videos-downloader");
 
 const { pinterest } = require('ironman-api'); 
@@ -13,7 +10,7 @@ const config = require('../Config/config');
 const axios = require('axios'); 
 const { ytdl, pindl } = require('jer-api'); 
 const threadsDownloader = require('../Services/threadsService');
-const fetchLinkedinData = require('../Services/linkedinService'); // Add this import
+const fetchLinkedinData = require('../Services/linkedinService'); 
 
 const bitly = new BitlyClient(config.BITLY_ACCESS_TOKEN);
 
@@ -57,6 +54,17 @@ const identifyPlatform = (url) => {
   return null;
 };
 
+// Function to normalize YouTube URLs (convert shorts to regular format)
+function normalizeYouTubeUrl(url) {
+  // Convert shorts URLs to standard watch URLs
+  const shortsRegex = /youtube\.com\/shorts\/([a-zA-Z0-9_-]+)/;
+  const match = url.match(shortsRegex);
+  if (match) {
+    return `https://www.youtube.com/watch?v=${match[1]}`;
+  }
+  return url;
+}
+
 // Standardize the response for different platforms
 const formatData = async (platform, data) => {
   console.info(`Data Formatting: Formatting data for platform '${platform}'.`);
@@ -64,16 +72,16 @@ const formatData = async (platform, data) => {
 
   switch (platform) {
     case 'youtube': {
-      const youtubeData = data.data;
-      if (!youtubeData || !youtubeData.video) {
-        throw new Error("Data Formatting: YouTube video data is incomplete or improperly formatted.");
+      const ytData = data.data;
+      if (!ytData || !ytData.info) {
+        throw new Error("Data Formatting: YouTube data is incomplete or improperly formatted.");
       }
-      console.info("Data Formatting: YouTube data formatted successfully.");
       return {
-        title: youtubeData.title || 'Untitled Video',
-        url: youtubeData.video_hd || '',
-        thumbnail: youtubeData.thumb || placeholderThumbnail,
-        sizes: ['Low Quality', 'High Quality'],
+        title: ytData.info.title || 'Untitled Video',
+        url: ytData.mp4 || '',
+        thumbnail: ytData.info.thumbnail || placeholderThumbnail,
+        sizes: ['mp4', 'mp3'],
+        audio: ytData.mp3 || '',
         source: platform,
       };
     }
@@ -224,10 +232,11 @@ exports.downloadMedia = async (req, res) => {
         data = await ttdl(url);
         break;
       case 'facebook':
-        data = await ndown(url);
+        // Use a working Facebook downloader or disable for now
+        throw new Error('Facebook downloads temporarily unavailable');
         break;
       case 'twitter':
-        data = await twitterdown(url);
+        data = await twitter(url); // Use btch-downloader for Twitter
         break;
       case 'youtube':
         data = await ytdl(processedUrl);
