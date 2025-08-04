@@ -11,6 +11,8 @@ const axios = require('axios');
 const { ytdl, pindl } = require('jer-api'); 
 const threadsDownloader = require('../Services/threadsService');
 const fetchLinkedinData = require('../Services/linkedinService'); 
+const facebookInsta = require('../Services/facebookInstaService'); 
+const { downloadTwmateData } = require('../Services/twitterService'); 
 
 const bitly = new BitlyClient(config.BITLY_ACCESS_TOKEN);
 
@@ -87,13 +89,26 @@ const formatData = async (platform, data) => {
     }
 
     case 'instagram': {
+      // Handle metadownloader response structure
+      if (data && data.media && Array.isArray(data.media)) {
+        const mediaItem = data.media[0];
+        return {
+          title: data.title || 'Instagram Media',
+          url: mediaItem?.url || '',
+          thumbnail: data.thumbnail || placeholderThumbnail,
+          sizes: ['Original Quality'],
+          source: platform,
+        };
+      }
+      
+      // Handle btch-downloader response structure
       if (!data || !data[0]?.url) {
         console.error("Data Formatting: Instagram data is missing or invalid.");
         throw new Error("Instagram data is missing or invalid.");
       }
       console.info("Data Formatting: Instagram data formatted successfully.");
       return {
-        title: data[0]?.wm || 'Untitled Media',
+        title: data[0]?.wm || 'Instagram Media',
         url: data[0]?.url,
         thumbnail: data[0]?.thumbnail || placeholderThumbnail,
         sizes: ['Original Quality'],
@@ -102,43 +117,71 @@ const formatData = async (platform, data) => {
     }
 
     case 'twitter': {
-      const twitterData = data.data;
-      if (!twitterData || !twitterData.HD || !twitterData.SD) {
+      // Handle btch-downloader format
+      if (data.data && (data.data.HD || data.data.SD)) {
+        const twitterData = data.data;
+        console.info("Data Formatting: Twitter data (btch-downloader) formatted successfully.");
+        return {
+          title: 'Twitter Video',
+          url: twitterData.HD || twitterData.SD || '',
+          thumbnail: twitterData.thumbnail || placeholderThumbnail,
+          sizes: twitterData.HD ? ['HD'] : ['SD'],
+          source: platform,
+        };
+      }
+      // Handle custom Twitter service format (array of results)
+      else if (Array.isArray(data) && data.length > 0) {
+        const bestQuality = data.find(item => item.quality.includes('720p')) || 
+                           data.find(item => item.quality.includes('480p')) || 
+                           data[0];
+        console.info("Data Formatting: Twitter data (custom service) formatted successfully.");
+        return {
+          title: 'Twitter Video',
+          url: bestQuality.url || '',
+          thumbnail: placeholderThumbnail,
+          sizes: [bestQuality.quality || 'Unknown'],
+          source: platform,
+        };
+      }
+      else {
         throw new Error("Data Formatting: Twitter video data is incomplete or improperly formatted.");
       }
-      console.info("Data Formatting: Twitter data formatted successfully.");
-      return {
-        title: 'Untitled Video',  // No title provided in the given data
-        url: twitterData.HD || twitterData.SD || '',  // HD first, fall back to SD
-        thumbnail: twitterData.thumbnail || placeholderThumbnail,
-        sizes: twitterData.HD ? ['HD'] : ['SD'],
-        source: platform,
-      };
     }
     
     case 'facebook':
-  console.log("Processing Facebook data...");
-
-  // Extract 720p or fallback to 360p
-  let fbUrl = '';
-  const fbData = data.data || [];
-
-  const hdVideo = fbData.find(video => video.resolution.includes('720p'));
-  const sdVideo = fbData.find(video => video.resolution.includes('360p'));
-
-  if (hdVideo) {
-    fbUrl = hdVideo.url;
-  } else if (sdVideo) {
-    fbUrl = sdVideo.url;
-  }
-
-  return {
-    title: data.title || 'Untitled Video',
-    url: fbUrl || '',
-    thumbnail: (hdVideo?.thumbnail || sdVideo?.thumbnail || placeholderThumbnail),
-    sizes: [hdVideo ? '720p' : '360p'],
-    source: platform,
-  };
+      console.log("Processing Facebook data...");
+      
+      // Handle metadownloader response structure
+      if (data && data.media && Array.isArray(data.media)) {
+        const videoMedia = data.media.find(item => item.type === 'video') || data.media[0];
+        return {
+          title: data.title || 'Facebook Video',
+          url: videoMedia?.url || '',
+          thumbnail: data.thumbnail || placeholderThumbnail,
+          sizes: [videoMedia?.quality || 'Original Quality'],
+          source: platform,
+        };
+      }
+      
+      // Fallback to old format if needed
+      let fbUrl = '';
+      const fbData = data.data || [];
+      const hdVideo = fbData.find(video => video.resolution?.includes('720p'));
+      const sdVideo = fbData.find(video => video.resolution?.includes('360p'));
+      
+      if (hdVideo) {
+        fbUrl = hdVideo.url;
+      } else if (sdVideo) {
+        fbUrl = sdVideo.url;
+      }
+      
+      return {
+        title: data.title || 'Facebook Video',
+        url: fbUrl || '',
+        thumbnail: (hdVideo?.thumbnail || sdVideo?.thumbnail || placeholderThumbnail),
+        sizes: [hdVideo ? '720p' : '360p'],
+        source: platform,
+      };
 
     case 'pinterest': {
       // Support jer-api style response
@@ -226,17 +269,26 @@ exports.downloadMedia = async (req, res) => {
 
     switch (platform) {
       case 'instagram':
-        data = await igdl(url);
+        try {
+          data = await igdl(url);
+        } catch (error) {
+          console.warn('Instagram primary downloader failed, trying fallback...');
+          data = await facebookInsta(url); // Fallback to metadownloader
+        }
         break;
       case 'tiktok':
         data = await ttdl(url);
         break;
       case 'facebook':
-        // Use a working Facebook downloader or disable for now
-        throw new Error('Facebook downloads temporarily unavailable');
+        data = await facebookInsta(url); // Use metadownloader for Facebook
         break;
       case 'twitter':
-        data = await twitter(url); // Use btch-downloader for Twitter
+        try {
+          data = await twitter(url); // Try btch-downloader first
+        } catch (error) {
+          console.warn("Twitter: btch-downloader failed, trying custom Twitter service...");
+          data = await downloadTwmateData(url); // Fallback to custom service
+        }
         break;
       case 'youtube':
         data = await ytdl(processedUrl);
