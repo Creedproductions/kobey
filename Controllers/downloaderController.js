@@ -12,7 +12,8 @@ const { ytdl, pindl } = require('jer-api');
 const threadsDownloader = require('../Services/threadsService');
 const fetchLinkedinData = require('../Services/linkedinService'); 
 const facebookInsta = require('../Services/facebookInstaService'); 
-const { downloadTwmateData } = require('../Services/twitterService'); 
+const { downloadTwmateData } = require('../Services/twitterService');
+const { fetchYouTubeData } = require('../Services/youtubeService'); 
 
 const bitly = new BitlyClient(config.BITLY_ACCESS_TOKEN);
 
@@ -74,16 +75,34 @@ const formatData = async (platform, data) => {
 
   switch (platform) {
     case 'youtube': {
-      const ytData = data.data;
-      if (!ytData || !ytData.info) {
+      // Handle new YouTube service response structure
+      if (!data || !data.title) {
         throw new Error("Data Formatting: YouTube data is incomplete or improperly formatted.");
       }
+      
+      // Find best quality video formats
+      const videoWithAudio = data.formats?.filter(f => f.type === 'video_with_audio') || [];
+      const videoOnly = data.formats?.filter(f => f.type === 'video') || [];
+      const audioOnly = data.formats?.filter(f => f.type === 'audio') || [];
+      
+      // Prefer video_with_audio first, then video only
+      const bestVideo = videoWithAudio.find(f => f.quality?.includes('720p')) || 
+                       videoWithAudio.find(f => f.quality?.includes('480p')) || 
+                       videoWithAudio.find(f => f.quality?.includes('360p')) ||
+                       videoWithAudio[0] ||
+                       videoOnly.find(f => f.quality?.includes('720p')) || 
+                       videoOnly[0];
+      
+      const bestAudio = audioOnly.find(f => f.quality?.includes('131kb/s') || f.extension === 'm4a') || 
+                        audioOnly[0];
+      
       return {
-        title: ytData.info.title || 'Untitled Video',
-        url: ytData.mp4 || '',
-        thumbnail: ytData.info.thumbnail || placeholderThumbnail,
-        sizes: ['mp4', 'mp3'],
-        audio: ytData.mp3 || '',
+        title: data.title || 'Untitled Video',
+        url: bestVideo?.url || '',
+        thumbnail: data.thumbnail || placeholderThumbnail,
+        sizes: [...videoWithAudio, ...videoOnly].map(f => f.quality).filter(Boolean),
+        audio: bestAudio?.url || '',
+        duration: data.duration || 'Unknown',
         source: platform,
       };
     }
@@ -117,6 +136,12 @@ const formatData = async (platform, data) => {
     }
 
     case 'twitter': {
+      console.log('DEBUG FORMATTING: Twitter data received in formatting:', JSON.stringify(data, null, 2));
+      console.log('DEBUG FORMATTING: Data type:', typeof data);
+      console.log('DEBUG FORMATTING: Is array:', Array.isArray(data));
+      console.log('DEBUG FORMATTING: Has data property:', !!data.data);
+      console.log('DEBUG FORMATTING: Data.data is array:', Array.isArray(data.data));
+      
       // Handle btch-downloader format
       if (data.data && (data.data.HD || data.data.SD)) {
         const twitterData = data.data;
@@ -129,21 +154,37 @@ const formatData = async (platform, data) => {
           source: platform,
         };
       }
-      // Handle custom Twitter service format (array of results)
-      else if (Array.isArray(data) && data.length > 0) {
-        const bestQuality = data.find(item => item.quality.includes('720p')) || 
-                           data.find(item => item.quality.includes('480p')) || 
-                           data[0];
-        console.info("Data Formatting: Twitter data (custom service) formatted successfully.");
+      // Handle custom Twitter service format - check if data has a 'data' property with array
+      else if (data.data && Array.isArray(data.data) && data.data.length > 0) {
+        const videoArray = data.data;
+        const bestQuality = videoArray.find(item => item.quality.includes('1280x720')) || 
+                           videoArray.find(item => item.quality.includes('640x360')) || 
+                           videoArray[0];
+        console.info("Data Formatting: Twitter data (custom service with data wrapper) formatted successfully.");
         return {
           title: 'Twitter Video',
           url: bestQuality.url || '',
           thumbnail: placeholderThumbnail,
-          sizes: [bestQuality.quality || 'Unknown'],
+          sizes: videoArray.map(item => item.quality),
+          source: platform,
+        };
+      }
+      // Handle custom Twitter service format (direct array)
+      else if (Array.isArray(data) && data.length > 0) {
+        const bestQuality = data.find(item => item.quality.includes('1280x720')) || 
+                           data.find(item => item.quality.includes('640x360')) || 
+                           data[0];
+        console.info("Data Formatting: Twitter data (custom service direct array) formatted successfully.");
+        return {
+          title: 'Twitter Video',
+          url: bestQuality.url || '',
+          thumbnail: placeholderThumbnail,
+          sizes: data.map(item => item.quality),
           source: platform,
         };
       }
       else {
+        console.error('DEBUG FORMATTING: No conditions matched, data structure not recognized');
         throw new Error("Data Formatting: Twitter video data is incomplete or improperly formatted.");
       }
     }
@@ -285,13 +326,24 @@ exports.downloadMedia = async (req, res) => {
       case 'twitter':
         try {
           data = await twitter(url); // Try btch-downloader first
+          
+          // Check if btch-downloader returned usable data
+          const hasValidData = data.data && (data.data.HD || data.data.SD);
+          const hasValidUrls = Array.isArray(data.url) && data.url.some(item => 
+            item && Object.keys(item).length > 0 && item.url
+          );
+          
+          if (!hasValidData && !hasValidUrls) {
+            throw new Error("btch-downloader returned unusable data");
+          }
         } catch (error) {
-          console.warn("Twitter: btch-downloader failed, trying custom Twitter service...");
+          console.warn("Twitter: btch-downloader failed or returned unusable data, trying custom Twitter service...");
           data = await downloadTwmateData(url); // Fallback to custom service
+          console.log('DEBUG DOWNLOAD: Custom service returned:', JSON.stringify(data, null, 2));
         }
         break;
       case 'youtube':
-        data = await ytdl(processedUrl);
+        data = await fetchYouTubeData(url);
         break;
       case 'pinterest':
         data = await pindl(url); 
