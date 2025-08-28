@@ -1,15 +1,14 @@
-// Controllers/downloaderController.js
 const axios = require('axios');
 const { URL } = require('url');
 
-// Services (note: keep these paths consistent with your project layout)
+// Services
 const { fetchYouTubeData } = require('../Services/youtubeService');
 const facebookInstagramDownloader = require('../Services/facebookInstaService');
 const threadsDownloader = require('../Services/threadsService');
 const { downloadTwmateData } = require('../Services/twitterService');
 const linkedinDownloader = require('../Services/linkedinService');
 
-// ───────────────────────── helpers ─────────────────────────
+/* ───────────────────────── helpers ───────────────────────── */
 
 function detectPlatform(rawUrl = '') {
   const url = (rawUrl || '').toLowerCase();
@@ -60,7 +59,42 @@ function normalizeUrl(u) {
   }
 }
 
-// Build a deterministic "itag" the Flutter app can echo back on /download
+// Detect HLS/DASH or manifest-ish formats
+function isHlsDashLike(f) {
+  const q = `${f.quality || ''} ${f.label || ''} ${f.container || f.extension || ''}`.toLowerCase();
+  const u = (f.url || '').toLowerCase();
+  return (
+    u.includes('.m3u8') ||
+    u.includes('.mpd') ||
+    q.includes('hls') ||
+    q.includes('dash') ||
+    /m3u8|mpd/.test(q)
+  );
+}
+
+// Simple muxed guess: treat non-manifest mp4/webm as muxed unless explicitly audio-only
+function isLikelyMuxed(f) {
+  const ext = (f.extension || f.container || '').toLowerCase();
+  const u = (f.url || '').toLowerCase();
+  const isVideoType = (f.type || '').toLowerCase().includes('video');
+  const isAudioType = (f.type || '').toLowerCase().includes('audio');
+
+  if (isAudioType) return false; // audio-only
+  if (isHlsDashLike(f)) return false; // manifest
+
+  const looksMp4 = ext === 'mp4' || u.includes('.mp4');
+  const looksWebm = ext === 'webm' || u.includes('.webm');
+
+  return (isVideoType || looksMp4 || looksWebm);
+}
+
+// Prefer <=1080p mp4 to avoid YT adaptive-only pitfalls; bump to 720 if needed
+function numericHeight(f) {
+  const q = `${f.quality || f.label || ''}`.toLowerCase();
+  const m = q.match(/(\d{3,4})p/);
+  return m ? parseInt(m[1], 10) : 0;
+}
+
 function makeItagLikeSlug(fmt, index) {
   const type = (fmt.type || (fmt.hasVideo ? 'video' : 'audio') || 'unknown').toString().toLowerCase();
   const quality = (fmt.quality || fmt.label || '').toString().toLowerCase().replace(/[^a-z0-9]+/g,'') || 'auto';
@@ -68,41 +102,44 @@ function makeItagLikeSlug(fmt, index) {
   return `${type}_${quality}_${ext}_${index}`;
 }
 
-// Unify formats to the structure the Flutter dialog expects
 function mapFormats(rawFormats = []) {
   return rawFormats.map((f, i) => {
-    const hasVideo = (f.type || '').toString().toLowerCase().includes('video') || f.hasVideo === true;
-    const hasAudio = (f.type || '').toString().toLowerCase().includes('audio') || f.hasAudio === true || (!hasVideo && f.type);
+    const hasVideo = (f.type || '').toString().toLowerCase().includes('video') || f.hasVideo === true || isLikelyMuxed(f);
+    const hasAudio = (f.type || '').toString().toLowerCase().includes('audio')
+      || f.hasAudio === true
+      || (hasVideo && isLikelyMuxed(f)); // treat muxed as A+V
+
     return {
       itag: makeItagLikeSlug(f, i),
-      quality: f.quality || f.label || (hasAudio ? (f.bitrate ? `${f.bitrate} kbps` : 'audio') : 'unknown'),
-      container: f.extension || f.container || (hasAudio ? 'mp3' : 'mp4'),
+      quality: f.quality || f.label || (hasAudio && !hasVideo ? (f.bitrate ? `${f.bitrate} kbps` : 'audio') : 'unknown'),
+      container: f.extension || f.container || (hasAudio && !hasVideo ? 'mp3' : 'mp4'),
       hasAudio,
       hasVideo,
-      isVideo: f.isVideo != null ? !!f.isVideo : hasVideo, // keep Pinterest' isVideo hint
+      isVideo: f.isVideo != null ? !!f.isVideo : hasVideo,
       audioCodec: f.audioCodec || null,
       videoCodec: f.videoCodec || null,
       audioBitrate: f.audioBitrate || f.bitrate || null,
       contentLength: f.contentLength || null,
-      url: f.url || null, // kept for /direct
+      url: f.url || null,
     };
   });
 }
+
 function pickByItag(formats, itag) {
   if (!Array.isArray(formats)) return null;
   return formats.find(f => f.itag === itag) || null;
 }
+
 const basicThumb = (url) => (url ? [{ url }] : []);
 
-// Generic streaming proxy (with Range + Referer support)
+// Stream proxy with optional Referer (solves FB/IG/Pin hotlink)
 async function streamRemote(res, remoteUrl, { referer, fileName } = {}) {
-  // HEAD best-effort
   let size = null, ctype = null;
+
   try {
     const head = await axios.head(remoteUrl, {
       headers: {
-        'User-Agent':
-          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36',
+        'User-Agent': 'Mozilla/5.0',
         Referer: referer,
       },
       maxRedirects: 5,
@@ -113,11 +150,7 @@ async function streamRemote(res, remoteUrl, { referer, fileName } = {}) {
   } catch (_) {}
 
   const range = res.req.headers.range;
-  const headers = {
-    'User-Agent':
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36',
-    Referer: referer,
-  };
+  const headers = { 'User-Agent': 'Mozilla/5.0', Referer: referer };
   if (range) headers.Range = range;
 
   const upstream = await axios.get(remoteUrl, {
@@ -131,43 +164,28 @@ async function streamRemote(res, remoteUrl, { referer, fileName } = {}) {
   else if (upstream.headers['content-type']) res.setHeader('Content-Type', upstream.headers['content-type']);
 
   const isPartial = upstream.status === 206 || !!range;
-  if (isPartial) {
-    res.status(206);
-    if (upstream.headers['content-range']) res.setHeader('Content-Range', upstream.headers['content-range']);
-    res.setHeader('Accept-Ranges', 'bytes');
-  } else {
-    res.status(200);
-  }
+  res.status(isPartial ? 206 : 200);
+  if (isPartial && upstream.headers['content-range']) res.setHeader('Content-Range', upstream.headers['content-range']);
+  if (isPartial) res.setHeader('Accept-Ranges', 'bytes');
 
   const len = upstream.headers['content-length'] || size;
   if (len) res.setHeader('Content-Length', len);
 
   if (fileName) {
     res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(fileName)}`);
-  } else {
-    // try to derive a decent name
-    try {
-      const u = new URL(remoteUrl);
-      const base = u.pathname.split('/').pop() || 'download';
-      res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(base)}`);
-    } catch {}
   }
 
-  upstream.data.on('error', () => {
-    if (!res.headersSent) res.status(502);
-    res.end();
-  });
+  upstream.data.on('error', () => { if (!res.headersSent) res.status(502); res.end(); });
   upstream.data.pipe(res);
 }
 
-// ───────────────────────── Pinterest helpers ─────────────────────────
+/* ───────────────────────── Pinterest helpers ───────────────────────── */
 
 function normalizePinterestUrl(raw) {
   try {
     let u = String(raw || '').trim();
     if (!/^https?:\/\//i.test(u)) u = 'https://' + u;
     const parsed = new URL(u);
-    // strip query for consistency
     parsed.search = '';
     return parsed.toString();
   } catch {
@@ -189,95 +207,67 @@ function extractPinterestFromHtml(html) {
     rx(html, /"image_url"\s*:\s*"([^"]+)"/i) ||
     null;
 
-  // meta video first
   const metaVideo =
     rx(html, /<meta[^>]+property=["']og:video(?::secure_url)?["'][^>]+content=["']([^"']+)["']/i);
 
-  // video_list urls (720p, 480p...)
   const videoListBlock = rx(html, /"video_list"\s*:\s*{([\s\S]*?)}/i);
   const fromVideoList = videoListBlock
-    ? uniq(
-        (videoListBlock.match(/"url"\s*:\s*"([^"]+)"/gi) || [])
-          .map(m => m.replace(/"url"\s*:\s*"/i, '').replace(/"$/, '').replace(/\\u0026/g, '&'))
-      )
+    ? uniq((videoListBlock.match(/"url"\s*:\s*"([^"]+)"/gi) || []).map(m => m.replace(/"url"\s*:\s*"/i,'').replace(/"$/,'').replace(/\\u0026/g,'&')))
     : [];
 
-  // any direct pinimg mp4
-  const mp4s = uniq(
-    (html.match(/https:\/\/v\.pinimg\.com\/[^"'<> ]+?\.mp4[^"'<> ]*/gi) || []).map(s => s.replace(/\\u0026/g, '&'))
-  );
-
-  // images (fallback)
-  const imageCandidates = uniq(
-    (html.match(/https:\/\/i\.pinimg\.com\/[^"'<> ]+\.(?:jpg|jpeg|png|gif)/gi) || [])
-  );
-
-  let videoUrls = uniq([...(metaVideo ? [metaVideo] : []), ...fromVideoList, ...mp4s]);
+  const mp4s = uniq((html.match(/https:\/\/v\.pinimg\.com\/[^"'<> ]+?\.mp4[^"'<> ]*/gi) || []).map(s => s.replace(/\\u0026/g,'&')));
+  const imageCandidates = uniq(html.match(/https:\/\/i\.pinimg\.com\/[^"'<> ]+\.(?:jpg|jpeg|png|gif)/gi) || []);
 
   const formats = [];
+  const videoUrls = uniq([...(metaVideo ? [metaVideo] : []), ...fromVideoList, ...mp4s]);
+
   if (videoUrls.length) {
     for (const url of videoUrls) {
-      const guessQ =
-        rx(url, /(\d{3,4})p/i) || rx(url, /height=(\d{3,4})/i) || rx(url, /\/(\d{3,4})x\d{3,4}\//i);
-      const quality = guessQ ? `${guessQ}p` : 'SD';
-      formats.push({
-        type: 'video',
-        quality,
-        extension: 'mp4',
-        url,
-        hasVideo: true,
-        hasAudio: true,
-        isVideo: true,
-        videoCodec: 'h264',
-        audioCodec: 'aac',
-      });
+      const g = rx(url, /(\d{3,4})p/i) || rx(url, /height=(\d{3,4})/i) || rx(url, /\/(\d{3,4})x\d{3,4}\//i);
+      const quality = g ? `${g}p` : 'SD';
+      formats.push({ type:'video', quality, extension:'mp4', url, hasVideo:true, hasAudio:true, isVideo:true, videoCodec:'h264', audioCodec:'aac' });
     }
-    // best first
-    formats.sort((a, b) => (parseInt(b.quality) || 0) - (parseInt(a.quality) || 0));
-    return {
-      platform: 'Pinterest',
-      mediaType: 'video',
-      title,
-      duration: null,
-      thumbnails: thumb ? [{ url: thumb }] : [],
-      formats,
-    };
+    formats.sort((a,b)=> (parseInt(b.quality)||0) - (parseInt(a.quality)||0));
+    return { platform:'Pinterest', mediaType:'video', title, duration:null, thumbnails: thumb ? [{url:thumb}] : [], formats };
   }
 
   if (imageCandidates.length) {
     for (const u of imageCandidates) {
-      formats.push({
-        type: 'image',
-        quality: 'image',
-        extension: (u.split('.').pop() || 'jpg').toLowerCase(),
-        url: u,
-        hasVideo: false,
-        hasAudio: false,
-        isVideo: true, // ensure it appears under "Video" tab in your Pinterest UI case
-      });
+      formats.push({ type:'image', quality:'image', extension:(u.split('.').pop()||'jpg').toLowerCase(), url:u, hasVideo:false, hasAudio:false, isVideo:true });
     }
-    return {
-      platform: 'Pinterest',
-      mediaType: 'image',
-      title,
-      duration: null,
-      thumbnails: thumb ? [{ url: thumb }] : [{ url: imageCandidates[0] }],
-      formats,
-    };
+    return { platform:'Pinterest', mediaType:'image', title, duration:null, thumbnails: thumb ? [{url:thumb}] : [{url:imageCandidates[0]}], formats };
   }
-
   return null;
 }
 
-// ───────────────────────── controllers ─────────────────────────
+/* ───────────────────────── controllers ───────────────────────── */
 
 /** GET /api/youtube?url= */
 exports.getYoutubeInfo = async (req, res) => {
   try {
     const url = normalizeUrl(req.query.url || '');
-    const data = await fetchYouTubeData(url);
+    const data = await fetchYouTubeData(url); // returns { title, duration, formats: [{type, label/quality, ext, url}] }
 
-    const formats = mapFormats(data.formats || []);
+    // 1) Remove HLS/DASH
+    let raw = (data.formats || []).filter(f => !isHlsDashLike(f));
+
+    // 2) Prefer muxed MP4/WebM (A+V). If everything looks adaptive, still pass what we have.
+    const muxed = raw.filter(isLikelyMuxed);
+    raw = muxed.length ? muxed : raw;
+
+    // 3) Sort by height (desc), but push >1080 lower to avoid adaptive-only traps
+    raw.sort((a, b) => {
+      const ah = numericHeight(a), bh = numericHeight(b);
+      if (ah === bh) return 0;
+      // Prefer <=1080 first
+      const aPenalty = ah > 1080 ? 1 : 0;
+      const bPenalty = bh > 1080 ? 1 : 0;
+      if (aPenalty !== bPenalty) return aPenalty - bPenalty;
+      return bh - ah;
+    });
+
+    const formats = mapFormats(raw);
+
     res.json({
       platform: 'YouTube',
       title: data.title || 'YouTube Video',
@@ -296,55 +286,39 @@ exports.getThreadsInfo = async (req, res) => {
   try {
     const url = normalizeUrl(req.query.url || '');
     const info = await threadsDownloader(url);
-
-    const fmt = {
-      type: 'video',
-      quality: info.quality || 'unknown',
-      extension: 'mp4',
-      url: info.download,
-      hasVideo: true,
-      hasAudio: true,
-      isVideo: true,
-    };
+    const fmt = { type:'video', quality: info.quality || 'unknown', extension:'mp4', url: info.download, hasVideo:true, hasAudio:true, isVideo:true };
     const formats = mapFormats([fmt]);
-
-    res.json({
-      platform: 'Threads',
-      title: 'Threads media',
-      thumbnails: basicThumb(info.thumbnail),
-      duration: null,
-      formats,
-      originalUrl: url,
-    });
+    res.json({ platform:'Threads', title:'Threads media', thumbnails: basicThumb(info.thumbnail), duration:null, formats, originalUrl: url });
   } catch (err) {
     res.status(500).json({ error: 'Failed to fetch Threads info', errorDetail: err.message });
   }
 };
 
-/** GET /api/facebook?url=  (also handles Instagram URLs) */
+/** GET /api/facebook?url=  (also handles Instagram) */
 exports.getFacebookInfo = async (req, res) => {
   try {
     const url = normalizeUrl(req.query.url || '');
     const platform = detectPlatform(url);
-
     const resp = await facebookInstagramDownloader(url);
 
-    // metadownloader responses vary — normalize shape
     let entries = [];
     if (Array.isArray(resp)) entries = resp;
     else if (Array.isArray(resp?.downloads)) entries = resp.downloads;
     else if (Array.isArray(resp?.links)) entries = resp.links;
     else if (resp?.url) entries = [resp];
 
-    const rawFormats = entries.map(d => ({
-      type: d.type || 'video',
-      quality: d.quality || d.label || 'auto',
-      extension: d.extension || d.ext || 'mp4',
-      url: d.url || d.download || d.link,
-      hasVideo: true,
-      hasAudio: true,
-      isVideo: true,
-    }));
+    // keep only direct MP4/WebM, drop HLS
+    const rawFormats = (entries || [])
+      .map(d => ({
+        type: d.type || 'video',
+        quality: d.quality || d.label || 'auto',
+        extension: (d.extension || d.ext || '').toLowerCase() || (String(d.url || d.download || d.link || '').toLowerCase().includes('.mp4') ? 'mp4' : 'mp4'),
+        url: d.url || d.download || d.link,
+        hasVideo: true,
+        hasAudio: true,
+        isVideo: true,
+      }))
+      .filter(f => f.url && !isHlsDashLike(f));
 
     const formats = mapFormats(rawFormats);
 
@@ -361,14 +335,14 @@ exports.getFacebookInfo = async (req, res) => {
   }
 };
 
-/** GET /api/special-media?url=  (now: Twitter, LinkedIn; more to add) */
+/** GET /api/special-media?url=  (Twitter, LinkedIn for now) */
 exports.getSpecialMedia = async (req, res) => {
   try {
     const url = normalizeUrl(req.query.url || '');
     const platform = detectPlatform(url);
 
     if (platform === 'twitter') {
-      const list = await downloadTwmateData(url); // returns array
+      const list = await downloadTwmateData(url);
       const raw = (Array.isArray(list) ? list : []).map(r => ({
         type: 'video',
         quality: r.quality || (r.height ? `${r.height}p` : 'auto'),
@@ -377,47 +351,25 @@ exports.getSpecialMedia = async (req, res) => {
         hasVideo: true,
         hasAudio: true,
         isVideo: true,
-      }));
-      return res.json({
-        platform: 'Twitter',
-        title: 'Tweet video',
-        thumbnails: basicThumb(list?.thumbnail),
-        duration: null,
-        formats: mapFormats(raw),
-        originalUrl: url,
-      });
+      })).filter(f => !isHlsDashLike(f));
+      return res.json({ platform:'Twitter', title:'Tweet video', thumbnails: basicThumb(list?.thumbnail), duration:null, formats: mapFormats(raw), originalUrl: url });
     }
 
     if (platform === 'linkedin') {
       const li = await linkedinDownloader(url);
       const urls = Array.isArray(li) ? li : (li.urls || []);
-      const raw = urls.map(u => ({
-        type: 'video',
-        quality: 'auto',
-        extension: 'mp4',
-        url: u,
-        hasVideo: true,
-        hasAudio: true,
-        isVideo: true,
-      }));
-      return res.json({
-        platform: 'LinkedIn',
-        title: (li && li.title) || 'LinkedIn media',
-        thumbnails: basicThumb(li && li.thumbnail),
-        duration: null,
-        formats: mapFormats(raw),
-        originalUrl: url,
-      });
+      const raw = urls.map(u => ({ type:'video', quality:'auto', extension:'mp4', url:u, hasVideo:true, hasAudio:true, isVideo:true }))
+                      .filter(f => !isHlsDashLike(f));
+      return res.json({ platform:'LinkedIn', title:(li && li.title) || 'LinkedIn media', thumbnails: basicThumb(li && li.thumbnail), duration:null, formats: mapFormats(raw), originalUrl: url });
     }
 
-    // TODO: add Vimeo, Dailymotion, Reddit, Twitch here
     return res.status(400).json({ error: 'Unsupported platform for special-media', platform });
   } catch (err) {
     res.status(500).json({ error: 'Failed to fetch media info', errorDetail: err.message });
   }
 };
 
-/** GET /api/pinterest?url=  — IMPLEMENTED */
+/** GET /api/pinterest?url= */
 exports.getPinterestInfo = async (req, res) => {
   try {
     const raw = req.query.url || '';
@@ -426,52 +378,29 @@ exports.getPinterestInfo = async (req, res) => {
 
     const resp = await axios.get(url, {
       headers: {
-        'User-Agent':
-          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36',
+        'User-Agent': 'Mozilla/5.0',
         'Accept-Language': 'en-US,en;q=0.9',
         Referer: 'https://www.pinterest.com/',
       },
-      maxRedirects: 5,
-      timeout: 15000,
-      validateStatus: s => s < 500,
+      maxRedirects: 5, timeout: 15000, validateStatus: s => s < 500,
     });
     if (resp.status >= 400) {
-      return res.status(400).json({
-        platform: 'Pinterest',
-        error: 'Failed to fetch Pinterest page',
-        errorDetail: `Status ${resp.status}`,
-      });
+      return res.status(400).json({ platform:'Pinterest', error:'Failed to fetch Pinterest page', errorDetail:`Status ${resp.status}` });
     }
 
     const parsed = extractPinterestFromHtml(resp.data || '');
     if (!parsed || !parsed.formats || !parsed.formats.length) {
-      return res.json({
-        platform: 'Pinterest',
-        error: 'No downloadable media found on this Pin',
-        errorDetail: 'It may be private, region-locked, or removed.',
-      });
+      return res.json({ platform:'Pinterest', error:'No downloadable media found on this Pin', errorDetail:'It may be private, region-locked, or removed.' });
     }
 
     const formats = mapFormats(parsed.formats);
-    return res.json({
-      platform: 'Pinterest',
-      title: parsed.title,
-      thumbnails: parsed.thumbnails,
-      duration: parsed.duration,
-      mediaType: parsed.mediaType,
-      formats,
-      originalUrl: url,
-    });
+    return res.json({ platform:'Pinterest', title: parsed.title, thumbnails: parsed.thumbnails, duration: parsed.duration, mediaType: parsed.mediaType, formats, originalUrl: url });
   } catch (err) {
-    res.status(500).json({
-      platform: 'Pinterest',
-      error: 'Pinterest parser error',
-      errorDetail: err?.message || String(err),
-    });
+    res.status(500).json({ platform:'Pinterest', error:'Pinterest parser error', errorDetail: err?.message || String(err) });
   }
 };
 
-/** GET /api/info?url=  — auto-delegate to the right handler */
+/** GET /api/info?url= */
 exports.getInfo = async (req, res) => {
   const raw = req.query.url || '';
   const url = normalizeUrl(raw);
@@ -491,7 +420,7 @@ exports.getInfo = async (req, res) => {
   }
 };
 
-/** GET /api/direct?url=&filename=  — 302 to direct URL (generic) */
+/** GET /api/direct?url=&filename=  — 302 redirect (generic) */
 exports.directDownload = async (req, res) => {
   try {
     const url = req.query.url;
@@ -504,123 +433,106 @@ exports.directDownload = async (req, res) => {
   }
 };
 
-/** GET /api/download?url=&itag=  — resolve formats again, redirect OR stream if Pinterest */
+/** GET /api/download?url=&itag=&platform=  — resolve formats, then:
+ *  - Pinterest / Facebook / Instagram → STREAM with Referer (avoid 403/non-playable)
+ *  - Others → 302 to direct URL
+ */
 exports.downloadByItag = async (req, res) => {
   try {
     const raw = req.query.url || '';
-    let url = normalizeUrl(raw);
     const itag = req.query.itag || '';
-    const pfOverride = (req.query.platform || '').toString().toLowerCase();
-    let platform = pfOverride || detectPlatform(url);
+    let url = normalizeUrl(raw);
+    let platform = (req.query.platform || '').toString().toLowerCase() || detectPlatform(url);
 
     if (!url || !itag) return res.status(400).json({ error: 'Missing url or itag' });
 
-    // Pinterest needs streaming with Referer header to avoid 403
+    const needsStream = (p) => p === 'pinterest' || p === 'facebook' || p === 'instagram';
+
+    let info, unified, selected;
+
     if (platform === 'pinterest') {
-      const htmlResp = await axios.get(normalizePinterestUrl(url), {
-        headers: {
-          'User-Agent':
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36',
-          'Accept-Language': 'en-US,en;q=0.9',
-          Referer: 'https://www.pinterest.com/',
-        },
-        maxRedirects: 5,
+      const html = await axios.get(normalizePinterestUrl(url), {
+        headers: { 'User-Agent':'Mozilla/5.0', Referer:'https://www.pinterest.com/' },
         validateStatus: s => s < 500,
       });
-      const parsed = extractPinterestFromHtml(htmlResp.data || '');
-      if (!parsed || !parsed.formats || !parsed.formats.length) {
-        return res.status(404).json({ error: 'No Pinterest formats found' });
-      }
-      const unified = mapFormats(parsed.formats);
-      const selected = pickByItag(unified, itag) || unified[0];
-      if (!selected || !selected.url) return res.status(404).json({ error: 'Format not found' });
-
-      const fileName = req.query.filename || undefined;
-      return streamRemote(res, selected.url, { referer: 'https://www.pinterest.com/', fileName });
+      const parsed = extractPinterestFromHtml(html.data || '');
+      if (!parsed) return res.status(404).json({ error: 'No Pinterest formats found' });
+      unified = mapFormats(parsed.formats);
+      selected = pickByItag(unified, itag) || unified[0];
+      if (!selected?.url) return res.status(404).json({ error: 'Format not found' });
+      return streamRemote(res, selected.url, { referer: 'https://www.pinterest.com/', fileName: req.query.filename });
     }
 
-    // All other platforms: rebuild formats then 302 to direct URL
-    let info;
-    if (platform === 'youtube') {
-      info = await fetchYouTubeData(url);
-    } else if (platform === 'threads') {
-      const t = await threadsDownloader(url);
-      info = {
-        formats: [{ type: 'video', quality: t.quality, extension: 'mp4', url: t.download, hasVideo: true, hasAudio: true, isVideo: true }]
-      };
-    } else if (platform === 'facebook' || platform === 'instagram') {
+    if (platform === 'facebook' || platform === 'instagram') {
       const d = await facebookInstagramDownloader(url);
       let entries = [];
       if (Array.isArray(d)) entries = d;
       else if (Array.isArray(d?.downloads)) entries = d.downloads;
       else if (Array.isArray(d?.links)) entries = d.links;
       else if (d?.url) entries = [d];
-      info = {
-        formats: entries.map(x => ({
-          type: 'video',
-          quality: x.quality || x.label || 'auto',
-          extension: x.extension || x.ext || 'mp4',
-          url: x.url || x.download || x.link,
-          hasVideo: true, hasAudio: true, isVideo: true
-        }))
-      };
+
+      const rawFormats = (entries || []).map(x => ({
+        type:'video',
+        quality: x.quality || x.label || 'auto',
+        extension: (x.extension || x.ext || '').toLowerCase() || (String(x.url || x.download || x.link || '').toLowerCase().includes('.mp4') ? 'mp4' : 'mp4'),
+        url: x.url || x.download || x.link,
+        hasVideo:true, hasAudio:true, isVideo:true
+      })).filter(f => f.url && !isHlsDashLike(f));
+
+      unified = mapFormats(rawFormats);
+      selected = pickByItag(unified, itag) || unified[0];
+      if (!selected?.url) return res.status(404).json({ error: 'Format not found' });
+
+      // stream with Referer so FB/IG CDNs serve the media
+      const ref = platform === 'instagram' ? 'https://www.instagram.com/' : 'https://www.facebook.com/';
+      return streamRemote(res, selected.url, { referer: ref, fileName: req.query.filename });
+    }
+
+    // YouTube / Twitter / LinkedIn → 302
+    if (platform === 'youtube') {
+      info = await fetchYouTubeData(url);
+      let raw = (info.formats || []).filter(f => !isHlsDashLike(f));
+      const muxed = raw.filter(isLikelyMuxed);
+      raw = muxed.length ? muxed : raw;
+      raw.sort((a,b)=> numericHeight(b) - numericHeight(a));
+      unified = mapFormats(raw);
+    } else if (platform === 'threads') {
+      const t = await threadsDownloader(url);
+      unified = mapFormats([{ type:'video', quality:t.quality, extension:'mp4', url:t.download, hasVideo:true, hasAudio:true, isVideo:true }]);
     } else if (platform === 'twitter') {
       const list = await downloadTwmateData(url);
-      info = {
-        formats: (Array.isArray(list) ? list : []).map(r => ({
-          type: 'video',
-          quality: r.quality || (r.height ? `${r.height}p` : 'auto'),
-          extension: 'mp4',
-          url: r.videoUrl || r.url,
-          hasVideo: true, hasAudio: true, isVideo: true
-        }))
-      };
+      unified = mapFormats((Array.isArray(list)?list:[]).map(r=>({ type:'video', quality:r.quality || (r.height?`${r.height}p`:'auto'), extension:'mp4', url:r.videoUrl || r.url, hasVideo:true, hasAudio:true, isVideo:true })).filter(f=>!isHlsDashLike(f)));
     } else if (platform === 'linkedin') {
       const li = await linkedinDownloader(url);
       const urls = Array.isArray(li) ? li : (li.urls || []);
-      info = {
-        formats: urls.map(u => ({
-          type: 'video',
-          quality: 'auto',
-          extension: 'mp4',
-          url: u,
-          hasVideo: true, hasAudio: true, isVideo: true
-        }))
-      };
+      unified = mapFormats(urls.map(u=>({ type:'video', quality:'auto', extension:'mp4', url:u, hasVideo:true, hasAudio:true, isVideo:true })).filter(f=>!isHlsDashLike(f)));
     } else {
       return res.status(400).json({ error: 'Unsupported platform', platform });
     }
 
-    const unified = mapFormats(info.formats || []);
-    const selected = pickByItag(unified, itag) || unified[0];
-    if (!selected || !selected.url) return res.status(404).json({ error: 'Format not found' });
-
+    selected = pickByItag(unified, itag) || unified[0];
+    if (!selected?.url) return res.status(404).json({ error: 'Format not found' });
     return res.redirect(selected.url);
   } catch (err) {
     res.status(500).json({ error: 'Failed to build download', errorDetail: err.message });
   }
 };
 
-/** GET /api/audio?url=&itag=  — prefer audio-only formats when present */
+/** GET /api/audio?url=&itag= */
 exports.downloadAudio = async (req, res) => {
   try {
     const url = normalizeUrl(req.query.url || '');
     const itag = req.query.itag || '';
     const platform = detectPlatform(url);
 
-    // Right now, YouTube is the one where we consistently get true audio-only formats
-    let info;
-    if (platform === 'youtube') {
-      info = await fetchYouTubeData(url);
-    } else {
-      info = await fetchYouTubeData(url); // fallback: same logic
-    }
-
-    let unified = mapFormats(info.formats || []);
+    // Focus on YT audio-only for now
+    let info = await fetchYouTubeData(url);
+    let unified = mapFormats((info.formats || []).filter(f => !isHlsDashLike(f)));
     const audioOnly = unified.filter(f => f.hasAudio && !f.hasVideo);
     unified = audioOnly.length ? audioOnly : unified;
+
     const selected = (itag ? pickByItag(unified, itag) : null) || unified[0];
-    if (!selected || !selected.url) return res.status(404).json({ error: 'Audio format not found' });
+    if (!selected?.url) return res.status(404).json({ error: 'Audio format not found' });
 
     return res.redirect(selected.url);
   } catch (err) {
@@ -628,10 +540,9 @@ exports.downloadAudio = async (req, res) => {
   }
 };
 
-/** GET /api/threads-download?url=&itag=  — wrapper for compatibility */
 exports.threadsDownload = async (req, res) => exports.downloadByItag(req, res);
 
-/** GET /api/facebook-download?url=&format=hd|sd */
+/** GET /api/facebook-download?url=&format=hd|sd (kept for compatibility; streams with Referer) */
 exports.facebookDownload = async (req, res) => {
   try {
     const url = normalizeUrl(req.query.url || '');
@@ -644,17 +555,19 @@ exports.facebookDownload = async (req, res) => {
     else if (Array.isArray(d?.links)) entries = d.links;
     else if (d?.url) entries = [d];
 
-    const list = entries.map(x => ({
-      quality: (x.quality || x.label || '').toLowerCase(),
-      url: x.url || x.download || x.link
-    }));
+    const list = entries
+      .map(x => ({
+        quality: (x.quality || x.label || '').toLowerCase(),
+        url: x.url || x.download || x.link
+      }))
+      .filter(u => u.url && !/\.m3u8|\.mpd/i.test(u.url));
 
-    let chosen;
-    if (fmt) chosen = list.find(x => x.quality.includes(fmt));
+    let chosen = fmt ? list.find(x => x.quality.includes(fmt)) : null;
     if (!chosen) chosen = list[0];
-
     if (!chosen) return res.status(404).json({ error: 'No facebook formats found' });
-    return res.redirect(chosen.url);
+
+    const ref = detectPlatform(url) === 'instagram' ? 'https://www.instagram.com/' : 'https://www.facebook.com/';
+    return streamRemote(res, chosen.url, { referer: ref });
   } catch (err) {
     res.status(500).json({ error: 'Failed to build facebook download', errorDetail: err.message });
   }
