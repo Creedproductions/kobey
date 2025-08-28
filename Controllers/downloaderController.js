@@ -1,387 +1,661 @@
-const { ttdl, twitter } = require('btch-downloader');
-const { igdl } = require('btch-downloader');
-// const { facebook } = require('@mrnima/facebook-downloader');
-// const {pintarest} = require("nayan-videos-downloader");
+// Controllers/downloaderController.js
+const axios = require('axios');
+const { URL } = require('url');
 
-const { pinterest } = require('ironman-api'); 
-const { BitlyClient } = require('bitly');
-const tinyurl = require('tinyurl'); 
-const config = require('../Config/config'); 
-const axios = require('axios'); 
-const { ytdl, pindl } = require('jer-api'); 
+// Services (note: keep these paths consistent with your project layout)
+const { fetchYouTubeData } = require('../Services/youtubeService');
+const facebookInstagramDownloader = require('../Services/facebookInstaService');
 const threadsDownloader = require('../Services/threadsService');
-const fetchLinkedinData = require('../Services/linkedinService'); 
-const facebookInsta = require('../Services/facebookInstaService'); 
 const { downloadTwmateData } = require('../Services/twitterService');
-const { fetchYouTubeData } = require('../Services/youtubeService'); 
+const linkedinDownloader = require('../Services/linkedinService');
 
-const bitly = new BitlyClient(config.BITLY_ACCESS_TOKEN);
+// ───────────────────────── helpers ─────────────────────────
 
-// Function to shorten URL with fallback
-const shortenUrl = async (url) => {
-  if (!url) {
-    console.warn("Shorten URL: No URL provided.");
-    return url;
-  }
-
-  try {
-    console.info("Shorten URL: Attempting to shorten with Bitly.");
-    const response = await bitly.shorten(url);
-    console.info("Shorten URL: Successfully shortened with Bitly.");
-    return response.link; 
-  } catch (error) {
-    console.warn("Shorten URL: Bitly failed, falling back to TinyURL.");
-    try {
-      const tinyResponse = await tinyurl.shorten(url);
-      console.info("Shorten URL: Successfully shortened with TinyURL.");
-      return tinyResponse; 
-    } catch (fallbackError) {
-      console.error("Shorten URL: Both shortening methods failed.");
-      return url; 
-    }
-  }
-};
-
-// Function to identify platform
-const identifyPlatform = (url) => {
-  console.info("Platform Identification: Determining the platform for the given URL.");
-  if (url.includes('instagram.com')) return 'instagram';
-  if (url.includes('tiktok.com')) return 'tiktok';
-  if (url.includes('facebook.com') || url.includes('fb.watch')) return 'facebook';
-  if (url.includes('x.com') || url.includes('twitter.com')) return 'twitter';
+function detectPlatform(rawUrl = '') {
+  const url = (rawUrl || '').toLowerCase();
   if (url.includes('youtube.com') || url.includes('youtu.be')) return 'youtube';
-  if (url.includes('pinterest.com') || url.includes('pin.it')) return 'pinterest';
-  if (url.includes('threads.net') || url.includes('threads.com')) return 'threads'; // <-- add threads.com support
-  if (url.includes('linkedin.com')) return 'linkedin'; // Add LinkedIn support
-  console.warn("Platform Identification: Unable to identify the platform.");
-  return null;
-};
-
-// Function to normalize YouTube URLs (convert shorts to regular format)
-function normalizeYouTubeUrl(url) {
-  // Convert shorts URLs to standard watch URLs
-  const shortsRegex = /youtube\.com\/shorts\/([a-zA-Z0-9_-]+)/;
-  const match = url.match(shortsRegex);
-  if (match) {
-    return `https://www.youtube.com/watch?v=${match[1]}`;
-  }
-  return url;
+  if (url.includes('facebook.com') || url.includes('fb.com') || url.includes('fb.watch')) return 'facebook';
+  if (url.includes('instagram.com')) return 'instagram';
+  if (url.includes('threads.net')) return 'threads';
+  if (url.includes('twitter.com') || url.includes('x.com')) return 'twitter';
+  if (url.includes('linkedin.com')) return 'linkedin';
+  if (url.includes('pinterest.com')) return 'pinterest';
+  if (url.includes('reddit.com')) return 'reddit';
+  if (url.includes('tiktok.com')) return 'tiktok';
+  if (url.includes('vimeo.com')) return 'vimeo';
+  if (url.includes('dailymotion.com') || url.includes('dai.ly')) return 'dailymotion';
+  if (url.includes('twitch.tv')) return 'twitch';
+  return 'generic';
 }
 
-// Standardize the response for different platforms
-const formatData = async (platform, data) => {
-  console.info(`Data Formatting: Formatting data for platform '${platform}'.`);
-  const placeholderThumbnail = 'https://via.placeholder.com/300x150';
+function normalizeUrl(u) {
+  try {
+    if (!/^https?:\/\//i.test(u)) u = `https://${u}`;
+    const url = new URL(u);
 
-  switch (platform) {
-    case 'youtube': {
-      // Handle new YouTube service response structure
-      if (!data || !data.title) {
-        throw new Error("Data Formatting: YouTube data is incomplete or improperly formatted.");
-      }
-      
-      // Find best quality video formats
-      const videoWithAudio = data.formats?.filter(f => f.type === 'video_with_audio') || [];
-      const videoOnly = data.formats?.filter(f => f.type === 'video') || [];
-      const audioOnly = data.formats?.filter(f => f.type === 'audio') || [];
-      
-      // Prefer video_with_audio first, then video only
-      const bestVideo = videoWithAudio.find(f => f.quality?.includes('720p')) || 
-                       videoWithAudio.find(f => f.quality?.includes('480p')) || 
-                       videoWithAudio.find(f => f.quality?.includes('360p')) ||
-                       videoWithAudio[0] ||
-                       videoOnly.find(f => f.quality?.includes('720p')) || 
-                       videoOnly[0];
-      
-      const bestAudio = audioOnly.find(f => f.quality?.includes('131kb/s') || f.extension === 'm4a') || 
-                        audioOnly[0];
-      
-      return {
-        title: data.title || 'Untitled Video',
-        url: bestVideo?.url || '',
-        thumbnail: data.thumbnail || placeholderThumbnail,
-        sizes: [...videoWithAudio, ...videoOnly].map(f => f.quality).filter(Boolean),
-        audio: bestAudio?.url || '',
-        duration: data.duration || 'Unknown',
-        source: platform,
-      };
+    // YT: unify short to watch?v=
+    if (url.hostname.includes('youtu.be')) {
+      const id = url.pathname.split('/').filter(Boolean).pop();
+      return `https://www.youtube.com/watch?v=${id}`;
+    }
+    if (url.hostname.includes('youtube.com') && url.searchParams.get('v')) {
+      const id = url.searchParams.get('v');
+      return `https://www.youtube.com/watch?v=${id}`;
     }
 
-    case 'instagram': {
-      // Handle metadownloader response structure
-      if (data && data.media && Array.isArray(data.media)) {
-        const mediaItem = data.media[0];
-        return {
-          title: data.title || 'Instagram Media',
-          url: mediaItem?.url || '',
-          thumbnail: data.thumbnail || placeholderThumbnail,
-          sizes: ['Original Quality'],
-          source: platform,
-        };
-      }
-      
-      // Handle btch-downloader response structure
-      if (!data || !data[0]?.url) {
-        console.error("Data Formatting: Instagram data is missing or invalid.");
-        throw new Error("Instagram data is missing or invalid.");
-      }
-      console.info("Data Formatting: Instagram data formatted successfully.");
-      return {
-        title: data[0]?.wm || 'Instagram Media',
-        url: data[0]?.url,
-        thumbnail: data[0]?.thumbnail || placeholderThumbnail,
-        sizes: ['Original Quality'],
-        source: platform,
-      };
+    // Facebook: prefer www
+    if (url.hostname.startsWith('m.facebook.com')) {
+      url.hostname = 'www.facebook.com';
+      return url.toString();
     }
 
-    case 'twitter': {
-      console.log('DEBUG FORMATTING: Twitter data received in formatting:', JSON.stringify(data, null, 2));
-      console.log('DEBUG FORMATTING: Data type:', typeof data);
-      console.log('DEBUG FORMATTING: Is array:', Array.isArray(data));
-      console.log('DEBUG FORMATTING: Has data property:', !!data.data);
-      console.log('DEBUG FORMATTING: Data.data is array:', Array.isArray(data.data));
-      
-      // Handle btch-downloader format
-      if (data.data && (data.data.HD || data.data.SD)) {
-        const twitterData = data.data;
-        console.info("Data Formatting: Twitter data (btch-downloader) formatted successfully.");
-        return {
-          title: 'Twitter Video',
-          url: twitterData.HD || twitterData.SD || '',
-          thumbnail: twitterData.thumbnail || placeholderThumbnail,
-          sizes: twitterData.HD ? ['HD'] : ['SD'],
-          source: platform,
-        };
-      }
-      // Handle custom Twitter service format - check if data has a 'data' property with array
-      else if (data.data && Array.isArray(data.data) && data.data.length > 0) {
-        const videoArray = data.data;
-        const bestQuality = videoArray.find(item => item.quality.includes('1280x720')) || 
-                           videoArray.find(item => item.quality.includes('640x360')) || 
-                           videoArray[0];
-        console.info("Data Formatting: Twitter data (custom service with data wrapper) formatted successfully.");
-        return {
-          title: 'Twitter Video',
-          url: bestQuality.url || '',
-          thumbnail: placeholderThumbnail,
-          sizes: videoArray.map(item => item.quality),
-          source: platform,
-        };
-      }
-      // Handle custom Twitter service format (direct array)
-      else if (Array.isArray(data) && data.length > 0) {
-        const bestQuality = data.find(item => item.quality.includes('1280x720')) || 
-                           data.find(item => item.quality.includes('640x360')) || 
-                           data[0];
-        console.info("Data Formatting: Twitter data (custom service direct array) formatted successfully.");
-        return {
-          title: 'Twitter Video',
-          url: bestQuality.url || '',
-          thumbnail: placeholderThumbnail,
-          sizes: data.map(item => item.quality),
-          source: platform,
-        };
-      }
-      else {
-        console.error('DEBUG FORMATTING: No conditions matched, data structure not recognized');
-        throw new Error("Data Formatting: Twitter video data is incomplete or improperly formatted.");
-      }
-    }
-    
-    case 'facebook':
-      console.log("Processing Facebook data...");
-      
-      // Handle metadownloader response structure
-      if (data && data.media && Array.isArray(data.media)) {
-        const videoMedia = data.media.find(item => item.type === 'video') || data.media[0];
-        return {
-          title: data.title || 'Facebook Video',
-          url: videoMedia?.url || '',
-          thumbnail: data.thumbnail || placeholderThumbnail,
-          sizes: [videoMedia?.quality || 'Original Quality'],
-          source: platform,
-        };
-      }
-      
-      // Fallback to old format if needed
-      let fbUrl = '';
-      const fbData = data.data || [];
-      const hdVideo = fbData.find(video => video.resolution?.includes('720p'));
-      const sdVideo = fbData.find(video => video.resolution?.includes('360p'));
-      
-      if (hdVideo) {
-        fbUrl = hdVideo.url;
-      } else if (sdVideo) {
-        fbUrl = sdVideo.url;
-      }
-      
-      return {
-        title: data.title || 'Facebook Video',
-        url: fbUrl || '',
-        thumbnail: (hdVideo?.thumbnail || sdVideo?.thumbnail || placeholderThumbnail),
-        sizes: [hdVideo ? '720p' : '360p'],
-        source: platform,
-      };
-
-    case 'pinterest': {
-      // Support jer-api style response
-      let pinterestData = data?.data || data;
-      return {
-        title: 'Pinterest Image',
-        url: pinterestData.result || pinterestData.url || '',
-        thumbnail: pinterestData.result || pinterestData.url || placeholderThumbnail,
-        sizes: ['Original Quality'],
-        source: platform,
-      };
+    // Threads: drop params
+    if (url.hostname.includes('threads.net')) {
+      return `https://${url.hostname}${url.pathname}`;
     }
 
-    case 'tiktok':
-      console.log("Processing TikTok data...");
-      return {
-        title: data.title || 'Untitled Video',
-        url: data.video?.[0] || '',
-        thumbnail: data.thumbnail || placeholderThumbnail,
-        sizes: ['Original Quality'],
-        audio: data.audio?.[0] || '',
-        source: platform,
-      };
+    return url.toString();
+  } catch (e) {
+    return u;
+  }
+}
 
-    case 'threads':
-      console.log("Processing Threads data...");
-      return {
-        title: 'Threads Post',
-        url: data.download,
-        thumbnail: data.thumbnail,
-        sizes: [data.quality || 'Unknown'],
-        source: platform,
-      };
+// Build a deterministic "itag" the Flutter app can echo back on /download
+function makeItagLikeSlug(fmt, index) {
+  const type = (fmt.type || (fmt.hasVideo ? 'video' : 'audio') || 'unknown').toString().toLowerCase();
+  const quality = (fmt.quality || fmt.label || '').toString().toLowerCase().replace(/[^a-z0-9]+/g,'') || 'auto';
+  const ext = (fmt.extension || fmt.container || '').toString().toLowerCase() || 'mp4';
+  return `${type}_${quality}_${ext}_${index}`;
+}
 
-    case 'linkedin':
-      console.log("Processing LinkedIn data...");
-      // Extract the first video URL from the LinkedIn API response
-      const videoUrl = Array.isArray(data?.data?.videos) && data.data.videos.length > 0 ? data.data.videos[0] : '';
-      return {
-        title: 'LinkedIn Video',
-        url: videoUrl,
-        thumbnail: videoUrl ? 'https://via.placeholder.com/300x150' : 'Error',
-        sizes: ['Original Quality'],
-        source: platform,
-      };
+// Unify formats to the structure the Flutter dialog expects
+function mapFormats(rawFormats = []) {
+  return rawFormats.map((f, i) => {
+    const hasVideo = (f.type || '').toString().toLowerCase().includes('video') || f.hasVideo === true;
+    const hasAudio = (f.type || '').toString().toLowerCase().includes('audio') || f.hasAudio === true || (!hasVideo && f.type);
+    return {
+      itag: makeItagLikeSlug(f, i),
+      quality: f.quality || f.label || (hasAudio ? (f.bitrate ? `${f.bitrate} kbps` : 'audio') : 'unknown'),
+      container: f.extension || f.container || (hasAudio ? 'mp3' : 'mp4'),
+      hasAudio,
+      hasVideo,
+      isVideo: f.isVideo != null ? !!f.isVideo : hasVideo, // keep Pinterest' isVideo hint
+      audioCodec: f.audioCodec || null,
+      videoCodec: f.videoCodec || null,
+      audioBitrate: f.audioBitrate || f.bitrate || null,
+      contentLength: f.contentLength || null,
+      url: f.url || null, // kept for /direct
+    };
+  });
+}
+function pickByItag(formats, itag) {
+  if (!Array.isArray(formats)) return null;
+  return formats.find(f => f.itag === itag) || null;
+}
+const basicThumb = (url) => (url ? [{ url }] : []);
 
-    default:
-      console.warn("Data Formatting: Generic formatting applied.");
-      return {
-        title: data.title || 'Untitled Media',
-        url: data.url || '',
-        thumbnail: data.thumbnail || placeholderThumbnail,
-        sizes: data.sizes?.length > 0 ? data.sizes : ['Original Quality'],
-        source: platform,
-      };
+// Generic streaming proxy (with Range + Referer support)
+async function streamRemote(res, remoteUrl, { referer, fileName } = {}) {
+  // HEAD best-effort
+  let size = null, ctype = null;
+  try {
+    const head = await axios.head(remoteUrl, {
+      headers: {
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36',
+        Referer: referer,
+      },
+      maxRedirects: 5,
+      validateStatus: s => s < 500,
+    });
+    size = head.headers['content-length'] ? parseInt(head.headers['content-length'], 10) : null;
+    ctype = head.headers['content-type'] || null;
+  } catch (_) {}
+
+  const range = res.req.headers.range;
+  const headers = {
+    'User-Agent':
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36',
+    Referer: referer,
+  };
+  if (range) headers.Range = range;
+
+  const upstream = await axios.get(remoteUrl, {
+    responseType: 'stream',
+    headers,
+    maxRedirects: 5,
+    validateStatus: s => s < 500,
+  });
+
+  if (ctype) res.setHeader('Content-Type', ctype);
+  else if (upstream.headers['content-type']) res.setHeader('Content-Type', upstream.headers['content-type']);
+
+  const isPartial = upstream.status === 206 || !!range;
+  if (isPartial) {
+    res.status(206);
+    if (upstream.headers['content-range']) res.setHeader('Content-Range', upstream.headers['content-range']);
+    res.setHeader('Accept-Ranges', 'bytes');
+  } else {
+    res.status(200);
+  }
+
+  const len = upstream.headers['content-length'] || size;
+  if (len) res.setHeader('Content-Length', len);
+
+  if (fileName) {
+    res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(fileName)}`);
+  } else {
+    // try to derive a decent name
+    try {
+      const u = new URL(remoteUrl);
+      const base = u.pathname.split('/').pop() || 'download';
+      res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(base)}`);
+    } catch {}
+  }
+
+  upstream.data.on('error', () => {
+    if (!res.headersSent) res.status(502);
+    res.end();
+  });
+  upstream.data.pipe(res);
+}
+
+// ───────────────────────── Pinterest helpers ─────────────────────────
+
+function normalizePinterestUrl(raw) {
+  try {
+    let u = String(raw || '').trim();
+    if (!/^https?:\/\//i.test(u)) u = 'https://' + u;
+    const parsed = new URL(u);
+    // strip query for consistency
+    parsed.search = '';
+    return parsed.toString();
+  } catch {
+    return raw;
+  }
+}
+function rx(html, re) { const m = html.match(re); return (m && m[1]) ? m[1] : null; }
+const uniq = (arr) => Array.from(new Set(arr));
+
+function extractPinterestFromHtml(html) {
+  const title =
+    rx(html, /<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']/i) ||
+    rx(html, /<meta[^>]+name=["']og:title["'][^>]+content=["']([^"']+)["']/i) ||
+    rx(html, /<title[^>]*>([^<]+)<\/title>/i) ||
+    'Pinterest media';
+
+  const thumb =
+    rx(html, /<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i) ||
+    rx(html, /"image_url"\s*:\s*"([^"]+)"/i) ||
+    null;
+
+  // meta video first
+  const metaVideo =
+    rx(html, /<meta[^>]+property=["']og:video(?::secure_url)?["'][^>]+content=["']([^"']+)["']/i);
+
+  // video_list urls (720p, 480p...)
+  const videoListBlock = rx(html, /"video_list"\s*:\s*{([\s\S]*?)}/i);
+  const fromVideoList = videoListBlock
+    ? uniq(
+        (videoListBlock.match(/"url"\s*:\s*"([^"]+)"/gi) || [])
+          .map(m => m.replace(/"url"\s*:\s*"/i, '').replace(/"$/, '').replace(/\\u0026/g, '&'))
+      )
+    : [];
+
+  // any direct pinimg mp4
+  const mp4s = uniq(
+    (html.match(/https:\/\/v\.pinimg\.com\/[^"'<> ]+?\.mp4[^"'<> ]*/gi) || []).map(s => s.replace(/\\u0026/g, '&'))
+  );
+
+  // images (fallback)
+  const imageCandidates = uniq(
+    (html.match(/https:\/\/i\.pinimg\.com\/[^"'<> ]+\.(?:jpg|jpeg|png|gif)/gi) || [])
+  );
+
+  let videoUrls = uniq([...(metaVideo ? [metaVideo] : []), ...fromVideoList, ...mp4s]);
+
+  const formats = [];
+  if (videoUrls.length) {
+    for (const url of videoUrls) {
+      const guessQ =
+        rx(url, /(\d{3,4})p/i) || rx(url, /height=(\d{3,4})/i) || rx(url, /\/(\d{3,4})x\d{3,4}\//i);
+      const quality = guessQ ? `${guessQ}p` : 'SD';
+      formats.push({
+        type: 'video',
+        quality,
+        extension: 'mp4',
+        url,
+        hasVideo: true,
+        hasAudio: true,
+        isVideo: true,
+        videoCodec: 'h264',
+        audioCodec: 'aac',
+      });
+    }
+    // best first
+    formats.sort((a, b) => (parseInt(b.quality) || 0) - (parseInt(a.quality) || 0));
+    return {
+      platform: 'Pinterest',
+      mediaType: 'video',
+      title,
+      duration: null,
+      thumbnails: thumb ? [{ url: thumb }] : [],
+      formats,
+    };
+  }
+
+  if (imageCandidates.length) {
+    for (const u of imageCandidates) {
+      formats.push({
+        type: 'image',
+        quality: 'image',
+        extension: (u.split('.').pop() || 'jpg').toLowerCase(),
+        url: u,
+        hasVideo: false,
+        hasAudio: false,
+        isVideo: true, // ensure it appears under "Video" tab in your Pinterest UI case
+      });
+    }
+    return {
+      platform: 'Pinterest',
+      mediaType: 'image',
+      title,
+      duration: null,
+      thumbnails: thumb ? [{ url: thumb }] : [{ url: imageCandidates[0] }],
+      formats,
+    };
+  }
+
+  return null;
+}
+
+// ───────────────────────── controllers ─────────────────────────
+
+/** GET /api/youtube?url= */
+exports.getYoutubeInfo = async (req, res) => {
+  try {
+    const url = normalizeUrl(req.query.url || '');
+    const data = await fetchYouTubeData(url);
+
+    const formats = mapFormats(data.formats || []);
+    res.json({
+      platform: 'YouTube',
+      title: data.title || 'YouTube Video',
+      thumbnails: data.thumbnails || basicThumb(data.thumbnail || data.image),
+      duration: data.duration || null,
+      formats,
+      originalUrl: url,
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch YouTube info', errorDetail: err.message });
   }
 };
 
-// Main function to handle media download
-exports.downloadMedia = async (req, res) => {
-  const { url } = req.body;
-  console.log("Received URL:", url); // Add this line
+/** GET /api/threads?url= */
+exports.getThreadsInfo = async (req, res) => {
+  try {
+    const url = normalizeUrl(req.query.url || '');
+    const info = await threadsDownloader(url);
 
-  if (!url) {
-    console.warn("Download Media: No URL provided in the request.");
-    return res.status(400).json({ error: 'No URL provided' });
+    const fmt = {
+      type: 'video',
+      quality: info.quality || 'unknown',
+      extension: 'mp4',
+      url: info.download,
+      hasVideo: true,
+      hasAudio: true,
+      isVideo: true,
+    };
+    const formats = mapFormats([fmt]);
+
+    res.json({
+      platform: 'Threads',
+      title: 'Threads media',
+      thumbnails: basicThumb(info.thumbnail),
+      duration: null,
+      formats,
+      originalUrl: url,
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch Threads info', errorDetail: err.message });
   }
+};
 
-  const platform = identifyPlatform(url);
+/** GET /api/facebook?url=  (also handles Instagram URLs) */
+exports.getFacebookInfo = async (req, res) => {
+  try {
+    const url = normalizeUrl(req.query.url || '');
+    const platform = detectPlatform(url);
 
-  if (!platform) {
-    console.warn("Download Media: Unsupported platform for the given URL.");
-    return res.status(400).json({ error: 'Unsupported platform' });
+    const resp = await facebookInstagramDownloader(url);
+
+    // metadownloader responses vary — normalize shape
+    let entries = [];
+    if (Array.isArray(resp)) entries = resp;
+    else if (Array.isArray(resp?.downloads)) entries = resp.downloads;
+    else if (Array.isArray(resp?.links)) entries = resp.links;
+    else if (resp?.url) entries = [resp];
+
+    const rawFormats = entries.map(d => ({
+      type: d.type || 'video',
+      quality: d.quality || d.label || 'auto',
+      extension: d.extension || d.ext || 'mp4',
+      url: d.url || d.download || d.link,
+      hasVideo: true,
+      hasAudio: true,
+      isVideo: true,
+    }));
+
+    const formats = mapFormats(rawFormats);
+
+    res.json({
+      platform: platform === 'instagram' ? 'Instagram' : 'Facebook',
+      title: resp?.title || 'Media',
+      thumbnails: basicThumb(resp?.thumbnail),
+      duration: resp?.duration || null,
+      formats,
+      originalUrl: url,
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch Facebook/Instagram info', errorDetail: err.message });
   }
+};
 
-  // Normalize YouTube Shorts URLs
-  let processedUrl = url;
-  if (platform === 'youtube') {
-    processedUrl = normalizeYouTubeUrl(url);
+/** GET /api/special-media?url=  (now: Twitter, LinkedIn; more to add) */
+exports.getSpecialMedia = async (req, res) => {
+  try {
+    const url = normalizeUrl(req.query.url || '');
+    const platform = detectPlatform(url);
+
+    if (platform === 'twitter') {
+      const list = await downloadTwmateData(url); // returns array
+      const raw = (Array.isArray(list) ? list : []).map(r => ({
+        type: 'video',
+        quality: r.quality || (r.height ? `${r.height}p` : 'auto'),
+        extension: 'mp4',
+        url: r.videoUrl || r.url,
+        hasVideo: true,
+        hasAudio: true,
+        isVideo: true,
+      }));
+      return res.json({
+        platform: 'Twitter',
+        title: 'Tweet video',
+        thumbnails: basicThumb(list?.thumbnail),
+        duration: null,
+        formats: mapFormats(raw),
+        originalUrl: url,
+      });
+    }
+
+    if (platform === 'linkedin') {
+      const li = await linkedinDownloader(url);
+      const urls = Array.isArray(li) ? li : (li.urls || []);
+      const raw = urls.map(u => ({
+        type: 'video',
+        quality: 'auto',
+        extension: 'mp4',
+        url: u,
+        hasVideo: true,
+        hasAudio: true,
+        isVideo: true,
+      }));
+      return res.json({
+        platform: 'LinkedIn',
+        title: (li && li.title) || 'LinkedIn media',
+        thumbnails: basicThumb(li && li.thumbnail),
+        duration: null,
+        formats: mapFormats(raw),
+        originalUrl: url,
+      });
+    }
+
+    // TODO: add Vimeo, Dailymotion, Reddit, Twitch here
+    return res.status(400).json({ error: 'Unsupported platform for special-media', platform });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch media info', errorDetail: err.message });
   }
+};
+
+/** GET /api/pinterest?url=  — IMPLEMENTED */
+exports.getPinterestInfo = async (req, res) => {
+  try {
+    const raw = req.query.url || '';
+    if (!raw) return res.status(400).json({ error: 'Missing url' });
+    const url = normalizePinterestUrl(raw);
+
+    const resp = await axios.get(url, {
+      headers: {
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36',
+        'Accept-Language': 'en-US,en;q=0.9',
+        Referer: 'https://www.pinterest.com/',
+      },
+      maxRedirects: 5,
+      timeout: 15000,
+      validateStatus: s => s < 500,
+    });
+    if (resp.status >= 400) {
+      return res.status(400).json({
+        platform: 'Pinterest',
+        error: 'Failed to fetch Pinterest page',
+        errorDetail: `Status ${resp.status}`,
+      });
+    }
+
+    const parsed = extractPinterestFromHtml(resp.data || '');
+    if (!parsed || !parsed.formats || !parsed.formats.length) {
+      return res.json({
+        platform: 'Pinterest',
+        error: 'No downloadable media found on this Pin',
+        errorDetail: 'It may be private, region-locked, or removed.',
+      });
+    }
+
+    const formats = mapFormats(parsed.formats);
+    return res.json({
+      platform: 'Pinterest',
+      title: parsed.title,
+      thumbnails: parsed.thumbnails,
+      duration: parsed.duration,
+      mediaType: parsed.mediaType,
+      formats,
+      originalUrl: url,
+    });
+  } catch (err) {
+    res.status(500).json({
+      platform: 'Pinterest',
+      error: 'Pinterest parser error',
+      errorDetail: err?.message || String(err),
+    });
+  }
+};
+
+/** GET /api/info?url=  — auto-delegate to the right handler */
+exports.getInfo = async (req, res) => {
+  const raw = req.query.url || '';
+  const url = normalizeUrl(raw);
+  const platform = detectPlatform(url);
 
   try {
-    console.info(`Download Media: Fetching data for platform '${platform}'.`);
-    let data;
-
-    switch (platform) {
-      case 'instagram':
-        try {
-          data = await igdl(url);
-        } catch (error) {
-          console.warn('Instagram primary downloader failed, trying fallback...');
-          data = await facebookInsta(url); // Fallback to metadownloader
-        }
-        break;
-      case 'tiktok':
-        data = await ttdl(url);
-        break;
-      case 'facebook':
-        data = await facebookInsta(url); // Use metadownloader for Facebook
-        break;
-      case 'twitter':
-        try {
-          data = await twitter(url); // Try btch-downloader first
-          
-          // Check if btch-downloader returned usable data
-          const hasValidData = data.data && (data.data.HD || data.data.SD);
-          const hasValidUrls = Array.isArray(data.url) && data.url.some(item => 
-            item && Object.keys(item).length > 0 && item.url
-          );
-          
-          if (!hasValidData && !hasValidUrls) {
-            throw new Error("btch-downloader returned unusable data");
-          }
-        } catch (error) {
-          console.warn("Twitter: btch-downloader failed or returned unusable data, trying custom Twitter service...");
-          data = await downloadTwmateData(url); // Fallback to custom service
-          console.log('DEBUG DOWNLOAD: Custom service returned:', JSON.stringify(data, null, 2));
-        }
-        break;
-      case 'youtube':
-        data = await fetchYouTubeData(url);
-        break;
-      case 'pinterest':
-        data = await pindl(url); 
-        break;
-      case 'threads':
-        data = await threadsDownloader(url); // Use new service
-        break;
-      case 'linkedin':
-        data = await fetchLinkedinData(url);
-        break;
-      default:
-        console.error("Download Media: Platform identification failed unexpectedly.");
-        return res.status(500).json({ error: 'Platform identification failed' });
+    if (platform === 'youtube') return exports.getYoutubeInfo(req, res);
+    if (platform === 'threads') return exports.getThreadsInfo(req, res);
+    if (platform === 'facebook' || platform === 'instagram') return exports.getFacebookInfo(req, res);
+    if (platform === 'pinterest') return exports.getPinterestInfo(req, res);
+    if (['twitter','linkedin','reddit','vimeo','dailymotion','twitch'].includes(platform)) {
+      return exports.getSpecialMedia(req, res);
     }
-
-    if (!data) {
-      console.error("Download Media: No data returned for the platform.");
-      return res.status(404).json({ error: 'Data not found for the platform' });
-    }
-
-    const formattedData = await formatData(platform, data);
-
-    // Shorten URLs for all platforms except Threads
-    if (platform !== 'threads') {
-      formattedData.url = await shortenUrl(formattedData.url);
-      formattedData.thumbnail = await shortenUrl(formattedData.thumbnail);
-    }
-
-    console.info("Download Media: Media successfully downloaded and formatted.");
-
-    res.status(200).json({
-      success: true,
-      data: formattedData,
-    });
-  } catch (error) {
-    console.error(`Download Media: Error occurred - ${error.message}`);
-    res.status(500).json({ error: 'Failed to download media' });
+    return res.status(400).json({ error: 'Unsupported or unknown platform', platform, originalUrl: url });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to process media info', errorDetail: err.message });
   }
 };
 
+/** GET /api/direct?url=&filename=  — 302 to direct URL (generic) */
+exports.directDownload = async (req, res) => {
+  try {
+    const url = req.query.url;
+    if (!url) return res.status(400).json({ error: 'Missing url' });
+    const filename = req.query.filename;
+    res.setHeader('Content-Disposition', filename ? `attachment; filename="${filename}"` : 'attachment');
+    return res.redirect(url);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to create direct link', errorDetail: err.message });
+  }
+};
 
+/** GET /api/download?url=&itag=  — resolve formats again, redirect OR stream if Pinterest */
+exports.downloadByItag = async (req, res) => {
+  try {
+    const raw = req.query.url || '';
+    let url = normalizeUrl(raw);
+    const itag = req.query.itag || '';
+    const pfOverride = (req.query.platform || '').toString().toLowerCase();
+    let platform = pfOverride || detectPlatform(url);
+
+    if (!url || !itag) return res.status(400).json({ error: 'Missing url or itag' });
+
+    // Pinterest needs streaming with Referer header to avoid 403
+    if (platform === 'pinterest') {
+      const htmlResp = await axios.get(normalizePinterestUrl(url), {
+        headers: {
+          'User-Agent':
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36',
+          'Accept-Language': 'en-US,en;q=0.9',
+          Referer: 'https://www.pinterest.com/',
+        },
+        maxRedirects: 5,
+        validateStatus: s => s < 500,
+      });
+      const parsed = extractPinterestFromHtml(htmlResp.data || '');
+      if (!parsed || !parsed.formats || !parsed.formats.length) {
+        return res.status(404).json({ error: 'No Pinterest formats found' });
+      }
+      const unified = mapFormats(parsed.formats);
+      const selected = pickByItag(unified, itag) || unified[0];
+      if (!selected || !selected.url) return res.status(404).json({ error: 'Format not found' });
+
+      const fileName = req.query.filename || undefined;
+      return streamRemote(res, selected.url, { referer: 'https://www.pinterest.com/', fileName });
+    }
+
+    // All other platforms: rebuild formats then 302 to direct URL
+    let info;
+    if (platform === 'youtube') {
+      info = await fetchYouTubeData(url);
+    } else if (platform === 'threads') {
+      const t = await threadsDownloader(url);
+      info = {
+        formats: [{ type: 'video', quality: t.quality, extension: 'mp4', url: t.download, hasVideo: true, hasAudio: true, isVideo: true }]
+      };
+    } else if (platform === 'facebook' || platform === 'instagram') {
+      const d = await facebookInstagramDownloader(url);
+      let entries = [];
+      if (Array.isArray(d)) entries = d;
+      else if (Array.isArray(d?.downloads)) entries = d.downloads;
+      else if (Array.isArray(d?.links)) entries = d.links;
+      else if (d?.url) entries = [d];
+      info = {
+        formats: entries.map(x => ({
+          type: 'video',
+          quality: x.quality || x.label || 'auto',
+          extension: x.extension || x.ext || 'mp4',
+          url: x.url || x.download || x.link,
+          hasVideo: true, hasAudio: true, isVideo: true
+        }))
+      };
+    } else if (platform === 'twitter') {
+      const list = await downloadTwmateData(url);
+      info = {
+        formats: (Array.isArray(list) ? list : []).map(r => ({
+          type: 'video',
+          quality: r.quality || (r.height ? `${r.height}p` : 'auto'),
+          extension: 'mp4',
+          url: r.videoUrl || r.url,
+          hasVideo: true, hasAudio: true, isVideo: true
+        }))
+      };
+    } else if (platform === 'linkedin') {
+      const li = await linkedinDownloader(url);
+      const urls = Array.isArray(li) ? li : (li.urls || []);
+      info = {
+        formats: urls.map(u => ({
+          type: 'video',
+          quality: 'auto',
+          extension: 'mp4',
+          url: u,
+          hasVideo: true, hasAudio: true, isVideo: true
+        }))
+      };
+    } else {
+      return res.status(400).json({ error: 'Unsupported platform', platform });
+    }
+
+    const unified = mapFormats(info.formats || []);
+    const selected = pickByItag(unified, itag) || unified[0];
+    if (!selected || !selected.url) return res.status(404).json({ error: 'Format not found' });
+
+    return res.redirect(selected.url);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to build download', errorDetail: err.message });
+  }
+};
+
+/** GET /api/audio?url=&itag=  — prefer audio-only formats when present */
+exports.downloadAudio = async (req, res) => {
+  try {
+    const url = normalizeUrl(req.query.url || '');
+    const itag = req.query.itag || '';
+    const platform = detectPlatform(url);
+
+    // Right now, YouTube is the one where we consistently get true audio-only formats
+    let info;
+    if (platform === 'youtube') {
+      info = await fetchYouTubeData(url);
+    } else {
+      info = await fetchYouTubeData(url); // fallback: same logic
+    }
+
+    let unified = mapFormats(info.formats || []);
+    const audioOnly = unified.filter(f => f.hasAudio && !f.hasVideo);
+    unified = audioOnly.length ? audioOnly : unified;
+    const selected = (itag ? pickByItag(unified, itag) : null) || unified[0];
+    if (!selected || !selected.url) return res.status(404).json({ error: 'Audio format not found' });
+
+    return res.redirect(selected.url);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to build audio download', errorDetail: err.message });
+  }
+};
+
+/** GET /api/threads-download?url=&itag=  — wrapper for compatibility */
+exports.threadsDownload = async (req, res) => exports.downloadByItag(req, res);
+
+/** GET /api/facebook-download?url=&format=hd|sd */
+exports.facebookDownload = async (req, res) => {
+  try {
+    const url = normalizeUrl(req.query.url || '');
+    const fmt = (req.query.format || '').toLowerCase();
+    const d = await facebookInstagramDownloader(url);
+
+    let entries = [];
+    if (Array.isArray(d)) entries = d;
+    else if (Array.isArray(d?.downloads)) entries = d.downloads;
+    else if (Array.isArray(d?.links)) entries = d.links;
+    else if (d?.url) entries = [d];
+
+    const list = entries.map(x => ({
+      quality: (x.quality || x.label || '').toLowerCase(),
+      url: x.url || x.download || x.link
+    }));
+
+    let chosen;
+    if (fmt) chosen = list.find(x => x.quality.includes(fmt));
+    if (!chosen) chosen = list[0];
+
+    if (!chosen) return res.status(404).json({ error: 'No facebook formats found' });
+    return res.redirect(chosen.url);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to build facebook download', errorDetail: err.message });
+  }
+};
