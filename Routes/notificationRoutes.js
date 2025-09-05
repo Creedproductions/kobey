@@ -1,22 +1,14 @@
-// routes/notificationRoutes.js
-
 const express = require('express');
 const router = express.Router();
-const notificationController = require('../Controllers/notificationController');
+const c = require('../Controllers/notificationController');
 
-// Route to store the push token
-router.post('/store-token', notificationController.storeToken);
+router.post('/store-token', c.storeToken);
+router.post('/send-notification', c.sendNotification);
+router.post('/schedule-notification', c.storeScheduledNotification);
+router.get('/scheduled-notifications', c.getScheduledNotifications);
 
-// Route to send a push notification
-router.post('/send-notification', notificationController.sendNotification);
-
-// schedule a notification
-router.post('/schedule-notification', notificationController.storeScheduledNotification);
-
-// Route to get all scheduled notifications
-router.get('/scheduled-notifications', notificationController.getScheduledNotifications);
-
-
+// optional maintenance endpoints
+router.post('/run-due', c.runDueNotifications);
+router.get('/health', c.health);
 
 module.exports = router;
-
