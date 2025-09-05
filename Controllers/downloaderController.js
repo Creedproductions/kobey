@@ -17,7 +17,52 @@ const { fetchYouTubeData } = require('../Services/youtubeService');
 
 const bitly = new BitlyClient(config.BITLY_ACCESS_TOKEN);
 
-// Function to shorten URL with fallback
+// Function to validate if URL is a direct media file
+const validateMediaUrl = async (url) => {
+  if (!url) return false;
+
+  try {
+    console.log('Validating media URL:', url.substring(0, 100) + '...');
+
+    // Make a HEAD request to check the content type and size
+    const response = await axios.head(url, {
+      timeout: 10000,
+      maxRedirects: 5,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+      }
+    });
+
+    const contentType = response.headers['content-type'] || '';
+    const contentLength = parseInt(response.headers['content-length'] || '0');
+
+    console.log('URL validation - Content-Type:', contentType, 'Size:', contentLength);
+
+    // Check if it's a video file and has reasonable size
+    const isVideo = contentType.includes('video/') ||
+                   contentType.includes('application/octet-stream') ||
+                   url.includes('.mp4') ||
+                   url.includes('.mov') ||
+                   url.includes('.avi');
+
+    const hasValidSize = contentLength > 50000; // At least 50KB
+
+    if (isVideo && hasValidSize) {
+      console.log('✅ URL validation passed - Valid video URL');
+      return true;
+    } else {
+      console.warn('❌ URL validation failed - Not a valid video URL or too small');
+      return false;
+    }
+
+  } catch (error) {
+    console.warn('URL validation error:', error.message);
+    // If we can't validate, assume it's valid to avoid breaking downloads
+    return true;
+  }
+};
+
+// Function to shorten URL with fallback (original version for thumbnails)
 const shortenUrl = async (url) => {
   if (!url) {
     console.warn("Shorten URL: No URL provided.");
@@ -37,6 +82,38 @@ const shortenUrl = async (url) => {
       return tinyResponse;
     } catch (fallbackError) {
       console.error("Shorten URL: Both shortening methods failed.");
+      return url;
+    }
+  }
+};
+
+// Updated shortenUrl function with validation for video URLs
+const shortenUrlWithValidation = async (url) => {
+  if (!url) {
+    console.warn("Shorten URL: No URL provided.");
+    return url;
+  }
+
+  // First validate the URL
+  const isValid = await validateMediaUrl(url);
+  if (!isValid) {
+    console.warn("Shorten URL: URL failed validation, returning original");
+    return url;
+  }
+
+  try {
+    console.info("Shorten URL: Attempting to shorten with Bitly.");
+    const response = await bitly.shorten(url);
+    console.info("Shorten URL: Successfully shortened with Bitly.");
+    return response.link;
+  } catch (error) {
+    console.warn("Shorten URL: Bitly failed, falling back to TinyURL.");
+    try {
+      const tinyResponse = await tinyurl.shorten(url);
+      console.info("Shorten URL: Successfully shortened with TinyURL.");
+      return tinyResponse;
+    } catch (fallbackError) {
+      console.error("Shorten URL: Both shortening methods failed, returning original URL.");
       return url;
     }
   }
@@ -131,10 +208,6 @@ const formatData = async (platform, data) => {
 
     case 'twitter': {
       console.log('DEBUG FORMATTING: Twitter data received in formatting:', JSON.stringify(data, null, 2));
-      console.log('DEBUG FORMATTING: Data type:', typeof data);
-      console.log('DEBUG FORMATTING: Is array:', Array.isArray(data));
-      console.log('DEBUG FORMATTING: Has data property:', !!data.data);
-      console.log('DEBUG FORMATTING: Data.data is array:', Array.isArray(data.data));
 
       if (data.data && (data.data.HD || data.data.SD)) {
         const twitterData = data.data;
@@ -485,28 +558,53 @@ exports.downloadMedia = async (req, res) => {
       });
     }
 
-    // Shorten URLs for all platforms except Threads
+    // Validate and shorten URLs for all platforms except Threads
     if (platform !== 'threads') {
       try {
         if (formattedData.url) {
-          formattedData.url = await shortenUrl(formattedData.url);
+          console.log('Original video URL:', formattedData.url.substring(0, 100) + '...');
+
+          // Validate the video URL first
+          const isValidVideo = await validateMediaUrl(formattedData.url);
+          if (!isValidVideo) {
+            console.error('Download Media: Video URL validation failed - URL may be invalid or expired');
+            return res.status(500).json({
+              error: 'Invalid video URL - the media may have expired or been removed',
+              success: false,
+              platform: platform,
+              originalUrl: formattedData.url.substring(0, 100) + '...'
+            });
+          }
+
+          // Only shorten if validation passes
+          formattedData.url = await shortenUrlWithValidation(formattedData.url);
+          console.log('Final video URL:', formattedData.url);
         }
+
         if (formattedData.thumbnail) {
+          // Don't validate thumbnails, just shorten them
           formattedData.thumbnail = await shortenUrl(formattedData.thumbnail);
         }
       } catch (shortenError) {
-        console.warn('URL shortening failed, using original URLs:', shortenError.message);
+        console.warn('URL processing failed, using original URLs:', shortenError.message);
         // Continue with original URLs - this is not a critical failure
       }
     }
 
     console.info("Download Media: Media successfully downloaded and formatted.");
 
+    // Enhanced response with more debugging info
     res.status(200).json({
       success: true,
       data: formattedData,
       platform: platform,
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
+      debug: {
+        originalUrl: url,
+        processedUrl: processedUrl,
+        hasValidUrl: !!formattedData.url,
+        urlLength: formattedData.url ? formattedData.url.length : 0
+      }
     });
 
   } catch (error) {
