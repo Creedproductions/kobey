@@ -16,15 +16,18 @@ const pool = new Pool({
 
 // Function to execute a query using the pool
 async function executeQuery(query, params) {
-  const client = await pool.connect();
+  let client;
   try {
+    client = await pool.connect();
     const result = await client.query(query, params);
     return result;
   } catch (error) {
     console.error('Query error:', error);
     throw error;
   } finally {
-    client.release();
+    if (client) {
+      client.release();
+    }
   }
 }
 
@@ -178,9 +181,14 @@ module.exports.getScheduledNotifications = async (req, res) => {
   }
 };
 
-// Set up a cron job to check for scheduled notifications every minute
+// TEMPORARILY DISABLED CRON JOB - UNCOMMENT AFTER FIXING DATABASE CONNECTION
+/*
 cron.schedule('* * * * *', async () => {
   try {
+    // First check if database is accessible
+    const testClient = await pool.connect();
+    testClient.release();
+
     // Query for notifications that are due to be sent
     const result = await executeQuery(
       'SELECT id, title, body, scheduled_time, token FROM scheduled_notifications WHERE scheduled_time <= NOW()'
@@ -218,9 +226,12 @@ cron.schedule('* * * * *', async () => {
       }
     } else {
       console.log('No notifications to send at this time');
-
     }
   } catch (error) {
-    console.error('Error sending scheduled notifications:', error);
+    console.error('Error in notification cron job (skipping this cycle):', error.message);
+    // Don't crash the server - just skip this cycle
   }
 });
+*/
+
+console.log('Notification controller loaded - Cron job temporarily disabled');

@@ -51,15 +51,14 @@ const identifyPlatform = (url) => {
   if (url.includes('x.com') || url.includes('twitter.com')) return 'twitter';
   if (url.includes('youtube.com') || url.includes('youtu.be')) return 'youtube';
   if (url.includes('pinterest.com') || url.includes('pin.it')) return 'pinterest';
-  if (url.includes('threads.net') || url.includes('threads.com')) return 'threads'; // <-- add threads.com support
-  if (url.includes('linkedin.com')) return 'linkedin'; // Add LinkedIn support
+  if (url.includes('threads.net') || url.includes('threads.com')) return 'threads';
+  if (url.includes('linkedin.com')) return 'linkedin';
   console.warn("Platform Identification: Unable to identify the platform.");
   return null;
 };
 
 // Function to normalize YouTube URLs (convert shorts to regular format)
 function normalizeYouTubeUrl(url) {
-  // Convert shorts URLs to standard watch URLs
   const shortsRegex = /youtube\.com\/shorts\/([a-zA-Z0-9_-]+)/;
   const match = url.match(shortsRegex);
   if (match) {
@@ -75,17 +74,14 @@ const formatData = async (platform, data) => {
 
   switch (platform) {
     case 'youtube': {
-      // Handle new YouTube service response structure
       if (!data || !data.title) {
         throw new Error("Data Formatting: YouTube data is incomplete or improperly formatted.");
       }
 
-      // Find best quality video formats
       const videoWithAudio = data.formats?.filter(f => f.type === 'video_with_audio') || [];
       const videoOnly = data.formats?.filter(f => f.type === 'video') || [];
       const audioOnly = data.formats?.filter(f => f.type === 'audio') || [];
 
-      // Prefer video_with_audio first, then video only
       const bestVideo = videoWithAudio.find(f => f.quality?.includes('720p')) ||
                        videoWithAudio.find(f => f.quality?.includes('480p')) ||
                        videoWithAudio.find(f => f.quality?.includes('360p')) ||
@@ -108,7 +104,6 @@ const formatData = async (platform, data) => {
     }
 
     case 'instagram': {
-      // Handle metadownloader response structure
       if (data && data.media && Array.isArray(data.media)) {
         const mediaItem = data.media[0];
         return {
@@ -120,7 +115,6 @@ const formatData = async (platform, data) => {
         };
       }
 
-      // Handle btch-downloader response structure
       if (!data || !data[0]?.url) {
         console.error("Data Formatting: Instagram data is missing or invalid.");
         throw new Error("Instagram data is missing or invalid.");
@@ -142,7 +136,6 @@ const formatData = async (platform, data) => {
       console.log('DEBUG FORMATTING: Has data property:', !!data.data);
       console.log('DEBUG FORMATTING: Data.data is array:', Array.isArray(data.data));
 
-      // Handle btch-downloader format
       if (data.data && (data.data.HD || data.data.SD)) {
         const twitterData = data.data;
         console.info("Data Formatting: Twitter data (btch-downloader) formatted successfully.");
@@ -154,7 +147,6 @@ const formatData = async (platform, data) => {
           source: platform,
         };
       }
-      // Handle custom Twitter service format - check if data has a 'data' property with array
       else if (data.data && Array.isArray(data.data) && data.data.length > 0) {
         const videoArray = data.data;
         const bestQuality = videoArray.find(item => item.quality.includes('1280x720')) ||
@@ -169,7 +161,6 @@ const formatData = async (platform, data) => {
           source: platform,
         };
       }
-      // Handle custom Twitter service format (direct array)
       else if (Array.isArray(data) && data.length > 0) {
         const bestQuality = data.find(item => item.quality.includes('1280x720')) ||
                            data.find(item => item.quality.includes('640x360')) ||
@@ -192,7 +183,6 @@ const formatData = async (platform, data) => {
     case 'facebook':
       console.log("Processing Facebook data...");
 
-      // Handle metadownloader response structure
       if (data && data.media && Array.isArray(data.media)) {
         const videoMedia = data.media.find(item => item.type === 'video') || data.media[0];
         return {
@@ -204,7 +194,6 @@ const formatData = async (platform, data) => {
         };
       }
 
-      // Fallback to old format if needed
       let fbUrl = '';
       const fbData = data.data || [];
       const hdVideo = fbData.find(video => video.resolution?.includes('720p'));
@@ -225,7 +214,6 @@ const formatData = async (platform, data) => {
       };
 
     case 'pinterest': {
-      // Support jer-api style response
       let pinterestData = data?.data || data;
       return {
         title: 'Pinterest Image',
@@ -259,7 +247,6 @@ const formatData = async (platform, data) => {
 
     case 'linkedin':
       console.log("Processing LinkedIn data...");
-      // Extract the first video URL from the LinkedIn API response
       const videoUrl = Array.isArray(data?.data?.videos) && data.data.videos.length > 0 ? data.data.videos[0] : '';
       return {
         title: 'LinkedIn Video',
@@ -284,18 +271,35 @@ const formatData = async (platform, data) => {
 // Main function to handle media download
 exports.downloadMedia = async (req, res) => {
   const { url } = req.body;
-  console.log("Received URL:", url); // Add this line
+  console.log("Received URL:", url);
 
+  // Enhanced request validation
   if (!url) {
     console.warn("Download Media: No URL provided in the request.");
-    return res.status(400).json({ error: 'No URL provided' });
+    return res.status(400).json({
+      error: 'No URL provided',
+      success: false
+    });
+  }
+
+  // Validate URL format
+  if (typeof url !== 'string' || url.trim().length === 0) {
+    console.warn("Download Media: Invalid URL format.");
+    return res.status(400).json({
+      error: 'Invalid URL format',
+      success: false
+    });
   }
 
   const platform = identifyPlatform(url);
 
   if (!platform) {
     console.warn("Download Media: Unsupported platform for the given URL.");
-    return res.status(400).json({ error: 'Unsupported platform' });
+    return res.status(400).json({
+      error: 'Unsupported platform',
+      success: false,
+      supportedPlatforms: ['instagram', 'tiktok', 'facebook', 'twitter', 'youtube', 'pinterest', 'threads', 'linkedin']
+    });
   }
 
   // Normalize YouTube Shorts URLs
@@ -308,68 +312,192 @@ exports.downloadMedia = async (req, res) => {
     console.info(`Download Media: Fetching data for platform '${platform}'.`);
     let data;
 
+    // Add timeout wrapper for all download operations
+    const downloadWithTimeout = async (downloadFunction) => {
+      return Promise.race([
+        downloadFunction(),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error('Download timeout - operation took too long')), 30000)
+        )
+      ]);
+    };
+
     switch (platform) {
       case 'instagram':
         try {
-          data = await igdl(url);
+          data = await downloadWithTimeout(() => igdl(url));
+          if (!data || (Array.isArray(data) && data.length === 0)) {
+            throw new Error('Instagram primary service returned empty data');
+          }
         } catch (error) {
-          console.warn('Instagram primary downloader failed, trying fallback...');
-          data = await facebookInsta(url); // Fallback to metadownloader
+          console.warn('Instagram primary downloader failed, trying fallback...', error.message);
+          try {
+            data = await downloadWithTimeout(() => facebookInsta(url));
+            if (!data || !data.media) {
+              throw new Error('Instagram fallback service returned empty data');
+            }
+          } catch (fallbackError) {
+            console.error('Instagram fallback also failed:', fallbackError.message);
+            throw new Error('Instagram download failed - both primary and fallback methods failed');
+          }
         }
         break;
+
       case 'tiktok':
-        data = await ttdl(url);
+        try {
+          data = await downloadWithTimeout(() => ttdl(url));
+          if (!data || !data.video) {
+            throw new Error('TikTok service returned invalid data');
+          }
+        } catch (error) {
+          console.error('TikTok download failed:', error.message);
+          throw new Error('TikTok download failed - service unavailable');
+        }
         break;
+
       case 'facebook':
-        data = await facebookInsta(url); // Use metadownloader for Facebook
+        try {
+          data = await downloadWithTimeout(() => facebookInsta(url));
+          if (!data || (!data.media && !data.data)) {
+            throw new Error('Facebook service returned invalid data');
+          }
+        } catch (error) {
+          console.error('Facebook download failed:', error.message);
+          throw new Error('Facebook download failed - service unavailable');
+        }
         break;
+
       case 'twitter':
         try {
-          data = await twitter(url); // Try btch-downloader first
+          data = await downloadWithTimeout(() => twitter(url));
 
-          // Check if btch-downloader returned usable data
+          // Validate Twitter data
           const hasValidData = data.data && (data.data.HD || data.data.SD);
           const hasValidUrls = Array.isArray(data.url) && data.url.some(item =>
             item && Object.keys(item).length > 0 && item.url
           );
 
           if (!hasValidData && !hasValidUrls) {
-            throw new Error("btch-downloader returned unusable data");
+            throw new Error("Twitter primary service returned unusable data");
           }
         } catch (error) {
-          console.warn("Twitter: btch-downloader failed or returned unusable data, trying custom Twitter service...");
-          data = await downloadTwmateData(url); // Fallback to custom service
-          console.log('DEBUG DOWNLOAD: Custom service returned:', JSON.stringify(data, null, 2));
+          console.warn("Twitter: Primary service failed, trying custom service...", error.message);
+          try {
+            data = await downloadWithTimeout(() => downloadTwmateData(url));
+            console.log('Twitter custom service returned:', JSON.stringify(data, null, 2));
+            if (!data || (!Array.isArray(data) && !data.data)) {
+              throw new Error('Twitter custom service returned invalid data');
+            }
+          } catch (fallbackError) {
+            console.error('Twitter fallback also failed:', fallbackError.message);
+            throw new Error('Twitter download failed - both primary and fallback methods failed');
+          }
         }
         break;
+
       case 'youtube':
-        data = await fetchYouTubeData(url);
+        try {
+          data = await downloadWithTimeout(() => fetchYouTubeData(url));
+          if (!data || !data.title || !data.formats) {
+            throw new Error('YouTube service returned invalid data');
+          }
+        } catch (error) {
+          console.error('YouTube download failed:', error.message);
+          throw new Error('YouTube download failed - service unavailable');
+        }
         break;
+
       case 'pinterest':
-        data = await pindl(url);
+        try {
+          data = await downloadWithTimeout(() => pindl(url));
+          if (!data || (!data.result && !data.url)) {
+            throw new Error('Pinterest service returned invalid data');
+          }
+        } catch (error) {
+          console.error('Pinterest download failed:', error.message);
+          throw new Error('Pinterest download failed - service unavailable');
+        }
         break;
+
       case 'threads':
-        data = await threadsDownloader(url); // Use new service
+        try {
+          data = await downloadWithTimeout(() => threadsDownloader(url));
+          if (!data || !data.download) {
+            throw new Error('Threads service returned invalid data');
+          }
+        } catch (error) {
+          console.error('Threads download failed:', error.message);
+          throw new Error('Threads download failed - service unavailable');
+        }
         break;
+
       case 'linkedin':
-        data = await fetchLinkedinData(url);
+        try {
+          data = await downloadWithTimeout(() => fetchLinkedinData(url));
+          if (!data || !data.data || !data.data.videos) {
+            throw new Error('LinkedIn service returned invalid data');
+          }
+        } catch (error) {
+          console.error('LinkedIn download failed:', error.message);
+          throw new Error('LinkedIn download failed - service unavailable');
+        }
         break;
+
       default:
         console.error("Download Media: Platform identification failed unexpectedly.");
-        return res.status(500).json({ error: 'Platform identification failed' });
+        return res.status(500).json({
+          error: 'Platform identification failed',
+          success: false
+        });
     }
 
+    // Validate returned data
     if (!data) {
       console.error("Download Media: No data returned for the platform.");
-      return res.status(404).json({ error: 'Data not found for the platform' });
+      return res.status(404).json({
+        error: 'No data found for this URL',
+        success: false,
+        platform: platform
+      });
     }
 
-    const formattedData = await formatData(platform, data);
+    // Format data with enhanced error handling
+    let formattedData;
+    try {
+      formattedData = await formatData(platform, data);
+    } catch (formatError) {
+      console.error(`Download Media: Data formatting failed - ${formatError.message}`);
+      return res.status(500).json({
+        error: 'Failed to format media data',
+        success: false,
+        details: formatError.message,
+        platform: platform
+      });
+    }
+
+    // Validate formatted data
+    if (!formattedData || !formattedData.url) {
+      console.error("Download Media: Formatted data is invalid or missing URL.");
+      return res.status(500).json({
+        error: 'Invalid media data - no download URL found',
+        success: false,
+        platform: platform
+      });
+    }
 
     // Shorten URLs for all platforms except Threads
     if (platform !== 'threads') {
-      formattedData.url = await shortenUrl(formattedData.url);
-      formattedData.thumbnail = await shortenUrl(formattedData.thumbnail);
+      try {
+        if (formattedData.url) {
+          formattedData.url = await shortenUrl(formattedData.url);
+        }
+        if (formattedData.thumbnail) {
+          formattedData.thumbnail = await shortenUrl(formattedData.thumbnail);
+        }
+      } catch (shortenError) {
+        console.warn('URL shortening failed, using original URLs:', shortenError.message);
+        // Continue with original URLs - this is not a critical failure
+      }
     }
 
     console.info("Download Media: Media successfully downloaded and formatted.");
@@ -377,11 +505,21 @@ exports.downloadMedia = async (req, res) => {
     res.status(200).json({
       success: true,
       data: formattedData,
+      platform: platform,
+      timestamp: new Date().toISOString()
     });
+
   } catch (error) {
     console.error(`Download Media: Error occurred - ${error.message}`);
-    res.status(500).json({ error: 'Failed to download media' });
+    console.error('Error stack:', error.stack);
+
+    // Return detailed error response
+    res.status(500).json({
+      error: 'Failed to download media',
+      success: false,
+      details: error.message,
+      platform: platform,
+      timestamp: new Date().toISOString()
+    });
   }
 };
-
-
