@@ -1,37 +1,40 @@
-const ytdl = require('ytdl-core');
-
-function mapFormat(fmt) {
-  const hasVideo = !!fmt.hasVideo;
-  const hasAudio = !!fmt.hasAudio;
-  const type = hasVideo && hasAudio ? 'video_with_audio' : (hasVideo ? 'video' : 'audio');
-  const quality = fmt.qualityLabel || (fmt.audioBitrate ? `${fmt.audioBitrate}kb/s` : 'unknown');
-  const extension = fmt.container || 'mp4';
-  return {
-    itag: fmt.itag,
-    type,
-    quality,
-    extension,
-    url: fmt.url
-  };
-}
+const axios = require("axios");
 
 async function fetchYouTubeData(url) {
-  const info = await ytdl.getInfo(url);
+  try {
+    const res = await axios.get(
+      "https://api.vidfly.ai/api/media/youtube/download",
+      {
+        params: { url },
+        headers: {
+          accept: "*/*",
+          "content-type": "application/json",
+          "x-app-name": "vidfly-web",
+          "x-app-version": "1.0.0",
+          Referer: "https://vidfly.ai/",
+        },
+      }
+    );
 
-  const title = info.videoDetails?.title || 'YouTube Video';
-  const lengthSeconds = parseInt(info.videoDetails?.lengthSeconds || '0', 10);
-  const duration = lengthSeconds ? `${Math.floor(lengthSeconds/60)}:${String(lengthSeconds%60).padStart(2, '0')}` : null;
-  const thumbnail = info.videoDetails?.thumbnails?.slice(-1)[0]?.url || null;
+    const data = res.data?.data;
+    if (!data || !data.items || !data.title) {
+      throw new Error("Invalid or empty response from YouTube downloader API");
+    }
 
-  const progressive = ytdl.filterFormats(info.formats, 'audioandvideo');
-  const audioOnly = ytdl.filterFormats(info.formats, 'audioonly');
-
-  const formats = [
-    ...progressive.map(mapFormat),
-    ...audioOnly.map(mapFormat)
-  ];
-
-  return { title, thumbnail, duration, formats };
+    return {
+      title: data.title,
+      thumbnail: data.cover,
+      duration: data.duration,
+      formats: data.items.map((item) => ({
+        type: item.type,
+        quality: item.label || "unknown",
+        extension: item.ext || item.extension || "unknown",
+        url: item.url,
+      })),
+    };
+  } catch (err) {
+    throw new Error(`YouTube downloader request failed: ${err.message}`);
+  }
 }
 
 module.exports = { fetchYouTubeData };
