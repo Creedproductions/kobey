@@ -2,148 +2,135 @@ const express = require('express');
 const cors = require('cors');
 const downloaderRoutes = require('./Routes/downloaderRoutes');
 const config = require('./Config/config');
-const axios = require('axios');
 
+// Initialize Express app
 const app = express();
 
-// Middleware to parse JSON
-app.use(express.json());
-
-// Use CORS middleware to allow requests from specific origins
-const corsOptions = {
-  origin: ['https://savedownloader.vercel.app','https://savedownloaderweb.vercel.app','http://localhost:5173'],
-  methods: ['GET', 'POST', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'Range'],
-};
-app.use(cors(corsOptions));
-
-/**
- * Range-aware proxy to stream/serve remote media via your domain.
- * Fixes: blocked hosts (e.g., twmate.com), normalizes to single URL.
- * Usage: GET /api/proxy?u=<encoded-remote-url>
- */
-app.get('/api/proxy', async (req, res) => {
-  try {
-    const remote = req.query.u;
-    if (!remote || typeof remote !== 'string') {
-      return res.status(400).json({ error: 'Missing or invalid u param' });
-    }
-    if (!/^https?:\/\//i.test(remote)) {
-      return res.status(400).json({ error: 'Only http/https URLs allowed' });
-    }
-
-    const range = req.headers.range;
-    const headers = {
-      'Accept-Encoding': 'identity',
-      ...(range ? { Range: range } : {})
-    };
-
-    // Try HEAD to prefetch headers (some servers may block it)
-    let headLength = null;
-    let headType = null;
-    try {
-      const head = await axios.head(remote, { timeout: 10000, maxRedirects: 5 });
-      headLength = head.headers['content-length'] || null;
-      headType = head.headers['content-type'] || null;
-    } catch (_) {}
-
-    const upstream = await axios({
-      method: 'GET',
-      url: remote,
-      headers,
-      responseType: 'stream',
-      timeout: 30000,
-      maxRedirects: 5
-    });
-
-    const status = upstream.status; // 200 or 206
-    if (status === 206 && upstream.headers['content-range']) {
-      res.status(206);
-      res.set('Content-Range', upstream.headers['content-range']);
-    } else {
-      res.status(200);
-    }
-
-    res.set('Content-Type', headType || upstream.headers['content-type'] || 'application/octet-stream');
-    if (upstream.headers['content-length']) {
-      res.set('Content-Length', upstream.headers['content-length']);
-    } else if (headLength) {
-      res.set('Content-Length', headLength);
-    }
-    res.set('Content-Disposition', 'inline; filename="media.mp4"');
-
-    upstream.data.on('error', (e) => {
-      console.error('Proxy upstream error:', e.message);
-      if (!res.headersSent) res.sendStatus(502);
-      try { upstream.data.destroy(); } catch {}
-    });
-
-    upstream.data.pipe(res);
-  } catch (err) {
-    console.error('Proxy error:', err.message);
-    if (!res.headersSent) res.status(502).json({ error: 'Proxy failed', details: err.message });
-  }
-});
-
-// Use routes for downloading media (main functionality)
-app.use('/api', downloaderRoutes);
-
-// Health check endpoint
-app.get('/health', (req, res) => {
-  res.status(200).json({
-    status: 'OK',
-    timestamp: new Date().toISOString(),
-    environment: process.env.NODE_ENV || 'development',
-    features: ['downloads', 'proxy'],
-    database: 'disabled'
-  });
-});
-
-// Root endpoint
-app.get('/', (req, res) => {
-  res.status(200).json({
-    message: 'Media Downloader API',
-    status: 'running',
-    endpoints: {
-      health: '/health',
-      download: '/api/download',
-      mockVideos: '/api/mock-videos',
-      proxy: '/api/proxy?u=<encoded-url>'
-    }
-  });
-});
-
-// Global error handlers
-process.on('uncaughtException', (error) => {
-  console.error('❌ Uncaught Exception:', error);
-  if (process.env.NODE_ENV !== 'production') {
-    process.exit(1);
-  }
-});
-
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('❌ Unhandled Rejection at:', promise, 'reason:', reason);
-});
-
-process.on('SIGTERM', () => {
-  console.log('👋 SIGTERM received, shutting down gracefully');
-  process.exit(0);
-});
-
-// Start the server
+// Configuration
 const PORT = config.PORT || process.env.PORT || 8000;
-const server = app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
-  console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
-  console.log(`📊 Health check: http://localhost:${PORT}/health`);
-  console.log(`📥 Download API: http://localhost:${PORT}/api/download`);
-  console.log(`🔁 Proxy: http://localhost:${PORT}/api/proxy?u=<encoded-url>`);
-  console.log(`⚠️  Database features disabled - downloads only`);
-});
+const NODE_ENV = process.env.NODE_ENV || 'development';
 
-// Handle server errors
-server.on('error', (error) => {
-  console.error('❌ Server error:', error);
-});
+// CORS configuration
+const corsOptions = {
+  origin: [
+    'https://savedownloader.vercel.app',
+    'https://savedownloaderweb.vercel.app',
+    'http://localhost:5173'
+  ],
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+};
+
+// Middleware setup
+const setupMiddleware = () => {
+  app.use(express.json());
+  app.use(cors(corsOptions));
+};
+
+// Routes setup
+const setupRoutes = () => {
+  // Main API routes
+  app.use('/api', downloaderRoutes);
+
+  // Health check endpoint
+  app.get('/health', (req, res) => {
+    res.status(200).json({
+      status: 'OK',
+      timestamp: new Date().toISOString(),
+      environment: NODE_ENV,
+      features: ['downloads'],
+      database: 'disabled'
+    });
+  });
+
+  // Root endpoint
+  app.get('/', (req, res) => {
+    res.status(200).json({
+      message: 'Media Downloader API',
+      status: 'running',
+      endpoints: {
+        health: '/health',
+        download: '/api/download',
+        mockVideos: '/api/mock-videos'
+      }
+    });
+  });
+};
+
+// Error handling setup
+const setupErrorHandling = () => {
+  // Global error handlers
+  process.on('uncaughtException', (error) => {
+    console.error('❌ Uncaught Exception:', error);
+    // Don't exit in production
+    if (NODE_ENV !== 'production') {
+      process.exit(1);
+    }
+  });
+
+  process.on('unhandledRejection', (reason, promise) => {
+    console.error('❌ Unhandled Rejection at:', promise, 'reason:', reason);
+    // Don't exit in production
+  });
+
+  // Graceful shutdown
+  process.on('SIGTERM', () => {
+    console.log('👋 SIGTERM received, shutting down gracefully');
+    if (server) {
+      server.close(() => {
+        process.exit(0);
+      });
+    } else {
+      process.exit(0);
+    }
+  });
+
+  process.on('SIGINT', () => {
+    console.log('👋 SIGINT received, shutting down gracefully');
+    if (server) {
+      server.close(() => {
+        process.exit(0);
+      });
+    } else {
+      process.exit(0);
+    }
+  });
+};
+
+// Server startup
+const startServer = () => {
+  const server = app.listen(PORT, () => {
+    console.log(`🚀 Server running on port ${PORT}`);
+    console.log(`🌍 Environment: ${NODE_ENV}`);
+    console.log(`📊 Health check: http://localhost:${PORT}/health`);
+    console.log(`📥 Download API: http://localhost:${PORT}/api/download`);
+    console.log(`⚠️ Database features disabled - downloads only`);
+  });
+
+  // Handle server errors
+  server.on('error', (error) => {
+    console.error('❌ Server error:', error);
+    if (error.code === 'EADDRINUSE') {
+      console.error(`Port ${PORT} is already in use`);
+      process.exit(1);
+    }
+  });
+
+  return server;
+};
+
+// Initialize application
+const initializeApp = () => {
+  setupMiddleware();
+  setupRoutes();
+  setupErrorHandling();
+  return startServer();
+};
+
+// Start the application
+let server;
+if (require.main === module) {
+  server = initializeApp();
+}
 
 module.exports = app;
