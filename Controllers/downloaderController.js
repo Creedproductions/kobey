@@ -24,14 +24,72 @@ const SUPPORTED_PLATFORMS = [
 ];
 
 const PLACEHOLDER_THUMBNAIL = 'https://via.placeholder.com/300x150';
-const DOWNLOAD_TIMEOUT = 45000; // Increased to 45 seconds for better reliability
+const DOWNLOAD_TIMEOUT = 45000;
 
 // ===== UTILITY FUNCTIONS =====
 
 /**
+ * URL shortening function using multiple services
+ * @param {string} url - URL to shorten
+ * @returns {string} - Shortened URL or original if shortening fails
+ */
+const shortenUrl = async (url) => {
+  if (!url || url.length < 200) {
+    return url; // Don't shorten already short URLs
+  }
+
+  try {
+    // Try TinyURL first (more reliable, no API key needed)
+    const tinyResponse = await axios.post('https://tinyurl.com/api-create.php', null, {
+      params: { url },
+      timeout: 5000
+    });
+
+    if (tinyResponse.data && tinyResponse.data.startsWith('https://tinyurl.com/')) {
+      console.log('URL shortened with TinyURL');
+      return tinyResponse.data;
+    }
+  } catch (error) {
+    console.warn('TinyURL shortening failed:', error.message);
+  }
+
+  try {
+    // Fallback to is.gd
+    const isgdResponse = await axios.get('https://is.gd/create.php', {
+      params: {
+        format: 'simple',
+        url: url
+      },
+      timeout: 5000
+    });
+
+    if (isgdResponse.data && isgdResponse.data.startsWith('https://is.gd/')) {
+      console.log('URL shortened with is.gd');
+      return isgdResponse.data;
+    }
+  } catch (error) {
+    console.warn('is.gd shortening failed:', error.message);
+  }
+
+  // If both fail, try Bitly if token exists
+  if (config.BITLY_ACCESS_TOKEN) {
+    try {
+      const bitlyResponse = await bitly.shorten(url);
+      if (bitlyResponse && bitlyResponse.link) {
+        console.log('URL shortened with Bitly');
+        return bitlyResponse.link;
+      }
+    } catch (error) {
+      console.warn('Bitly shortening failed:', error.message);
+    }
+  }
+
+  console.log('URL shortening failed, using original URL');
+  return url; // Return original if all shortening fails
+};
+
+/**
  * Identifies the platform based on URL
- * @param {string} url - The URL to analyze
- * @returns {string|null} - The identified platform or null
  */
 const identifyPlatform = (url) => {
   console.info("Platform Identification: Determining the platform for the given URL.");
@@ -63,19 +121,15 @@ const identifyPlatform = (url) => {
 };
 
 /**
- * Normalizes and cleans YouTube URLs (preserves shorts functionality)
- * @param {string} url - YouTube URL
- * @returns {string} - Normalized URL
+ * Normalizes YouTube URLs (preserves shorts functionality)
  */
 const normalizeYouTubeUrl = (url) => {
-  // Remove fragments but preserve query parameters for regular videos
   let cleanUrl = url.split('#')[0];
 
   // Handle YouTube Shorts - PRESERVE YOUR EXISTING LOGIC
   const shortsRegex = /youtube\.com\/shorts\/([a-zA-Z0-9_-]+)/;
   const shortsMatch = cleanUrl.match(shortsRegex);
   if (shortsMatch) {
-    // Keep shorts as shorts for your existing functionality
     return `https://www.youtube.com/shorts/${shortsMatch[1]}`;
   }
 
@@ -91,8 +145,6 @@ const normalizeYouTubeUrl = (url) => {
 
 /**
  * Validates and cleans URL format
- * @param {string} url - URL to validate
- * @returns {Object} - Validation result with cleaned URL
  */
 const validateUrl = (url) => {
   if (!url) {
@@ -103,10 +155,8 @@ const validateUrl = (url) => {
     return { isValid: false, error: 'Invalid URL format' };
   }
 
-  // Clean URL
   const cleanedUrl = url.trim();
 
-  // Basic URL validation
   try {
     new URL(cleanedUrl);
   } catch (e) {
@@ -117,10 +167,7 @@ const validateUrl = (url) => {
 };
 
 /**
- * Enhanced timeout wrapper with better error handling
- * @param {Function} downloadFunction - The download function to wrap
- * @param {number} timeout - Timeout in milliseconds
- * @returns {Promise} - Promise with timeout
+ * Enhanced timeout wrapper
  */
 const downloadWithTimeout = (downloadFunction, timeout = DOWNLOAD_TIMEOUT) => {
   return Promise.race([
@@ -131,76 +178,163 @@ const downloadWithTimeout = (downloadFunction, timeout = DOWNLOAD_TIMEOUT) => {
   ]);
 };
 
-// ===== ENHANCED THREADS HANDLER =====
+// ===== ADVANCED THREADS HANDLER =====
 
 /**
- * Enhanced Threads downloader with better error handling
+ * Advanced Threads downloader with multiple extraction methods
  */
-const enhancedThreadsDownloader = async (url) => {
-  console.log('Enhanced Threads: Starting download for URL:', url);
+const advancedThreadsDownloader = async (url) => {
+  console.log('Advanced Threads: Starting comprehensive download for URL:', url);
 
+  // Method 1: Original service
   try {
-    // First attempt with original service
     const data = await downloadWithTimeout(() => threadsDownloader(url), 30000);
-    console.log('Enhanced Threads: Original service succeeded');
+    console.log('Advanced Threads: Original service succeeded');
     return data;
   } catch (error) {
-    console.warn('Enhanced Threads: Original service failed, trying alternative approach...', error.message);
+    console.warn('Advanced Threads: Original service failed:', error.message);
+  }
 
-    // Alternative approach for Threads
-    try {
-      // Clean URL and ensure proper format
-      let cleanUrl = url.replace('threads.com', 'threads.net').split('#')[0];
+  // Method 2: Direct HTML parsing with multiple approaches
+  try {
+    let cleanUrl = url.replace('threads.com', 'threads.net').split('#')[0].split('?')[0];
+    console.log('Advanced Threads: Trying direct parsing for:', cleanUrl);
 
-      // Try fetching with different user agent
-      const response = await axios.get(cleanUrl, {
-        timeout: 20000,
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-          'Accept-Language': 'en-US,en;q=0.5',
-          'Accept-Encoding': 'gzip, deflate, br',
-          'Connection': 'keep-alive',
-          'Upgrade-Insecure-Requests': '1',
-        }
-      });
+    const response = await axios.get(cleanUrl, {
+      timeout: 25000,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 15_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.5 Mobile/15E148 Safari/604.1',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Connection': 'keep-alive',
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'none',
+        'Cache-Control': 'no-cache'
+      }
+    });
 
-      const html = response.data;
+    const html = response.data;
+    console.log('Advanced Threads: HTML fetched, length:', html.length);
 
-      // Look for video URLs in different formats
-      const videoPatterns = [
-        /https:\/\/[^"']*\.mp4[^"']*/gi,
-        /"video_url":"([^"]+)"/gi,
-        /"playback_url":"([^"]+)"/gi,
-        /videoUrl.*?["']([^"']*\.mp4[^"']*)/gi
-      ];
+    // Multiple video extraction patterns
+    const extractionMethods = [
+      // Method A: Direct video URLs
+      {
+        name: 'Direct MP4',
+        regex: /https:\/\/[^"']*\.mp4[^"']*/gi,
+        process: (matches) => matches ? matches[0] : null
+      },
 
-      let videoUrl = null;
-      for (const pattern of videoPatterns) {
-        const matches = html.match(pattern);
-        if (matches && matches.length > 0) {
-          videoUrl = matches[0].replace(/"/g, '').replace('video_url:', '').replace('playback_url:', '');
-          if (videoUrl.startsWith('http')) {
-            break;
+      // Method B: JSON embedded video URLs
+      {
+        name: 'JSON video_url',
+        regex: /"video_url"\s*:\s*"([^"]+)"/gi,
+        process: (matches) => matches ? matches[0].replace(/"video_url"\s*:\s*"/, '').replace(/"/g, '') : null
+      },
+
+      // Method C: Playback URLs
+      {
+        name: 'JSON playback_url',
+        regex: /"playback_url"\s*:\s*"([^"]+)"/gi,
+        process: (matches) => matches ? matches[0].replace(/"playback_url"\s*:\s*"/, '').replace(/"/g, '') : null
+      },
+
+      // Method D: Meta video tags
+      {
+        name: 'Meta video',
+        regex: /<meta[^>]+property=["']og:video["'][^>]+content=["']([^"']+)["']/gi,
+        process: (matches) => matches ? matches[0].match(/content=["']([^"']+)["']/)?.[1] : null
+      },
+
+      // Method E: Script tag video data
+      {
+        name: 'Script video data',
+        regex: /"video":\s*{\s*"uri"\s*:\s*"([^"]+)"/gi,
+        process: (matches) => matches ? matches[0].match(/"uri"\s*:\s*"([^"]+)"/)?.[1] : null
+      }
+    ];
+
+    for (const method of extractionMethods) {
+      console.log(`Advanced Threads: Trying extraction method: ${method.name}`);
+      const matches = html.match(method.regex);
+
+      if (matches && matches.length > 0) {
+        for (const match of matches) {
+          const videoUrl = method.process([match]);
+
+          if (videoUrl && videoUrl.startsWith('http') && videoUrl.includes('.mp4')) {
+            console.log(`Advanced Threads: Found video URL using ${method.name}:`, videoUrl.substring(0, 100));
+
+            // Validate the video URL
+            try {
+              const headResponse = await axios.head(videoUrl, { timeout: 10000 });
+              if (headResponse.status === 200) {
+                return {
+                  title: 'Threads Post',
+                  download: videoUrl,
+                  thumbnail: extractThumbnail(html) || PLACEHOLDER_THUMBNAIL,
+                  quality: 'Best'
+                };
+              }
+            } catch (validationError) {
+              console.log(`Advanced Threads: URL validation failed for ${method.name}:`, validationError.message);
+              continue;
+            }
           }
         }
       }
-
-      if (videoUrl) {
-        console.log('Enhanced Threads: Alternative extraction succeeded');
-        return {
-          title: 'Threads Post',
-          download: videoUrl,
-          thumbnail: PLACEHOLDER_THUMBNAIL,
-          quality: 'Best'
-        };
-      }
-    } catch (altError) {
-      console.error('Enhanced Threads: Alternative approach also failed:', altError.message);
     }
-
-    throw new Error(`Threads download failed: ${error.message}. This may be due to the post being private, deleted, or containing only images/text without video content.`);
+  } catch (parseError) {
+    console.error('Advanced Threads: Direct parsing failed:', parseError.message);
   }
+
+  // Method 3: Try with mobile user agent
+  try {
+    const mobileUrl = url.replace('threads.com', 'threads.net');
+    const mobileResponse = await axios.get(mobileUrl, {
+      timeout: 20000,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Linux; Android 10; SM-G973F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.120 Mobile Safari/537.36'
+      }
+    });
+
+    const videoMatch = mobileResponse.data.match(/video_url['":\s]+([^'">\s]+\.mp4[^'">\s]*)/i);
+    if (videoMatch && videoMatch[1]) {
+      console.log('Advanced Threads: Mobile extraction succeeded');
+      return {
+        title: 'Threads Post',
+        download: videoMatch[1],
+        thumbnail: extractThumbnail(mobileResponse.data) || PLACEHOLDER_THUMBNAIL,
+        quality: 'Best'
+      };
+    }
+  } catch (mobileError) {
+    console.error('Advanced Threads: Mobile extraction failed:', mobileError.message);
+  }
+
+  throw new Error('Threads download failed: Unable to extract video content. The post may contain only images/text, be private, or use an unsupported video format.');
+};
+
+/**
+ * Extract thumbnail from HTML
+ */
+const extractThumbnail = (html) => {
+  const thumbnailPatterns = [
+    /<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i,
+    /<meta[^>]+name=["']twitter:image["'][^>]+content=["']([^"']+)["']/i,
+    /"image":\s*"([^"]+)"/i
+  ];
+
+  for (const pattern of thumbnailPatterns) {
+    const match = html.match(pattern);
+    if (match && match[1]) {
+      return match[1];
+    }
+  }
+
+  return null;
 };
 
 // ===== PLATFORM-SPECIFIC DOWNLOADERS =====
@@ -253,7 +387,6 @@ const platformDownloaders = {
     } catch (error) {
       console.warn("Twitter: Primary service failed, trying custom service...", error.message);
       const fallbackData = await downloadWithTimeout(() => downloadTwmateData(url));
-      console.log('Twitter custom service returned:', JSON.stringify(fallbackData, null, 2));
 
       if (!fallbackData || (!Array.isArray(fallbackData) && !fallbackData.data)) {
         throw new Error('Twitter download failed - both primary and fallback methods failed');
@@ -266,18 +399,16 @@ const platformDownloaders = {
     console.log('YouTube: Processing URL:', url);
 
     try {
-      // Use your existing YouTube service with longer timeout for regular videos
-      const timeout = url.includes('/shorts/') ? 30000 : 60000; // Longer timeout for regular videos
+      const timeout = url.includes('/shorts/') ? 30000 : 60000;
       const data = await downloadWithTimeout(() => fetchYouTubeData(url), timeout);
 
       if (!data || !data.title || !data.formats) {
         throw new Error('YouTube service returned invalid data');
       }
 
-      console.log('YouTube: Successfully fetched data');
+      console.log('YouTube: Successfully fetched data, formats count:', data.formats?.length || 0);
       return data;
     } catch (error) {
-      // Handle specific YouTube errors
       if (error.message.includes('Status code: 410')) {
         throw new Error('YouTube video not available (removed or private)');
       }
@@ -304,7 +435,7 @@ const platformDownloaders = {
   },
 
   async threads(url) {
-    return await enhancedThreadsDownloader(url);
+    return await advancedThreadsDownloader(url);
   },
 
   async linkedin(url) {
@@ -319,8 +450,8 @@ const platformDownloaders = {
 // ===== DATA FORMATTERS =====
 
 const dataFormatters = {
-  youtube(data) {
-    console.log('YouTube Formatter: Processing data...');
+  async youtube(data) {
+    console.log('YouTube Formatter: Processing data with formats:', data.formats?.length || 0);
 
     if (!data || !data.title) {
       throw new Error("YouTube data is incomplete or improperly formatted.");
@@ -330,7 +461,6 @@ const dataFormatters = {
     const videoOnly = data.formats?.filter(f => f.type === 'video') || [];
     const audioOnly = data.formats?.filter(f => f.type === 'audio') || [];
 
-    // Prioritize video with audio formats
     const bestVideo = videoWithAudio.find(f => f.quality?.includes('720p')) ||
                      videoWithAudio.find(f => f.quality?.includes('480p')) ||
                      videoWithAudio.find(f => f.quality?.includes('360p')) ||
@@ -341,14 +471,29 @@ const dataFormatters = {
     const bestAudio = audioOnly.find(f => f.quality?.includes('131kb/s') || f.extension === 'm4a') ||
                      audioOnly[0];
 
-    console.log('YouTube Formatter: Best video format selected:', bestVideo?.quality || 'none');
+    console.log('YouTube Formatter: Best video format:', bestVideo?.quality || 'none');
+    console.log('YouTube Formatter: Video URL length:', bestVideo?.url?.length || 0);
+
+    // Apply URL shortening for long YouTube URLs
+    let finalVideoUrl = bestVideo?.url || '';
+    let finalAudioUrl = bestAudio?.url || '';
+
+    if (finalVideoUrl.length > 500) {
+      console.log('YouTube Formatter: Shortening long video URL...');
+      finalVideoUrl = await shortenUrl(finalVideoUrl);
+    }
+
+    if (finalAudioUrl.length > 500) {
+      console.log('YouTube Formatter: Shortening long audio URL...');
+      finalAudioUrl = await shortenUrl(finalAudioUrl);
+    }
 
     return {
       title: data.title || 'Untitled Video',
-      url: bestVideo?.url || '',
+      url: finalVideoUrl,
       thumbnail: data.thumbnail || PLACEHOLDER_THUMBNAIL,
       sizes: [...videoWithAudio, ...videoOnly].map(f => f.quality).filter(Boolean),
-      audio: bestAudio?.url || '',
+      audio: finalAudioUrl,
       duration: data.duration || 'Unknown',
       source: 'youtube',
     };
@@ -380,8 +525,6 @@ const dataFormatters = {
   },
 
   twitter(data) {
-    console.log('DEBUG FORMATTING: Twitter data received in formatting:', JSON.stringify(data, null, 2));
-
     if (data.data && (data.data.HD || data.data.SD)) {
       const twitterData = data.data;
       return {
@@ -426,8 +569,6 @@ const dataFormatters = {
   },
 
   facebook(data) {
-    console.log("Processing Facebook data...");
-
     if (data && data.media && Array.isArray(data.media)) {
       const videoMedia = data.media.find(item => item.type === 'video') || data.media[0];
       return {
@@ -465,7 +606,6 @@ const dataFormatters = {
   },
 
   tiktok(data) {
-    console.log("Processing TikTok data...");
     return {
       title: data.title || 'Untitled Video',
       url: data.video?.[0] || '',
@@ -477,7 +617,6 @@ const dataFormatters = {
   },
 
   threads(data) {
-    console.log("Processing Threads data...");
     return {
       title: data.title || 'Threads Post',
       url: data.download,
@@ -488,7 +627,6 @@ const dataFormatters = {
   },
 
   linkedin(data) {
-    console.log("Processing LinkedIn data...");
     const videoUrl = Array.isArray(data?.data?.videos) && data.data.videos.length > 0
       ? data.data.videos[0]
       : '';
@@ -505,9 +643,6 @@ const dataFormatters = {
 
 /**
  * Standardizes the response for different platforms
- * @param {string} platform - The platform name
- * @param {Object} data - Raw data from platform
- * @returns {Object} - Formatted data
  */
 const formatData = async (platform, data) => {
   console.info(`Data Formatting: Formatting data for platform '${platform}'.`);
@@ -529,17 +664,11 @@ const formatData = async (platform, data) => {
 
 // ===== MAIN CONTROLLER =====
 
-/**
- * Main function to handle media download
- * @param {Object} req - Express request object
- * @param {Object} res - Express response object
- */
 const downloadMedia = async (req, res) => {
   const { url } = req.body;
   console.log("Received URL:", url);
 
   try {
-    // Validate and clean URL
     const urlValidation = validateUrl(url);
     if (!urlValidation.isValid) {
       console.warn(`Download Media: ${urlValidation.error}`);
@@ -550,9 +679,8 @@ const downloadMedia = async (req, res) => {
     }
 
     const cleanedUrl = urlValidation.cleanedUrl;
-
-    // Identify platform
     const platform = identifyPlatform(cleanedUrl);
+
     if (!platform) {
       console.warn("Download Media: Unsupported platform for the given URL.");
       return res.status(400).json({
@@ -562,7 +690,6 @@ const downloadMedia = async (req, res) => {
       });
     }
 
-    // Process URL (normalize if needed) - PRESERVE SHORTS FUNCTIONALITY
     let processedUrl = cleanedUrl;
     if (platform === 'youtube') {
       processedUrl = normalizeYouTubeUrl(cleanedUrl);
@@ -571,7 +698,6 @@ const downloadMedia = async (req, res) => {
 
     console.info(`Download Media: Fetching data for platform '${platform}'.`);
 
-    // Download data using platform-specific downloader
     const downloader = platformDownloaders[platform];
     if (!downloader) {
       throw new Error(`No downloader available for platform: ${platform}`);
@@ -579,7 +705,6 @@ const downloadMedia = async (req, res) => {
 
     const data = await downloader(processedUrl);
 
-    // Validate returned data
     if (!data) {
       console.error("Download Media: No data returned for the platform.");
       return res.status(404).json({
@@ -589,7 +714,6 @@ const downloadMedia = async (req, res) => {
       });
     }
 
-    // Format data
     let formattedData;
     try {
       formattedData = await formatData(platform, data);
@@ -603,7 +727,6 @@ const downloadMedia = async (req, res) => {
       });
     }
 
-    // Validate formatted data
     if (!formattedData || !formattedData.url) {
       console.error("Download Media: Formatted data is invalid or missing URL.");
       return res.status(500).json({
@@ -613,11 +736,10 @@ const downloadMedia = async (req, res) => {
       });
     }
 
-    // Log success and prepare response
-    console.log('Final video URL length:', formattedData.url.length);
+    console.log(`Final ${platform} URL length:`, formattedData.url.length);
+    console.log(`URL shortened: ${formattedData.url.length < 200 ? 'No' : 'Yes'}`);
     console.info("Download Media: Media successfully downloaded and formatted.");
 
-    // Send successful response
     res.status(200).json({
       success: true,
       data: formattedData,
@@ -628,7 +750,8 @@ const downloadMedia = async (req, res) => {
         cleanedUrl: cleanedUrl,
         processedUrl: processedUrl,
         hasValidUrl: !!formattedData.url,
-        urlLength: formattedData.url ? formattedData.url.length : 0
+        finalUrlLength: formattedData.url ? formattedData.url.length : 0,
+        urlShortened: formattedData.url && formattedData.url.length < 200
       }
     });
 
@@ -636,7 +759,6 @@ const downloadMedia = async (req, res) => {
     console.error(`Download Media: Error occurred - ${error.message}`);
     console.error('Error stack:', error.stack);
 
-    // Determine appropriate status code based on error
     let statusCode = 500;
     if (error.message.includes('not available') || error.message.includes('not found')) {
       statusCode = 404;
@@ -646,7 +768,6 @@ const downloadMedia = async (req, res) => {
       statusCode = 408;
     }
 
-    // Return detailed error response
     res.status(statusCode).json({
       error: 'Failed to download media',
       success: false,
@@ -658,25 +779,21 @@ const downloadMedia = async (req, res) => {
   }
 };
 
-/**
- * Provides user-friendly suggestions based on error type and platform
- * @param {string} errorMessage - The error message
- * @param {string} platform - The platform name
- * @returns {Array} - Array of suggestions
- */
 const getErrorSuggestions = (errorMessage, platform) => {
   const suggestions = [];
 
   if (platform === 'threads') {
-    suggestions.push('Make sure the Threads post contains video content (not just images or text)');
+    suggestions.push('Ensure the Threads post contains video content (not just images or text)');
     suggestions.push('Check if the post is public and not deleted');
-    suggestions.push('Try copying the URL again from the Threads app/website');
+    suggestions.push('Some Threads videos may use formats not yet supported');
+    suggestions.push('Try using a different Threads video post');
   }
 
   if (platform === 'youtube') {
     if (errorMessage.includes('timeout')) {
-      suggestions.push('YouTube videos may take longer to process - try again in a moment');
-      suggestions.push('Large videos may need more time to download');
+      suggestions.push('YouTube videos may take longer to process - the API is working but needs time');
+      suggestions.push('Check your frontend code to ensure it waits for the full response');
+      suggestions.push('Consider implementing a loading indicator for user feedback');
     }
   }
 
@@ -685,20 +802,9 @@ const getErrorSuggestions = (errorMessage, platform) => {
     suggestions.push('Try checking if the content is still accessible in a browser');
   }
 
-  if (errorMessage.includes('forbidden') || errorMessage.includes('403')) {
-    suggestions.push('The content may be age-restricted or region-locked');
-    suggestions.push('Try using a different content URL');
-  }
-
-  if (errorMessage.includes('timeout')) {
-    suggestions.push('The server may be slow or the content is very large');
-    suggestions.push('Try again in a few minutes');
-  }
-
   return suggestions;
 };
 
-// ===== EXPORTS =====
 module.exports = {
   downloadMedia
 };
