@@ -1,3 +1,4 @@
+// Services/threadsService.js
 const axios = require('axios');
 
 function sanitizeUrl(u) {
@@ -16,7 +17,7 @@ function normalizeThreadsUrl(url) {
       parsed.hostname = 'threads.net';
       u = parsed.toString();
     }
-  } catch { /* ignore */ }
+  } catch {}
   return u;
 }
 
@@ -78,7 +79,7 @@ function searchForVideoUrl(json) {
 module.exports = async function threadsDownloader(originalUrl) {
   const url = normalizeThreadsUrl(originalUrl);
 
-  // First attempt with strong headers
+  // Try with strong headers (some CDNs 403 otherwise)
   let resp;
   try {
     resp = await axios.get(url, {
@@ -94,7 +95,7 @@ module.exports = async function threadsDownloader(originalUrl) {
       }
     });
   } catch (e) {
-    // Retry once with different UA (some CDNs are picky)
+    // Retry once with different UA
     resp = await axios.get(url, {
       timeout: 15000,
       maxRedirects: 5,
@@ -107,7 +108,7 @@ module.exports = async function threadsDownloader(originalUrl) {
 
   const html = resp.data || '';
 
-  // 1) Try OpenGraph video
+  // 1) OpenGraph
   const ogVideo = pickMeta(html, 'og:video');
   if (ogVideo && /\.mp4(\?|$)/i.test(ogVideo)) {
     return {
@@ -118,7 +119,7 @@ module.exports = async function threadsDownloader(originalUrl) {
     };
   }
 
-  // 2) Scan JSON blobs
+  // 2) JSON blobs
   const blobs = extractJsonBlobs(html);
   for (const b of blobs) {
     const v = searchForVideoUrl(b);
@@ -132,7 +133,7 @@ module.exports = async function threadsDownloader(originalUrl) {
     }
   }
 
-  // 3) Fallback: first mp4 on page
+  // 3) Fallback
   const fallback = findFirstMp4(html);
   if (fallback) {
     return {

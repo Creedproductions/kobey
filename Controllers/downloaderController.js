@@ -1,24 +1,23 @@
+// Controllers/downloaderController.js
 const { ttdl, twitter } = require('btch-downloader');
 const { igdl } = require('btch-downloader');
+const { pindl } = require('jer-api');
 const { BitlyClient } = require('bitly');
 const config = require('../Config/config');
-const { pindl } = require('jer-api');
-const axios = require('axios');
 
-const threadsDownloader = require('../Services/threadsService');          // NEW impl (direct parser)
-const fetchLinkedinData = require('../Services/linkedinService');         // unchanged in your app
-const facebookInsta = require('../Services/facebookInstaService');        // you said IG/FB work
+const threadsDownloader = require('../Services/threadsService');          // NEW direct parser
+const fetchLinkedinData = require('../Services/linkedinService');         // unchanged
+const facebookInsta = require('../Services/facebookInstaService');        // unchanged
 const { downloadTwmateData } = require('../Services/twitterService');     // your current parser
-const { fetchYouTubeData } = require('../Services/youtubeService');       // ytdl-core version
+const { fetchYouTubeData } = require('../Services/youtubeService');       // your current YT service (vidfly or ytdl-core)
 
 const bitly = new BitlyClient(config.BITLY_ACCESS_TOKEN);
 
-// --- helpers ---
 const placeholderThumbnail = 'https://via.placeholder.com/300x150';
 
+// ---------------- helpers ----------------
 function sanitizeUrl(u) {
   if (!u || typeof u !== 'string') return '';
-  // strip whitespace & fragments like trailing '#'
   let x = u.trim();
   const hash = x.indexOf('#');
   if (hash !== -1) x = x.slice(0, hash);
@@ -37,14 +36,13 @@ function identifyPlatform(url) {
   return null;
 }
 
-// Normalize YT shorts
+// Normalize YouTube Shorts
 function normalizeYouTubeUrl(url) {
-  const shortsRegex = /youtube\.com\/shorts\/([a-zA-Z0-9_-]+)/;
-  const m = url.match(shortsRegex);
+  const m = url.match(/youtube\.com\/shorts\/([a-zA-Z0-9_-]+)/);
   return m ? `https://www.youtube.com/watch?v=${m[1]}` : url;
 }
 
-// Normalize Threads host/path to threads.net and remove fragments
+// Normalize Threads host to threads.net and strip fragments
 function normalizeThreadsUrl(url) {
   let u = sanitizeUrl(url);
   try {
@@ -53,26 +51,26 @@ function normalizeThreadsUrl(url) {
       parsed.hostname = 'threads.net';
       u = parsed.toString();
     }
-  } catch { /* ignore */ }
+  } catch {}
   return u;
 }
 
-// Build proxied URL
+// Wrap a raw media URL with the local proxy
 function toProxyUrl(req, rawUrl) {
   const base = `${req.protocol}://${req.get('host')}`;
   return `${base}/api/proxy?u=${encodeURIComponent(rawUrl)}`;
 }
 
-// Choose best twitter variant (single)
+// Choose one best Twitter variant
 function chooseBestTwitter(variants = []) {
   if (!Array.isArray(variants) || variants.length === 0) return null;
-  const pick = (arr, n) => arr.find(v => (v.quality || '').includes(n));
+  const pick = (arr, q) => arr.find(v => (v.quality || '').includes(q));
   return pick(variants, '1280x720') || pick(variants, '720x1280') ||
          pick(variants, '640x360') || pick(variants, '360x640') ||
          variants[0];
 }
 
-// --- main ---
+// --------------- main handler ---------------
 exports.downloadMedia = async (req, res) => {
   let { url } = req.body;
   url = sanitizeUrl(url);
@@ -115,16 +113,19 @@ exports.downloadMedia = async (req, res) => {
         }
         break;
       }
+
       case 'tiktok': {
         data = await withTimeout(() => ttdl(processedUrl));
         if (!data || !data.video) throw new Error('TikTok invalid');
         break;
       }
+
       case 'facebook': {
         data = await withTimeout(() => facebookInsta(processedUrl));
         if (!data || (!data.media && !data.data)) throw new Error('Facebook invalid');
         break;
       }
+
       case 'twitter': {
         try {
           data = await withTimeout(() => twitter(processedUrl));
@@ -137,21 +138,25 @@ exports.downloadMedia = async (req, res) => {
         }
         break;
       }
+
       case 'youtube': {
         data = await withTimeout(() => fetchYouTubeData(processedUrl));
         if (!data || !data.title || !Array.isArray(data.formats)) throw new Error('YouTube invalid');
         break;
       }
+
       case 'pinterest': {
         data = await withTimeout(() => pindl(processedUrl));
         if (!data || (!data.result && !data.url)) throw new Error('Pinterest invalid');
         break;
       }
+
       case 'threads': {
-        data = await withTimeout(() => threadsDownloader(processedUrl));
+        data = await withTimeout(() => threadsDownloader(processedUrl)); // NEW: direct page fetch
         if (!data || !data.download) throw new Error('Threads invalid');
         break;
       }
+
       case 'linkedin': {
         data = await withTimeout(() => fetchLinkedinData(processedUrl));
         if (!data || !data.data || !data.data.videos) throw new Error('LinkedIn invalid');
@@ -159,23 +164,28 @@ exports.downloadMedia = async (req, res) => {
       }
     }
 
-    // ---- Format to single best URL and proxy it ----
+    // ---- collapse to ONE best URL and PROXY it ----
     let title = 'Untitled Media';
     let finalRawUrl = '';
     let thumbnail = placeholderThumbnail;
-    let duration = undefined;
+    let duration;
 
     switch (platform) {
       case 'youtube': {
         title = data.title || 'YouTube Video';
         duration = data.duration || undefined;
+
+        // Prefer progressive (video+audio)
         const withAudio = data.formats.filter(f => f.type === 'video_with_audio');
-        const pref = (arr, q) => arr.find(f => (f.quality || '').includes(q));
-        const best = pref(withAudio, '1080p') || pref(withAudio, '720p') || pref(withAudio, '480p') || withAudio[0] || data.formats[0];
+        const pick = (arr, q) => arr.find(f => (f.quality || '').includes(q));
+        const best = pick(withAudio, '1080p') || pick(withAudio, '720p') || pick(withAudio, '480p') ||
+                     withAudio[0] || data.formats[0];
+
         finalRawUrl = best?.url || '';
         thumbnail = data.thumbnail || placeholderThumbnail;
         break;
       }
+
       case 'instagram': {
         if (data?.media && Array.isArray(data.media)) {
           finalRawUrl = data.media[0]?.url || '';
@@ -188,12 +198,14 @@ exports.downloadMedia = async (req, res) => {
         }
         break;
       }
+
       case 'tiktok': {
         title = data.title || 'TikTok Video';
         finalRawUrl = data.video?.[0] || '';
         thumbnail = data.thumbnail || placeholderThumbnail;
         break;
       }
+
       case 'facebook': {
         title = data.title || 'Facebook Video';
         if (data?.media && Array.isArray(data.media)) {
@@ -209,6 +221,7 @@ exports.downloadMedia = async (req, res) => {
         }
         break;
       }
+
       case 'twitter': {
         title = 'Twitter Video';
         if (data?.data && (data.data.HD || data.data.SD)) {
@@ -223,6 +236,7 @@ exports.downloadMedia = async (req, res) => {
         }
         break;
       }
+
       case 'pinterest': {
         const p = data?.data || data;
         finalRawUrl = p.result || p.url || '';
@@ -230,12 +244,14 @@ exports.downloadMedia = async (req, res) => {
         thumbnail = p.result || p.url || placeholderThumbnail;
         break;
       }
+
       case 'threads': {
         title = data.title || 'Threads Post';
         finalRawUrl = data.download || '';
         thumbnail = data.thumbnail || placeholderThumbnail;
         break;
       }
+
       case 'linkedin': {
         title = 'LinkedIn Video';
         const v = Array.isArray(data?.data?.videos) && data.data.videos.length > 0 ? data.data.videos[0] : '';
@@ -253,7 +269,7 @@ exports.downloadMedia = async (req, res) => {
       });
     }
 
-    // IMPORTANT: Always proxy the final URL (fixes YT & Twitter host blocks)
+    // ALWAYS proxy the final URL (fixes YT stalling & blocked hosts)
     const proxied = toProxyUrl(req, finalRawUrl);
 
     return res.status(200).json({
@@ -266,7 +282,7 @@ exports.downloadMedia = async (req, res) => {
         thumbnail,
         duration,
         source: platform,
-        sizes: ['Best'] // client can ignore sizes now
+        sizes: ['Best']
       },
       debug: {
         originalUrl: url,
