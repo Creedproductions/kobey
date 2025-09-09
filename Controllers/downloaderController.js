@@ -1,20 +1,24 @@
-const { ttdl, twitter } = require('btch-downloader');
-const { igdl } = require('btch-downloader');
+// Controllers/downloaderController.js
+const { ttdl, twitter, igdl } = require('btch-downloader');
 const { pindl } = require('jer-api');
 const { BitlyClient } = require('bitly');
 const config = require('../Config/config');
 
-const threadsDownloader = require('../Services/threadsService');          // direct parser (below)
-const fetchLinkedinData = require('../Services/linkedinService');         // unchanged
-const facebookInsta = require('../Services/facebookInstaService');        // unchanged
-const { downloadTwmateData } = require('../Services/twitterService');     // your parser
-const { fetchYouTubeData } = require('../Services/youtubeService');       // vidfly or ytdl-core
+const threadsDownloader = require('../Services/threadsService');
+const fetchLinkedinData = require('../Services/linkedinService');
+const facebookInsta = require('../Services/facebookInstaService');
+const { downloadTwmateData } = require('../Services/twitterService');
+const { fetchYouTubeData } = require('../Services/youtubeService');
 
 const bitly = new BitlyClient(config.BITLY_ACCESS_TOKEN);
 
 const placeholderThumbnail = 'https://via.placeholder.com/300x150';
 
 // ---------- helpers ----------
+function log(...args) { console.log('[DL]', ...args); }
+function warn(...args) { console.warn('[DL]', ...args); }
+function err(...args) { console.error('[DL]', ...args); }
+
 function sanitizeUrl(u) {
   if (!u || typeof u !== 'string') return '';
   let x = u.trim();
@@ -61,9 +65,13 @@ function chooseBestTwitter(variants = []) {
 exports.downloadMedia = async (req, res) => {
   let { url } = req.body;
   url = sanitizeUrl(url);
+  log('Received URL:', url);
+
   if (!url) return res.status(400).json({ error: 'Invalid or missing URL', success: false });
 
   const platform = identifyPlatform(url);
+  log('Platform Identification:', platform || 'unknown');
+
   if (!platform) {
     return res.status(400).json({
       error: 'Unsupported platform',
@@ -75,6 +83,7 @@ exports.downloadMedia = async (req, res) => {
   let processedUrl = url;
   if (platform === 'youtube') processedUrl = normalizeYouTubeUrl(processedUrl);
   if (platform === 'threads') processedUrl = normalizeThreadsUrl(processedUrl);
+  log('Processed URL:', processedUrl);
 
   try {
     const withTimeout = (fn) =>
@@ -84,54 +93,74 @@ exports.downloadMedia = async (req, res) => {
     switch (platform) {
       case 'instagram':
         try {
+          log('IG: trying btch igdl');
           data = await withTimeout(() => igdl(processedUrl));
-          if (!data || (Array.isArray(data) && data.length === 0)) throw new Error('Instagram primary empty');
+          if (!data || (Array.isArray(data) && data.length === 0)) throw new Error('empty');
+          log('IG: primary ok');
         } catch {
+          log('IG: primary failed, trying facebookInsta fallback');
           data = await withTimeout(() => facebookInsta(processedUrl));
-          if (!data || !data.media) throw new Error('Instagram fallback empty');
+          if (!data || !data.media) throw new Error('fallback empty');
+          log('IG: fallback ok');
         }
         break;
 
       case 'tiktok':
+        log('TT: using ttdl');
         data = await withTimeout(() => ttdl(processedUrl));
         if (!data || !data.video) throw new Error('TikTok invalid');
+        log('TT: fetch ok');
         break;
 
       case 'facebook':
+        log('FB: using facebookInsta');
         data = await withTimeout(() => facebookInsta(processedUrl));
         if (!data || (!data.media && !data.data)) throw new Error('Facebook invalid');
+        log('FB: fetch ok');
         break;
 
       case 'twitter':
         try {
+          log('TW: trying btch twitter');
           data = await withTimeout(() => twitter(processedUrl));
           const ok = data?.data && (data.data.HD || data.data.SD);
           const variants = Array.isArray(data?.url) && data.url.some(v => v?.url);
-          if (!ok && !variants) throw new Error('Primary unusable');
+          if (!ok && !variants) throw new Error('primary unusable');
+          log('TW: primary ok');
         } catch {
+          log('TW: primary failed, trying TWMate fallback');
           data = await withTimeout(() => downloadTwmateData(processedUrl));
-          if (!data || (!Array.isArray(data) && !data.data)) throw new Error('Custom invalid');
+          if (!data || (!Array.isArray(data) && !data.data)) throw new Error('fallback invalid');
+          log('TW: fallback ok');
         }
         break;
 
       case 'youtube':
+        log('YT: fetching formats (ytdl-core service)');
         data = await withTimeout(() => fetchYouTubeData(processedUrl));
         if (!data || !data.title || !Array.isArray(data.formats)) throw new Error('YouTube invalid');
+        log(`YT: got ${data.formats.length} formats`);
         break;
 
       case 'pinterest':
+        log('PIN: using pindl');
         data = await withTimeout(() => pindl(processedUrl));
         if (!data || (!data.result && !data.url)) throw new Error('Pinterest invalid');
+        log('PIN: fetch ok');
         break;
 
       case 'threads':
-        data = await withTimeout(() => threadsDownloader(processedUrl)); // NEW direct parser (no third-party)
+        log('THR: fetching page & parsing');
+        data = await withTimeout(() => threadsDownloader(processedUrl));
         if (!data || !data.download) throw new Error('Threads invalid');
+        log('THR: parse ok');
         break;
 
       case 'linkedin':
+        log('LI: using linkedin service');
         data = await withTimeout(() => fetchLinkedinData(processedUrl));
         if (!data || !data.data || !data.data.videos) throw new Error('LinkedIn invalid');
+        log('LI: fetch ok');
         break;
     }
 
@@ -151,6 +180,7 @@ exports.downloadMedia = async (req, res) => {
                      withAudio[0] || data.formats[0];
         finalRawUrl = best?.url || '';
         thumbnail = data.thumbnail || placeholderThumbnail;
+        log('YT: selected format:', best ? `${best.quality} (${best.extension})` : 'none');
         break;
       }
       case 'instagram': {
@@ -223,6 +253,7 @@ exports.downloadMedia = async (req, res) => {
     }
 
     if (!finalRawUrl) {
+      warn('No final URL produced');
       return res.status(500).json({
         success: false,
         error: 'Invalid media data - no download URL found',
@@ -230,30 +261,23 @@ exports.downloadMedia = async (req, res) => {
       });
     }
 
-    // CRITICAL: always proxy (fixes YouTube & Twitter issues)
+    try {
+      const host = new URL(finalRawUrl).host;
+      log('Chosen source host:', host);
+    } catch {}
+
     const proxied = toProxyUrl(req, finalRawUrl);
+    log('Returning proxied URL.');
 
     return res.status(200).json({
       success: true,
       platform,
       timestamp: new Date().toISOString(),
-      data: {
-        title,
-        url: proxied,
-        thumbnail,
-        duration,
-        source: platform,
-        sizes: ['Best']
-      },
-      debug: {
-        originalUrl: url,
-        processedUrl,
-        chosenRawUrlHost: (() => { try { return new URL(finalRawUrl).host; } catch { return 'n/a'; } })(),
-        proxied: true
-      }
+      data: { title, url: proxied, thumbnail, duration, source: platform, sizes: ['Best'] },
+      debug: { originalUrl: url, processedUrl, proxied: true }
     });
   } catch (error) {
-    console.error(`Download Media: Error - ${error.message}`);
+    err('Error:', error.message);
     return res.status(500).json({
       error: 'Failed to download media',
       success: false,
