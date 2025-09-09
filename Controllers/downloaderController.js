@@ -420,7 +420,7 @@ const downloadMedia = async (req, res) => {
   console.log("Received URL:", url);
 
   try {
-    // Validate URL
+    // Validate and clean URL
     const urlValidation = validateUrl(url);
     if (!urlValidation.isValid) {
       console.warn(`Download Media: ${urlValidation.error}`);
@@ -430,8 +430,10 @@ const downloadMedia = async (req, res) => {
       });
     }
 
+    const cleanedUrl = urlValidation.cleanedUrl || url.trim();
+
     // Identify platform
-    const platform = identifyPlatform(url);
+    const platform = identifyPlatform(cleanedUrl);
     if (!platform) {
       console.warn("Download Media: Unsupported platform for the given URL.");
       return res.status(400).json({
@@ -442,9 +444,10 @@ const downloadMedia = async (req, res) => {
     }
 
     // Process URL (normalize if needed)
-    let processedUrl = url;
+    let processedUrl = cleanedUrl;
     if (platform === 'youtube') {
-      processedUrl = normalizeYouTubeUrl(url);
+      processedUrl = normalizeYouTubeUrl(cleanedUrl);
+      console.log(`YouTube URL normalized: ${cleanedUrl} -> ${processedUrl}`);
     }
 
     console.info(`Download Media: Fetching data for platform '${platform}'.`);
@@ -504,6 +507,7 @@ const downloadMedia = async (req, res) => {
       timestamp: new Date().toISOString(),
       debug: {
         originalUrl: url,
+        cleanedUrl: cleanedUrl,
         processedUrl: processedUrl,
         hasValidUrl: !!formattedData.url,
         urlLength: formattedData.url ? formattedData.url.length : 0,
@@ -515,15 +519,57 @@ const downloadMedia = async (req, res) => {
     console.error(`Download Media: Error occurred - ${error.message}`);
     console.error('Error stack:', error.stack);
 
+    // Determine appropriate status code based on error
+    let statusCode = 500;
+    if (error.message.includes('not available') || error.message.includes('not found')) {
+      statusCode = 404;
+    } else if (error.message.includes('forbidden') || error.message.includes('access')) {
+      statusCode = 403;
+    } else if (error.message.includes('timeout')) {
+      statusCode = 408;
+    }
+
     // Return detailed error response
-    res.status(500).json({
+    res.status(statusCode).json({
       error: 'Failed to download media',
       success: false,
       details: error.message,
       platform: identifyPlatform(url),
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
+      suggestions: getErrorSuggestions(error.message)
     });
   }
+};
+
+/**
+ * Provides user-friendly suggestions based on error type
+ * @param {string} errorMessage - The error message
+ * @returns {Array} - Array of suggestions
+ */
+const getErrorSuggestions = (errorMessage) => {
+  const suggestions = [];
+
+  if (errorMessage.includes('not available') || errorMessage.includes('410')) {
+    suggestions.push('The video may have been removed or made private');
+    suggestions.push('Try checking if the video is still accessible in a browser');
+  }
+
+  if (errorMessage.includes('forbidden') || errorMessage.includes('403')) {
+    suggestions.push('The video may be age-restricted or region-locked');
+    suggestions.push('Try using a different video URL');
+  }
+
+  if (errorMessage.includes('timeout')) {
+    suggestions.push('The video may be very large or the server is slow');
+    suggestions.push('Try again in a few minutes');
+  }
+
+  if (errorMessage.includes('not found') || errorMessage.includes('404')) {
+    suggestions.push('Check if the URL is correct');
+    suggestions.push('The video may have been deleted');
+  }
+
+  return suggestions;
 };
 
 // ===== ROUTES =====
