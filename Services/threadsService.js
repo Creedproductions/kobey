@@ -1,8 +1,23 @@
 const axios = require('axios');
 
-function extractThreadId(url) {
-  const m = url.match(/threads\.net\/(?:@[^/]+\/post\/|t\/)(\d+)/i);
-  return m ? m[1] : null;
+function sanitizeUrl(u) {
+  if (!u || typeof u !== 'string') return '';
+  let x = u.trim();
+  const hash = x.indexOf('#');
+  if (hash !== -1) x = x.slice(0, hash);
+  return x;
+}
+
+function normalizeThreadsUrl(url) {
+  let u = sanitizeUrl(url);
+  try {
+    const parsed = new URL(u);
+    if (parsed.hostname === 'threads.com') {
+      parsed.hostname = 'threads.net';
+      u = parsed.toString();
+    }
+  } catch { /* ignore */ }
+  return u;
 }
 
 function pickMeta(content, prop) {
@@ -40,7 +55,7 @@ function extractJsonBlobs(html) {
   return blobs;
 }
 
-function searchForThreadVideo(json) {
+function searchForVideoUrl(json) {
   let url = null;
   const walk = (node) => {
     if (!node || typeof node !== 'object') return;
@@ -60,18 +75,39 @@ function searchForThreadVideo(json) {
   return url;
 }
 
-module.exports = async function threadsDownloader(threadUrl) {
-  const resp = await axios.get(threadUrl, {
-    timeout: 15000,
-    maxRedirects: 5,
-    headers: {
-      'User-Agent': 'Mozilla/5.0 (compatible; UniSaverBot/1.0)',
-      'Accept-Language': 'en-US,en;q=0.9'
-    }
-  });
+module.exports = async function threadsDownloader(originalUrl) {
+  const url = normalizeThreadsUrl(originalUrl);
+
+  // First attempt with strong headers
+  let resp;
+  try {
+    resp = await axios.get(url, {
+      timeout: 15000,
+      maxRedirects: 5,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0 Safari/537.36',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Cache-Control': 'no-cache',
+        'Pragma': 'no-cache',
+        'Upgrade-Insecure-Requests': '1'
+      }
+    });
+  } catch (e) {
+    // Retry once with different UA (some CDNs are picky)
+    resp = await axios.get(url, {
+      timeout: 15000,
+      maxRedirects: 5,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15',
+        'Accept-Language': 'en-US,en;q=0.9'
+      }
+    });
+  }
+
   const html = resp.data || '';
 
-  // 1) Try og:video first
+  // 1) Try OpenGraph video
   const ogVideo = pickMeta(html, 'og:video');
   if (ogVideo && /\.mp4(\?|$)/i.test(ogVideo)) {
     return {
@@ -82,10 +118,10 @@ module.exports = async function threadsDownloader(threadUrl) {
     };
   }
 
-  // 2) JSON blobs
+  // 2) Scan JSON blobs
   const blobs = extractJsonBlobs(html);
   for (const b of blobs) {
-    const v = searchForThreadVideo(b);
+    const v = searchForVideoUrl(b);
     if (v && /^https?:\/\//i.test(v)) {
       return {
         title: 'Threads Post',
@@ -96,7 +132,7 @@ module.exports = async function threadsDownloader(threadUrl) {
     }
   }
 
-  // 3) Fallback: any mp4 in page
+  // 3) Fallback: first mp4 on page
   const fallback = findFirstMp4(html);
   if (fallback) {
     return {
