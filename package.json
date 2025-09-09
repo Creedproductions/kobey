@@ -30,7 +30,8 @@
     "node-fetch": "^2.7.0",
     "nodemailer": "^6.9.16",
     "pg": "^8.13.1",
-    "tinyurl": "^1.1.7"
+    "tinyurl": "^1.1.7",
+    "ytdl-core": "^4.11.5"
   },
   "devDependencies": {
     "nodemon": "^3.1.7"
