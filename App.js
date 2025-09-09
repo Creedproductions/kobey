@@ -9,7 +9,7 @@ const app = express();
 // Middleware to parse JSON
 app.use(express.json());
 
-// CORS
+// Use CORS middleware to allow requests from specific origins
 const corsOptions = {
   origin: ['https://savedownloader.vercel.app','https://savedownloaderweb.vercel.app','http://localhost:5173'],
   methods: ['GET', 'POST', 'OPTIONS'],
@@ -18,8 +18,8 @@ const corsOptions = {
 app.use(cors(corsOptions));
 
 /**
- * Range-aware proxy to stream remote media via YOUR domain.
- * Fixes blocked hosts (googlevideo, twmate), and “starts then stalls”.
+ * Range-aware proxy to stream/serve remote media via your domain.
+ * Fixes: blocked hosts (e.g., twmate.com), normalizes to single URL.
  * Usage: GET /api/proxy?u=<encoded-remote-url>
  */
 app.get('/api/proxy', async (req, res) => {
@@ -38,13 +38,14 @@ app.get('/api/proxy', async (req, res) => {
       ...(range ? { Range: range } : {})
     };
 
-    // Optional HEAD to detect size/type (some hosts block HEAD – ignore failures)
-    let headLen = null, headType = null;
+    // Try HEAD to prefetch headers (some servers may block it)
+    let headLength = null;
+    let headType = null;
     try {
       const head = await axios.head(remote, { timeout: 10000, maxRedirects: 5 });
-      headLen = head.headers['content-length'] || null;
+      headLength = head.headers['content-length'] || null;
       headType = head.headers['content-type'] || null;
-    } catch {}
+    } catch (_) {}
 
     const upstream = await axios({
       method: 'GET',
@@ -55,8 +56,8 @@ app.get('/api/proxy', async (req, res) => {
       maxRedirects: 5
     });
 
-    // Preserve 206 if partial content
-    if (upstream.status === 206 && upstream.headers['content-range']) {
+    const status = upstream.status; // 200 or 206
+    if (status === 206 && upstream.headers['content-range']) {
       res.status(206);
       res.set('Content-Range', upstream.headers['content-range']);
     } else {
@@ -64,9 +65,11 @@ app.get('/api/proxy', async (req, res) => {
     }
 
     res.set('Content-Type', headType || upstream.headers['content-type'] || 'application/octet-stream');
-    if (upstream.headers['content-length']) res.set('Content-Length', upstream.headers['content-length']);
-    else if (headLen) res.set('Content-Length', headLen);
-
+    if (upstream.headers['content-length']) {
+      res.set('Content-Length', upstream.headers['content-length']);
+    } else if (headLength) {
+      res.set('Content-Length', headLength);
+    }
     res.set('Content-Disposition', 'inline; filename="media.mp4"');
 
     upstream.data.on('error', (e) => {
@@ -82,10 +85,10 @@ app.get('/api/proxy', async (req, res) => {
   }
 });
 
-// Routes
+// Use routes for downloading media (main functionality)
 app.use('/api', downloaderRoutes);
 
-// Health check
+// Health check endpoint
 app.get('/health', (req, res) => {
   res.status(200).json({
     status: 'OK',
@@ -96,7 +99,7 @@ app.get('/health', (req, res) => {
   });
 });
 
-// Root
+// Root endpoint
 app.get('/', (req, res) => {
   res.status(200).json({
     message: 'Media Downloader API',
@@ -113,26 +116,32 @@ app.get('/', (req, res) => {
 // Global error handlers
 process.on('uncaughtException', (error) => {
   console.error('❌ Uncaught Exception:', error);
-  if (process.env.NODE_ENV !== 'production') process.exit(1);
+  if (process.env.NODE_ENV !== 'production') {
+    process.exit(1);
+  }
 });
+
 process.on('unhandledRejection', (reason, promise) => {
   console.error('❌ Unhandled Rejection at:', promise, 'reason:', reason);
 });
+
 process.on('SIGTERM', () => {
   console.log('👋 SIGTERM received, shutting down gracefully');
   process.exit(0);
 });
 
-// Start
+// Start the server
 const PORT = config.PORT || process.env.PORT || 8000;
 const server = app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
   console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
   console.log(`📊 Health check: http://localhost:${PORT}/health`);
   console.log(`📥 Download API: http://localhost:${PORT}/api/download`);
-  console.log(`🔁 Proxy: http://localhost:${PORT}/api/proxy?u=<encoded-url>`); // <-- expect this line at boot
+  console.log(`🔁 Proxy: http://localhost:${PORT}/api/proxy?u=<encoded-url>`);
   console.log(`⚠️  Database features disabled - downloads only`);
 });
+
+// Handle server errors
 server.on('error', (error) => {
   console.error('❌ Server error:', error);
 });
