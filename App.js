@@ -1,4 +1,4 @@
-// app.js
+// App.js
 const express = require('express');
 const cors = require('cors');
 const downloaderRoutes = require('./Routes/downloaderRoutes');
@@ -6,11 +6,9 @@ const config = require('./Config/config');
 
 // Initialize Express app
 const app = express();
-
-// Trust proxy (Render runs behind a proxy)
 app.set('trust proxy', 1);
 
-// Configuration — prefer Render's injected PORT
+// Configuration — always prefer Render's injected port
 const PORT = process.env.PORT || config.PORT || 8000;
 const NODE_ENV = process.env.NODE_ENV || 'development';
 
@@ -33,7 +31,6 @@ const setupMiddleware = () => {
 
 // Routes setup
 const setupRoutes = () => {
-  // Main API routes
   app.use('/api', downloaderRoutes);
 
   // Health check endpoint
@@ -61,9 +58,9 @@ const setupRoutes = () => {
   });
 };
 
-// Error handling & signals
-let server; // hoisted so signal handlers can reference it
+let server; // so we can reference in signal handlers
 
+// Error handling setup
 const setupErrorHandling = () => {
   process.on('uncaughtException', (error) => {
     console.error('❌ Uncaught Exception:', error);
@@ -78,7 +75,6 @@ const setupErrorHandling = () => {
     console.log(`👋 ${signal} received, shutting down gracefully`);
     if (server) {
       server.close(() => process.exit(0));
-      // Fallback: force-exit if not closed in time
       setTimeout(() => process.exit(0), 5000).unref();
     } else {
       process.exit(0);
@@ -100,7 +96,6 @@ const startServer = () => {
     console.log(`⚠️ Database features disabled - downloads only`);
   });
 
-  // Handle server errors
   server.on('error', (error) => {
     console.error('❌ Server error:', error);
     if (error.code === 'EADDRINUSE') {
@@ -120,9 +115,10 @@ const initializeApp = () => {
   return startServer();
 };
 
-// Start the application if run directly
+// If run directly, start server
 if (require.main === module) {
   initializeApp();
 }
 
-module.exports = app;
+// Export for index.js
+module.exports = { app, initializeApp };
