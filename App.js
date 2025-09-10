@@ -1,3 +1,4 @@
+// app.js
 const express = require('express');
 const cors = require('cors');
 const downloaderRoutes = require('./Routes/downloaderRoutes');
@@ -6,8 +7,11 @@ const config = require('./Config/config');
 // Initialize Express app
 const app = express();
 
-// Configuration
-const PORT = config.PORT || process.env.PORT || 8000;
+// Trust proxy (Render runs behind a proxy)
+app.set('trust proxy', 1);
+
+// Configuration — prefer Render's injected PORT
+const PORT = process.env.PORT || config.PORT || 8000;
 const NODE_ENV = process.env.NODE_ENV || 'development';
 
 // CORS configuration
@@ -23,7 +27,7 @@ const corsOptions = {
 
 // Middleware setup
 const setupMiddleware = () => {
-  app.use(express.json());
+  app.use(express.json({ limit: '5mb' }));
   app.use(cors(corsOptions));
 };
 
@@ -57,53 +61,42 @@ const setupRoutes = () => {
   });
 };
 
-// Error handling setup
+// Error handling & signals
+let server; // hoisted so signal handlers can reference it
+
 const setupErrorHandling = () => {
-  // Global error handlers
   process.on('uncaughtException', (error) => {
     console.error('❌ Uncaught Exception:', error);
-    // Don't exit in production
-    if (NODE_ENV !== 'production') {
-      process.exit(1);
-    }
+    if (NODE_ENV !== 'production') process.exit(1);
   });
 
   process.on('unhandledRejection', (reason, promise) => {
     console.error('❌ Unhandled Rejection at:', promise, 'reason:', reason);
-    // Don't exit in production
   });
 
-  // Graceful shutdown
-  process.on('SIGTERM', () => {
-    console.log('👋 SIGTERM received, shutting down gracefully');
+  const graceful = (signal) => {
+    console.log(`👋 ${signal} received, shutting down gracefully`);
     if (server) {
-      server.close(() => {
-        process.exit(0);
-      });
+      server.close(() => process.exit(0));
+      // Fallback: force-exit if not closed in time
+      setTimeout(() => process.exit(0), 5000).unref();
     } else {
       process.exit(0);
     }
-  });
+  };
 
-  process.on('SIGINT', () => {
-    console.log('👋 SIGINT received, shutting down gracefully');
-    if (server) {
-      server.close(() => {
-        process.exit(0);
-      });
-    } else {
-      process.exit(0);
-    }
-  });
+  process.on('SIGTERM', () => graceful('SIGTERM'));
+  process.on('SIGINT', () => graceful('SIGINT'));
 };
 
 // Server startup
 const startServer = () => {
-  const server = app.listen(PORT, () => {
-    console.log(`🚀 Server running on port ${PORT}`);
+  const host = '0.0.0.0';
+  server = app.listen(PORT, host, () => {
+    console.log(`🚀 Server running on http://${host}:${PORT}`);
     console.log(`🌍 Environment: ${NODE_ENV}`);
-    console.log(`📊 Health check: http://localhost:${PORT}/health`);
-    console.log(`📥 Download API: http://localhost:${PORT}/api/download`);
+    console.log(`📊 Health check: http://${host}:${PORT}/health`);
+    console.log(`📥 Download API: http://${host}:${PORT}/api/download`);
     console.log(`⚠️ Database features disabled - downloads only`);
   });
 
@@ -127,10 +120,9 @@ const initializeApp = () => {
   return startServer();
 };
 
-// Start the application
-let server;
+// Start the application if run directly
 if (require.main === module) {
-  server = initializeApp();
+  initializeApp();
 }
 
 module.exports = app;
