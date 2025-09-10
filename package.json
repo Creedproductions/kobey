@@ -1,10 +1,10 @@
 {
   "name": "downloader-api",
   "version": "1.0.0",
-  "main": "app.js",
+  "main": "App.js",
   "scripts": {
-    "start": "node app.js",
-    "dev": "nodemon app.js",
+    "start": "node index.js",
+    "dev": "nodemon App.js",
     "build": "echo \"Build completed successfully. No build process required for this Node.js backend.\""
   },
   "keywords": [],
