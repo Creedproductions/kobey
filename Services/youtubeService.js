@@ -104,3 +104,5 @@ async function fetchYouTubeData(url) {
     throw new Error(`YouTube downloader request failed: ${err.message}`);
   }
 }
+
+module.exports = { fetchYouTubeData };
