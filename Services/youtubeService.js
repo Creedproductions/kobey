@@ -24,7 +24,7 @@ async function fetchYouTubeData(url) {
     console.log(`📊 YouTube: Found ${data.items.length} total formats`);
 
     // ========================================
-    // FILTER FOR MP4 ONLY (NO WEBM)
+    // FILTER FOR MP4 WITH AUDIO
     // ========================================
     
     let videoFormats = data.items.filter(item => {
@@ -32,30 +32,35 @@ async function fetchYouTubeData(url) {
       const type = (item.type || '').toLowerCase();
       const ext = (item.ext || item.extension || '').toLowerCase();
       
-      // Must be MP4 format
-      const isMp4 = type.includes('mp4') || ext.includes('mp4');
-      
-      // Must be video
-      const isVideo = type.includes('video');
+      // Must be MP4 or video format
+      const isMp4 = type.includes('mp4') || ext.includes('mp4') || type.includes('video');
       
       // Must have valid URL
       const hasUrl = item.url && item.url.length > 0;
       
-      return isMp4 && isVideo && hasUrl;
+      // Check if it's NOT a video-only or audio-only format
+      // Usually video-only formats have "video only" or similar in label
+      const hasAudio = !label.includes('video only') && 
+                       !label.includes('audio only') &&
+                       !type.includes('video only');
+      
+      return isMp4 && hasUrl && hasAudio;
     });
 
+    // If no formats with audio found, try all MP4 formats
     if (videoFormats.length === 0) {
-      console.log('⚠️ No MP4 formats found, trying all video formats...');
+      console.log('⚠️ No MP4 with audio found, trying all MP4 formats...');
       videoFormats = data.items.filter(item => {
         const type = (item.type || '').toLowerCase();
-        const isVideo = type.includes('video');
+        const ext = (item.ext || item.extension || '').toLowerCase();
+        const isMp4 = type.includes('mp4') || ext.includes('mp4');
         const hasUrl = item.url && item.url.length > 0;
-        return isVideo && hasUrl;
+        return isMp4 && hasUrl;
       });
     }
 
     // ========================================
-    // SORT TO PRIORITIZE 720p (DEFAULT)
+    // SORT TO PRIORITIZE 360p (FAST + AUDIO)
     // ========================================
     
     videoFormats.sort((a, b) => {
@@ -63,22 +68,23 @@ async function fetchYouTubeData(url) {
         if (!label) return 0;
         const labelLower = label.toLowerCase();
         
-        // 720p gets highest priority (return 1000)
-        if (labelLower.includes('720')) return 1000;
-        
-        // Then 1080p
-        if (labelLower.includes('1080')) return 900;
+        // 360p gets highest priority (faster download + has audio)
+        if (labelLower.includes('360')) return 1000;
         
         // Then 480p
-        if (labelLower.includes('480')) return 800;
+        if (labelLower.includes('480')) return 900;
         
-        // Then 1440p
-        if (labelLower.includes('1440')) return 700;
+        // Then 720p
+        if (labelLower.includes('720')) return 800;
         
-        // Then 360p
-        if (labelLower.includes('360')) return 600;
+        // Then 240p (low quality)
+        if (labelLower.includes('240')) return 700;
         
-        // 4K/2160p last (too large)
+        // Then 1080p (slower)
+        if (labelLower.includes('1080')) return 600;
+        
+        // 1440p and 4K last (too slow)
+        if (labelLower.includes('1440')) return 200;
         if (labelLower.includes('4k') || labelLower.includes('2160')) return 100;
         
         return 0;
@@ -87,11 +93,12 @@ async function fetchYouTubeData(url) {
       return getQualityValue(b.label) - getQualityValue(a.label);
     });
 
-    console.log(`✅ YouTube: Filtered to ${videoFormats.length} MP4 format(s)`);
+    console.log(`✅ YouTube: Filtered to ${videoFormats.length} format(s)`);
     if (videoFormats.length > 0) {
-      const qualities = videoFormats.map(f => f.label || 'unknown').join(', ');
-      console.log(`🎥 Available qualities: ${qualities}`);
+      const top3 = videoFormats.slice(0, 3).map(f => f.label || 'unknown').join(', ');
+      console.log(`🎥 Top 3 qualities: ${top3}`);
       console.log(`🎯 Default selected: ${videoFormats[0].label || 'unknown'}`);
+      console.log(`🔊 Audio included: YES`);
     }
 
     return {
