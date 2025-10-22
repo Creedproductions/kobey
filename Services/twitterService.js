@@ -1,15 +1,9 @@
 const fetch = require('node-fetch');
 const axios = require('axios');
 const cheerio = require('cheerio');
-const fs = require('fs');
-const path = require('path');
 
 /**
- * Downloads Twitter/X video using multiple methods
- * Method 1: Direct HTML extraction from Twitter page
- * Method 2: btch-downloader package (fallback)
- * Method 3: yt-dlp-exec (last resort)
- * 
+ * Downloads Twitter/X video using direct extraction + btch-downloader fallback
  * @param {string} twitterUrl - The Twitter/X URL
  * @returns {Promise<Array>} Array of video objects with quality, type, and url
  */
@@ -130,50 +124,6 @@ async function downloadTwmateData(twitterUrl) {
             }
         } catch (btchError) {
             console.log(`⚠️ btch-downloader failed: ${btchError.message}`);
-        }
-
-        // ============================================
-        // METHOD 3: yt-dlp-exec (Last Resort)
-        // ============================================
-        console.log('🔄 Trying yt-dlp as last resort...');
-        
-        try {
-            const ytDlp = require('yt-dlp-exec');
-            
-            const TEMP_DIR = path.join(__dirname, '../temp');
-            if (!fs.existsSync(TEMP_DIR)) {
-                fs.mkdirSync(TEMP_DIR, { recursive: true });
-            }
-
-            const uniqueId = Date.now();
-            const tempFilePath = path.join(TEMP_DIR, `twitter-${uniqueId}.mp4`);
-
-            await ytDlp(twitterUrl, {
-                output: tempFilePath,
-                format: 'best[ext=mp4]/best',
-                noCheckCertificates: true,
-                noWarnings: true,
-                addHeader: [
-                    'referer:twitter.com',
-                    'user-agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
-                ],
-            });
-
-            if (fs.existsSync(tempFilePath) && fs.statSync(tempFilePath).size > 10000) {
-                console.log(`✅ Downloaded via yt-dlp to ${tempFilePath}`);
-                
-                return [
-                    {
-                        quality: 'best',
-                        type: 'video/mp4',
-                        url: tempFilePath, // Local file path - controller needs to handle serving
-                        localFilePath: tempFilePath,
-                        isLocal: true
-                    }
-                ];
-            }
-        } catch (ytDlpError) {
-            console.log(`⚠️ yt-dlp failed: ${ytDlpError.message}`);
         }
 
         // ============================================
