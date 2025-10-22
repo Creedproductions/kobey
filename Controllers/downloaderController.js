@@ -5,6 +5,7 @@ const { pinterest } = require('ironman-api');
 const { BitlyClient } = require('bitly');
 const axios = require('axios');
 const { ytdl, pindl } = require('jer-api');
+const fetch = require('node-fetch'); // ADDED FOR TWITTER FIX
 
 // Local services
 const config = require('../Config/config');
@@ -207,25 +208,116 @@ const platformDownloaders = {
     return data;
   },
 
+  // ========================================
+  // TWITTER/X - UPDATED WITH DIRECT EXTRACTION + FALLBACKS
+  // ========================================
   async twitter(url) {
-    try {
-      const data = await downloadWithTimeout(() => twitter(url));
-      const hasValidData = data.data && (data.data.HD || data.data.SD);
-      const hasValidUrls = Array.isArray(data.url) &&
-        data.url.some(item => item && Object.keys(item).length > 0 && item.url);
+    console.log(`\n🐦 Processing Twitter URL: ${url}`);
 
-      if (!hasValidData && !hasValidUrls) {
-        throw new Error("Twitter primary service returned unusable data");
+    try {
+      // METHOD 1: Direct HTML Extraction (Fastest & Most Reliable)
+      console.log('📥 Fetching Twitter page content...');
+      const response = await fetch(url, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+          'Accept-Language': 'en-US,en;q=0.5',
+        }
+      });
+
+      if (response.ok) {
+        const html = await response.text();
+        console.log('🔍 Searching for video URLs in page...');
+
+        // Multiple regex patterns to find video URLs
+        const videoUrlPatterns = [
+          /video_url":"([^"]+)"/,
+          /playbackUrl":"([^"]+)"/,
+          /video_info\"\:.*?\{\"bitrate\"\:.*?\"url\"\:\"([^\"]+)\"/,
+          /"(?:https?:\/\/video\.twimg\.com\/[^"]+\.mp4[^"]*)"/g,
+          /https?:\/\/video\.twimg\.com\/[^"'\s]+\.mp4[^"'\s]*/g
+        ];
+
+        const videoUrls = [];
+
+        for (const pattern of videoUrlPatterns) {
+          if (pattern.global) {
+            const matches = html.match(pattern);
+            if (matches && matches.length > 0) {
+              matches.forEach(match => {
+                const cleanUrl = match.replace(/"/g, '').replace(/&amp;/g, '&');
+                if (!videoUrls.includes(cleanUrl)) {
+                  videoUrls.push(cleanUrl);
+                }
+              });
+            }
+          } else {
+            const match = pattern.exec(html);
+            if (match && match[1]) {
+              const cleanUrl = match[1]
+                .replace(/\\u002F/g, '/')
+                .replace(/\\\//g, '/')
+                .replace(/\\/g, '')
+                .replace(/&amp;/g, '&');
+              if (!videoUrls.includes(cleanUrl)) {
+                videoUrls.push(cleanUrl);
+              }
+            }
+          }
+        }
+
+        // If video URLs found, return them
+        if (videoUrls.length > 0) {
+          console.log(`✅ Found ${videoUrls.length} video URL(s) via direct extraction`);
+          
+          const results = videoUrls.map((url, index) => {
+            let quality = 'unknown';
+            const qualityMatch = url.match(/(\d+x\d+)/);
+            if (qualityMatch) {
+              quality = qualityMatch[1];
+            }
+            
+            return {
+              quality: quality,
+              type: 'video/mp4',
+              url: url
+            };
+          });
+
+          return results;
+        }
       }
-      return data;
-    } catch (error) {
-      console.warn("Twitter: Primary service failed, trying custom service...", error.message);
+
+      // METHOD 2: btch-downloader (First Fallback)
+      console.log('🔄 Direct extraction failed, trying btch-downloader...');
+      try {
+        const data = await downloadWithTimeout(() => twitter(url));
+        const hasValidData = data.data && (data.data.HD || data.data.SD);
+        const hasValidUrls = Array.isArray(data.url) &&
+          data.url.some(item => item && Object.keys(item).length > 0 && item.url);
+
+        if (hasValidData || hasValidUrls) {
+          console.log('✅ Retrieved video via btch-downloader');
+          return data;
+        }
+      } catch (btchError) {
+        console.log(`⚠️ btch-downloader failed: ${btchError.message}`);
+      }
+
+      // METHOD 3: Custom Service (Last Fallback)
+      console.log('🔄 Trying custom Twitter service (twitterService.js)...');
       const fallbackData = await downloadWithTimeout(() => downloadTwmateData(url));
 
       if (!fallbackData || (!Array.isArray(fallbackData) && !fallbackData.data)) {
-        throw new Error('Twitter download failed - both primary and fallback methods failed');
+        throw new Error('All Twitter download methods failed - video may be private, deleted, or region-locked');
       }
+
+      console.log('✅ Retrieved video via custom service');
       return fallbackData;
+
+    } catch (error) {
+      console.error(`❌ Twitter download error: ${error.message}`);
+      throw new Error(`Twitter download failed: ${error.message}`);
     }
   },
 
@@ -261,22 +353,42 @@ const platformDownloaders = {
   },
 
   async pinterest(url) {
-    const data = await downloadWithTimeout(() => pindl(url));
-    if (!data || (!data.result && !data.url)) {
-      throw new Error('Pinterest service returned invalid data');
+    try {
+      const data = await downloadWithTimeout(() => pindl(url));
+      if (!data || (!data.data && !data.result && !data.url)) {
+        throw new Error('Pinterest service returned invalid data');
+      }
+      return data;
+    } catch (error) {
+      console.warn('Pinterest primary downloader failed, trying fallback...', error.message);
+      const fallbackData = await downloadWithTimeout(() => pinterest(url));
+      if (!fallbackData || (!fallbackData.data && !fallbackData.result)) {
+        throw new Error('Pinterest download failed - both primary and fallback methods failed');
+      }
+      return fallbackData;
     }
-    return data;
   },
 
-  // UPDATED THREADS DOWNLOADER - USING ADVANCED VERSION
   async threads(url) {
-    console.log('Using advanced research-based Threads downloader');
-    return await advancedThreadsDownloader(url);
+    console.log("🧵 Threads: Starting download with advanced service");
+    try {
+      const data = await downloadWithTimeout(() => advancedThreadsDownloader(url), 60000);
+
+      if (!data || !data.download) {
+        throw new Error('Threads service returned invalid data');
+      }
+
+      console.log("✅ Threads: Successfully downloaded video");
+      return data;
+    } catch (error) {
+      console.error(`❌ Threads download failed: ${error.message}`);
+      throw new Error(`Threads download failed: ${error.message}`);
+    }
   },
 
   async linkedin(url) {
     const data = await downloadWithTimeout(() => fetchLinkedinData(url));
-    if (!data || !data.data || !data.data.videos) {
+    if (!data || !data.data) {
       throw new Error('LinkedIn service returned invalid data');
     }
     return data;
@@ -286,94 +398,77 @@ const platformDownloaders = {
 // ===== DATA FORMATTERS =====
 
 const dataFormatters = {
-  async youtube(data) {
-    console.log('YouTube Formatter: Processing data with formats:', data.formats?.length || 0);
-
-    if (!data || !data.title) {
-      throw new Error("YouTube data is incomplete or improperly formatted.");
-    }
-
-    const videoWithAudio = data.formats?.filter(f => f.type === 'video_with_audio') || [];
-    const videoOnly = data.formats?.filter(f => f.type === 'video') || [];
-    const audioOnly = data.formats?.filter(f => f.type === 'audio') || [];
-
-    const bestVideo = videoWithAudio.find(f => f.quality?.includes('720p')) ||
-                     videoWithAudio.find(f => f.quality?.includes('480p')) ||
-                     videoWithAudio.find(f => f.quality?.includes('360p')) ||
-                     videoWithAudio[0] ||
-                     videoOnly.find(f => f.quality?.includes('720p')) ||
-                     videoOnly[0];
-
-    const bestAudio = audioOnly.find(f => f.quality?.includes('131kb/s') || f.extension === 'm4a') ||
-                     audioOnly[0];
-
-    console.log('YouTube Formatter: Best video format:', bestVideo?.quality || 'none');
-
-    let finalVideoUrl = bestVideo?.url || '';
-    let finalAudioUrl = bestAudio?.url || '';
-
-    if (finalVideoUrl.length > 500) {
-      console.log('YouTube Formatter: Shortening long video URL...');
-      finalVideoUrl = await shortenUrl(finalVideoUrl);
-    }
-
-    if (finalAudioUrl.length > 500) {
-      console.log('YouTube Formatter: Shortening long audio URL...');
-      finalAudioUrl = await shortenUrl(finalAudioUrl);
-    }
-
-    return {
-      title: data.title || 'Untitled Video',
-      url: finalVideoUrl,
-      thumbnail: data.thumbnail || PLACEHOLDER_THUMBNAIL,
-      sizes: [...videoWithAudio, ...videoOnly].map(f => f.quality).filter(Boolean),
-      audio: finalAudioUrl,
-      duration: data.duration || 'Unknown',
-      source: 'youtube',
-    };
-  },
-
   instagram(data) {
-    if (data && data.media && Array.isArray(data.media)) {
-      const mediaItem = data.media[0];
+    if (data.media && Array.isArray(data.media)) {
+      const videoMedia = data.media.find(item => item.type === 'video') || data.media[0];
       return {
-        title: data.title || 'Instagram Media',
-        url: mediaItem?.url || '',
+        title: data.title || 'Instagram Post',
+        url: videoMedia?.url || '',
         thumbnail: data.thumbnail || PLACEHOLDER_THUMBNAIL,
-        sizes: ['Original Quality'],
+        sizes: [videoMedia?.quality || 'Original Quality'],
         source: 'instagram',
       };
     }
 
-    if (!data || !data[0]?.url) {
-      throw new Error("Instagram data is missing or invalid.");
+    if (Array.isArray(data)) {
+      const firstMedia = data[0];
+      return {
+        title: firstMedia?.title || 'Instagram Post',
+        url: firstMedia?.url || '',
+        thumbnail: firstMedia?.thumbnail || PLACEHOLDER_THUMBNAIL,
+        sizes: [firstMedia?.quality || 'Original Quality'],
+        source: 'instagram',
+      };
     }
 
     return {
-      title: data[0]?.wm || 'Instagram Media',
-      url: data[0]?.url,
-      thumbnail: data[0]?.thumbnail || PLACEHOLDER_THUMBNAIL,
+      title: data.title || 'Instagram Post',
+      url: data.url || '',
+      thumbnail: data.thumbnail || PLACEHOLDER_THUMBNAIL,
       sizes: ['Original Quality'],
       source: 'instagram',
     };
   },
 
+  // ========================================
+  // TWITTER/X - UPDATED DATA FORMATTER
+  // ========================================
   twitter(data) {
-    if (data.data && (data.data.HD || data.data.SD)) {
-      const twitterData = data.data;
+    console.log('🐦 Formatting Twitter data...');
+
+    // Handle direct extraction format (array of video objects)
+    if (Array.isArray(data) && data.length > 0) {
+      const bestQuality = data.find(item => item.quality && item.quality.includes('1280x720')) ||
+                         data.find(item => item.quality && item.quality.includes('640x360')) ||
+                         data[0];
+
+      console.log(`✅ Twitter: Using ${bestQuality.quality || 'unknown'} quality`);
+
       return {
         title: 'Twitter Video',
-        url: twitterData.HD || twitterData.SD || '',
-        thumbnail: twitterData.thumbnail || PLACEHOLDER_THUMBNAIL,
-        sizes: twitterData.HD ? ['HD'] : ['SD'],
+        url: bestQuality.url || '',
+        thumbnail: PLACEHOLDER_THUMBNAIL,
+        sizes: data.map(item => item.quality),
         source: 'twitter',
       };
     }
 
-    if (data.data && Array.isArray(data.data) && data.data.length > 0) {
-      const videoArray = data.data;
-      const bestQuality = videoArray.find(item => item.quality.includes('1280x720')) ||
-                         videoArray.find(item => item.quality.includes('640x360')) ||
+    // Handle btch-downloader format
+    if (data.data && (data.data.HD || data.data.SD)) {
+      return {
+        title: 'Twitter Video',
+        url: data.data.HD || data.data.SD || '',
+        thumbnail: PLACEHOLDER_THUMBNAIL,
+        sizes: data.data.HD ? ['HD', 'SD'] : ['SD'],
+        source: 'twitter',
+      };
+    }
+
+    // Handle btch-downloader url array format
+    if (data.url && Array.isArray(data.url)) {
+      const videoArray = data.url.filter(item => item && item.url);
+      const bestQuality = videoArray.find(item => item.quality && item.quality.includes('1280x720')) ||
+                         videoArray.find(item => item.quality && item.quality.includes('640x360')) ||
                          videoArray[0];
 
       return {
@@ -385,20 +480,7 @@ const dataFormatters = {
       };
     }
 
-    if (Array.isArray(data) && data.length > 0) {
-      const bestQuality = data.find(item => item.quality.includes('1280x720')) ||
-                         data.find(item => item.quality.includes('640x360')) ||
-                         data[0];
-
-      return {
-        title: 'Twitter Video',
-        url: bestQuality.url || '',
-        thumbnail: PLACEHOLDER_THUMBNAIL,
-        sizes: data.map(item => item.quality),
-        source: 'twitter',
-      };
-    }
-
+    console.error('❌ Twitter data format not recognized');
     throw new Error("Twitter video data is incomplete or improperly formatted.");
   },
 
