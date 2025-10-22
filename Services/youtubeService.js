@@ -24,68 +24,74 @@ async function fetchYouTubeData(url) {
     console.log(`📊 YouTube: Found ${data.items.length} total formats`);
 
     // ========================================
-    // QUALITY FILTERING - PRIORITIZE 720p+
+    // FILTER FOR MP4 ONLY (NO WEBM)
     // ========================================
     
-    // Filter for video formats with minimum 720p quality
     let videoFormats = data.items.filter(item => {
       const label = (item.label || '').toLowerCase();
       const type = (item.type || '').toLowerCase();
+      const ext = (item.ext || item.extension || '').toLowerCase();
       
-      // Must be a video format
-      const isVideo = type.includes('video') || type.includes('mp4');
+      // Must be MP4 format
+      const isMp4 = type.includes('mp4') || ext.includes('mp4');
       
-      // Must be high quality (720p or better)
-      const isHD = label.includes('1080') || label.includes('720') || 
-                   label.includes('2160') || label.includes('4k') ||
-                   label.includes('1440');
+      // Must be video
+      const isVideo = type.includes('video');
       
-      // Must have a valid URL
+      // Must have valid URL
       const hasUrl = item.url && item.url.length > 0;
       
-      return isVideo && isHD && hasUrl;
+      return isMp4 && isVideo && hasUrl;
     });
 
-    // If no HD formats found, get any video format available
     if (videoFormats.length === 0) {
-      console.log('⚠️ No 720p+ found, using all available video formats...');
+      console.log('⚠️ No MP4 formats found, trying all video formats...');
       videoFormats = data.items.filter(item => {
         const type = (item.type || '').toLowerCase();
-        const isVideo = type.includes('video') || type.includes('mp4');
+        const isVideo = type.includes('video');
         const hasUrl = item.url && item.url.length > 0;
         return isVideo && hasUrl;
       });
     }
 
-    // If still no formats, use everything
-    if (videoFormats.length === 0) {
-      console.log('⚠️ No video formats found, using all formats...');
-      videoFormats = data.items.filter(item => item.url && item.url.length > 0);
-    }
-
     // ========================================
-    // SORT BY QUALITY (HIGHEST FIRST)
+    // SORT TO PRIORITIZE 720p (DEFAULT)
     // ========================================
     
     videoFormats.sort((a, b) => {
       const getQualityValue = (label) => {
         if (!label) return 0;
         const labelLower = label.toLowerCase();
-        if (labelLower.includes('4k') || labelLower.includes('2160')) return 2160;
-        if (labelLower.includes('1440')) return 1440;
-        if (labelLower.includes('1080')) return 1080;
-        if (labelLower.includes('720')) return 720;
-        if (labelLower.includes('480')) return 480;
-        if (labelLower.includes('360')) return 360;
-        if (labelLower.includes('240')) return 240;
+        
+        // 720p gets highest priority (return 1000)
+        if (labelLower.includes('720')) return 1000;
+        
+        // Then 1080p
+        if (labelLower.includes('1080')) return 900;
+        
+        // Then 480p
+        if (labelLower.includes('480')) return 800;
+        
+        // Then 1440p
+        if (labelLower.includes('1440')) return 700;
+        
+        // Then 360p
+        if (labelLower.includes('360')) return 600;
+        
+        // 4K/2160p last (too large)
+        if (labelLower.includes('4k') || labelLower.includes('2160')) return 100;
+        
         return 0;
       };
+      
       return getQualityValue(b.label) - getQualityValue(a.label);
     });
 
-    console.log(`✅ YouTube: Filtered to ${videoFormats.length} format(s)`);
+    console.log(`✅ YouTube: Filtered to ${videoFormats.length} MP4 format(s)`);
     if (videoFormats.length > 0) {
-      console.log(`🎥 Best quality available: ${videoFormats[0].label || 'unknown'}`);
+      const qualities = videoFormats.map(f => f.label || 'unknown').join(', ');
+      console.log(`🎥 Available qualities: ${qualities}`);
+      console.log(`🎯 Default selected: ${videoFormats[0].label || 'unknown'}`);
     }
 
     return {
