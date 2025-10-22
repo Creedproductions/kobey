@@ -31,7 +31,6 @@
     "nodemailer": "^6.9.16",
     "pg": "^8.13.1",
     "tinyurl": "^1.1.7",
-    "yt-dlp-exec": "^2.4.21",
     "ytdl-core": "^4.11.5"
   },
   "devDependencies": {
