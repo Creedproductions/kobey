@@ -124,7 +124,10 @@ async function fetchYouTubeData(url) {
     
     // Define quality restrictions
     const premiumQualities = ['1440p', '2160p', '4k', '1080p', '720p', '480p', '360p', '240p'];
-    const freeQualities = isShorts ? ['720p', '480p', '360p'] : ['360p', '480p'];
+    
+    // SHORTS: 480p or 360p only (to avoid audio issues with higher qualities)
+    // REGULAR: 360p for free users, higher qualities for premium
+    const freeQualities = isShorts ? ['480p', '360p'] : ['360p', '480p'];
 
     // Map to quality options
     const qualityOptions = availableFormats.map(format => {
@@ -159,14 +162,51 @@ async function fetchYouTubeData(url) {
       };
     });
 
-    // Get default URL (first free quality or first available)
+    // ========================================
+    // SMART DEFAULT QUALITY SELECTION
+    // ========================================
+    
     let defaultUrl = availableFormats[0]?.url;
-    const freeFormat = qualityOptions.find(q => !q.isPremium);
-    if (freeFormat) {
-      defaultUrl = freeFormat.url;
-      console.log(`🎯 Selected default free quality: ${freeFormat.quality}`);
+    let selectedQuality = qualityOptions[0];
+    
+    // For Shorts: Prefer 480p or 360p to avoid audio issues
+    if (isShorts) {
+      console.log('🎬 Shorts detected - prioritizing 480p/360p for audio compatibility');
+      
+      const shortsPreferredQualities = ['480p', '360p'];
+      
+      for (const preferredQuality of shortsPreferredQualities) {
+        const preferredFormat = qualityOptions.find(q => 
+          q.quality.toLowerCase().includes(preferredQuality) && !q.isPremium
+        );
+        
+        if (preferredFormat) {
+          defaultUrl = preferredFormat.url;
+          selectedQuality = preferredFormat;
+          console.log(`✅ Selected Shorts quality: ${preferredFormat.quality}`);
+          break;
+        }
+      }
+      
+      // If no preferred quality found, use first available free quality
+      if (defaultUrl === availableFormats[0]?.url) {
+        const freeFormat = qualityOptions.find(q => !q.isPremium);
+        if (freeFormat) {
+          defaultUrl = freeFormat.url;
+          selectedQuality = freeFormat;
+          console.log(`🔄 Using available free quality for Shorts: ${freeFormat.quality}`);
+        }
+      }
     } else {
-      console.log(`🎯 Using first available quality: ${qualityOptions[0]?.quality}`);
+      // For regular videos: Use first free quality
+      const freeFormat = qualityOptions.find(q => !q.isPremium);
+      if (freeFormat) {
+        defaultUrl = freeFormat.url;
+        selectedQuality = freeFormat;
+        console.log(`✅ Selected regular video quality: ${freeFormat.quality}`);
+      } else {
+        console.log(`🎯 Using first available quality: ${selectedQuality?.quality}`);
+      }
     }
 
     const result = {
@@ -175,10 +215,12 @@ async function fetchYouTubeData(url) {
       duration: data.duration,
       isShorts: isShorts,
       formats: qualityOptions,
-      url: defaultUrl
+      url: defaultUrl,
+      selectedQuality: selectedQuality // Include the selected quality info
     };
 
     console.log(`✅ YouTube service completed: ${result.formats.length} formats available`);
+    console.log(`🎯 Default quality: ${selectedQuality?.quality} (Shorts: ${isShorts})`);
     return result;
     
   } catch (err) {
@@ -194,19 +236,4 @@ async function fetchYouTubeData(url) {
   }
 }
 
-// Alternative YouTube service as fallback
-async function fetchYouTubeDataFallback(url) {
-  try {
-    console.log('🔄 Trying alternative YouTube service...');
-    
-    // You can add alternative YouTube APIs here
-    // For example: yt-dlp wrapper or another service
-    
-    throw new Error('Alternative service not implemented');
-  } catch (err) {
-    console.error('❌ Alternative YouTube service failed:', err.message);
-    throw err;
-  }
-}
-
-module.exports = { fetchYouTubeData, fetchYouTubeDataFallback };
+module.exports = { fetchYouTubeData };
