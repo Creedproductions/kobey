@@ -27,14 +27,8 @@ async function fetchYouTubeData(url) {
     const isShorts = url.includes('/shorts/');
     console.log(`📊 YouTube: Found ${data.items.length} total formats (${isShorts ? 'SHORTS' : 'REGULAR'})`);
 
-    // Log all available formats for debugging
-    console.log('🔍 Available formats:');
-    data.items.forEach((item, index) => {
-      console.log(`  ${index + 1}. ${item.label} - ${item.type} - URL: ${item.url ? 'YES' : 'NO'}`);
-    });
-
     // ========================================
-    // ENHANCED FILTERING FOR BOTH SHORTS & REGULAR VIDEOS
+    // STRICT AUDIO FILTERING FOR SHORTS
     // ========================================
     
     let availableFormats = data.items.filter(item => {
@@ -42,115 +36,110 @@ async function fetchYouTubeData(url) {
       const type = (item.type || '').toLowerCase();
       const hasUrl = item.url && item.url.length > 0;
       
-      // Enhanced audio detection
-      const hasAudio = !label.includes('video only') && 
-                       !label.includes('audio only') &&
-                       !type.includes('video only') &&
-                       !label.includes('vid only');
-
-      // For Shorts, be more lenient with format types
+      // STRICT audio detection - be very aggressive about excluding video-only
+      const isVideoOnly = label.includes('video only') || 
+                         label.includes('vid only') ||
+                         label.includes('without audio') ||
+                         type.includes('video only') ||
+                         (type.includes('video') && !type.includes('audio'));
+      
+      const isAudioOnly = label.includes('audio only') || 
+                         type.includes('audio only');
+      
+      // For Shorts: ONLY accept formats that definitely have audio
       if (isShorts) {
-        return hasUrl && (hasAudio || type.includes('audio') || label.includes('audio'));
+        // Accept formats that are NOT video-only and NOT audio-only
+        return hasUrl && !isVideoOnly && !isAudioOnly;
       }
       
-      // For regular videos, prioritize formats with audio
-      return hasUrl && hasAudio;
+      // For regular videos: be slightly more lenient
+      return hasUrl && !isVideoOnly;
     });
 
-    console.log(`✅ Found ${availableFormats.length} formats with audio`);
+    console.log(`✅ Found ${availableFormats.length} formats with audio after strict filtering`);
 
-    // If no formats with audio found, try alternative approach
+    // If no formats with audio found, try to find ANY format that might work
     if (availableFormats.length === 0) {
-      console.log('⚠️ No formats with audio found, trying alternative filtering...');
+      console.log('🚨 No audio formats found, emergency fallback...');
       
+      // Emergency fallback: take any format that has a URL
       availableFormats = data.items.filter(item => {
         const label = (item.label || '').toLowerCase();
         const hasUrl = item.url && item.url.length > 0;
         
-        // Exclude clearly audio-only formats
-        const isAudioOnly = label.includes('audio only') || 
-                           label.includes('audio');
+        // Still exclude obvious audio-only formats
+        const isAudioOnly = label.includes('audio only');
         
         return hasUrl && !isAudioOnly;
       });
       
-      console.log(`🔄 Alternative filtering found ${availableFormats.length} formats`);
+      console.log(`🆘 Emergency fallback found ${availableFormats.length} formats`);
     }
 
-    // Final fallback - use all available formats
+    // If STILL no formats, use everything
     if (availableFormats.length === 0) {
-      console.log('🚨 No suitable formats found, using all available formats...');
+      console.log('💀 Using ALL available formats as last resort');
       availableFormats = data.items.filter(item => item.url && item.url.length > 0);
     }
 
+    // Log filtered formats for debugging
+    console.log('🔊 Audio-compatible formats:');
+    availableFormats.forEach((format, index) => {
+      const label = (format.label || '').toLowerCase();
+      const hasAudio = !label.includes('video only') && !label.includes('audio only');
+      console.log(`  ${index + 1}. ${format.label} - Audio: ${hasAudio ? '✅' : '❌'}`);
+    });
+
     // ========================================
-    // QUALITY SORTING AND PRIORITIZATION
+    // QUALITY SORTING - PRIORITIZE LOWER QUALITIES FOR SHORTS
     // ========================================
     
-    // Sort by quality (highest first)
+    // Sort by quality, but prioritize lower qualities for Shorts
     availableFormats.sort((a, b) => {
       const getQualityValue = (label) => {
-        if (!label) return 0;
+        if (!label) return isShorts ? 9999 : 0; // For Shorts, prefer lower numbers
+        
         const labelLower = label.toLowerCase();
         const match = labelLower.match(/(\d+)p/);
         if (match) return parseInt(match[1]);
         
-        // Handle quality labels without 'p'
-        if (labelLower.includes('1440') || labelLower.includes('2k')) return 1440;
-        if (labelLower.includes('2160') || labelLower.includes('4k')) return 2160;
-        if (labelLower.includes('1080')) return 1080;
-        if (labelLower.includes('720')) return 720;
-        if (labelLower.includes('480')) return 480;
-        if (labelLower.includes('360')) return 360;
-        if (labelLower.includes('240')) return 240;
-        if (labelLower.includes('144')) return 144;
+        if (labelLower.includes('1440') || labelLower.includes('2k')) return isShorts ? 1440 : 1440;
+        if (labelLower.includes('2160') || labelLower.includes('4k')) return isShorts ? 2160 : 2160;
+        if (labelLower.includes('1080')) return isShorts ? 1080 : 1080;
+        if (labelLower.includes('720')) return isShorts ? 720 : 720;
+        if (labelLower.includes('480')) return isShorts ? 480 : 480;
+        if (labelLower.includes('360')) return isShorts ? 360 : 360;
+        if (labelLower.includes('240')) return isShorts ? 240 : 240;
+        if (labelLower.includes('144')) return isShorts ? 144 : 144;
         
-        return 0;
+        return isShorts ? 9999 : 0;
       };
       
       const qualityA = getQualityValue(a.label);
       const qualityB = getQualityValue(b.label);
-      return qualityB - qualityA;
+      
+      // For Shorts: sort ascending (lowest quality first)
+      // For Regular: sort descending (highest quality first)
+      return isShorts ? qualityA - qualityB : qualityB - qualityA;
     });
 
-    console.log('📊 Sorted formats:');
+    console.log('📊 Sorted formats (Shorts prefer lower quality):');
     availableFormats.forEach((format, index) => {
-      console.log(`  ${index + 1}. ${format.label} - ${format.type}`);
+      console.log(`  ${index + 1}. ${format.label}`);
     });
 
     // ========================================
-    // QUALITY RESTRICTIONS BASED ON PREMIUM STATUS
+    // FORCE 360p FOR SHORTS - AUDIO COMPATIBILITY
     // ========================================
     
-    // Define quality restrictions
-    const premiumQualities = ['1440p', '2160p', '4k', '1080p', '720p', '480p', '360p', '240p'];
-    
-    // SHORTS: 480p or 360p only (to avoid audio issues with higher qualities)
-    // REGULAR: 360p for free users, higher qualities for premium
-    const freeQualities = isShorts ? ['480p', '360p'] : ['360p', '480p'];
-
-    // Map to quality options
     const qualityOptions = availableFormats.map(format => {
       const quality = format.label || 'unknown';
       
-      // Check if this quality is premium-only
-      let isPremiumOnly = true;
-      for (const freeQ of freeQualities) {
-        if (quality.toLowerCase().includes(freeQ)) {
-          isPremiumOnly = false;
-          break;
-        }
-      }
-      
-      // If it's not in free qualities but is in premium qualities, mark as premium
-      if (isPremiumOnly) {
-        for (const premQ of premiumQualities) {
-          if (quality.toLowerCase().includes(premQ)) {
-            isPremiumOnly = true;
-            break;
-          }
-        }
-      }
+      // For Shorts: ONLY allow 360p and below for free users
+      // Higher qualities often have separate audio streams
+      const isPremiumOnly = isShorts ? 
+        !['360p', '240p', '144p'].some(q => quality.toLowerCase().includes(q)) :
+        !['360p', '480p'].some(q => quality.toLowerCase().includes(q));
       
       return {
         quality: quality,
@@ -158,54 +147,62 @@ async function fetchYouTubeData(url) {
         type: format.type || 'video/mp4',
         extension: format.ext || format.extension || 'mp4',
         filesize: format.filesize || 'unknown',
-        isPremium: isPremiumOnly
+        isPremium: isPremiumOnly,
+        hasAudio: !(format.label || '').toLowerCase().includes('video only')
       };
     });
 
     // ========================================
-    // SMART DEFAULT QUALITY SELECTION
+    // SMART DEFAULT SELECTION - FORCE 360p FOR SHORTS
     // ========================================
     
     let defaultUrl = availableFormats[0]?.url;
     let selectedQuality = qualityOptions[0];
     
-    // For Shorts: Prefer 480p or 360p to avoid audio issues
     if (isShorts) {
-      console.log('🎬 Shorts detected - prioritizing 480p/360p for audio compatibility');
+      console.log('🎬 SHORTS DETECTED - FORCING 360p FOR AUDIO COMPATIBILITY');
       
-      const shortsPreferredQualities = ['480p', '360p'];
+      // STRICT: Only allow 360p, 240p, 144p for Shorts
+      const shortsSafeQualities = ['360p', '240p', '144p'];
       
-      for (const preferredQuality of shortsPreferredQualities) {
-        const preferredFormat = qualityOptions.find(q => 
-          q.quality.toLowerCase().includes(preferredQuality) && !q.isPremium
-        );
+      for (const safeQuality of shortsSafeQualities) {
+        const safeFormat = availableFormats.find((format, index) => {
+          const quality = (format.label || '').toLowerCase();
+          return quality.includes(safeQuality) && qualityOptions[index]?.hasAudio;
+        });
         
-        if (preferredFormat) {
-          defaultUrl = preferredFormat.url;
-          selectedQuality = preferredFormat;
-          console.log(`✅ Selected Shorts quality: ${preferredFormat.quality}`);
+        if (safeFormat) {
+          const qualityIndex = availableFormats.indexOf(safeFormat);
+          defaultUrl = safeFormat.url;
+          selectedQuality = qualityOptions[qualityIndex];
+          console.log(`✅ FORCED Shorts quality: ${selectedQuality.quality} (AUDIO SAFE)`);
           break;
         }
       }
       
-      // If no preferred quality found, use first available free quality
+      // If no safe quality found, use the first format that has audio
       if (defaultUrl === availableFormats[0]?.url) {
-        const freeFormat = qualityOptions.find(q => !q.isPremium);
-        if (freeFormat) {
-          defaultUrl = freeFormat.url;
-          selectedQuality = freeFormat;
-          console.log(`🔄 Using available free quality for Shorts: ${freeFormat.quality}`);
+        const audioFormat = availableFormats.find((format, index) => 
+          qualityOptions[index]?.hasAudio
+        );
+        
+        if (audioFormat) {
+          const qualityIndex = availableFormats.indexOf(audioFormat);
+          defaultUrl = audioFormat.url;
+          selectedQuality = qualityOptions[qualityIndex];
+          console.log(`🔄 Using first audio format: ${selectedQuality.quality}`);
+        } else {
+          console.log('⚠️ WARNING: No audio formats found for Shorts!');
         }
       }
     } else {
-      // For regular videos: Use first free quality
-      const freeFormat = qualityOptions.find(q => !q.isPremium);
+      // Regular videos: use first free quality
+      const freeFormat = qualityOptions.find(q => !q.isPremium && q.hasAudio);
       if (freeFormat) {
-        defaultUrl = freeFormat.url;
+        const qualityIndex = qualityOptions.indexOf(freeFormat);
+        defaultUrl = availableFormats[qualityIndex]?.url;
         selectedQuality = freeFormat;
-        console.log(`✅ Selected regular video quality: ${freeFormat.quality}`);
-      } else {
-        console.log(`🎯 Using first available quality: ${selectedQuality?.quality}`);
+        console.log(`✅ Regular video quality: ${selectedQuality.quality}`);
       }
     }
 
@@ -216,17 +213,20 @@ async function fetchYouTubeData(url) {
       isShorts: isShorts,
       formats: qualityOptions,
       url: defaultUrl,
-      selectedQuality: selectedQuality // Include the selected quality info
+      selectedQuality: selectedQuality,
+      audioGuaranteed: selectedQuality?.hasAudio || false
     };
 
-    console.log(`✅ YouTube service completed: ${result.formats.length} formats available`);
-    console.log(`🎯 Default quality: ${selectedQuality?.quality} (Shorts: ${isShorts})`);
+    console.log(`✅ YouTube service completed`);
+    console.log(`🎯 Final selection: ${selectedQuality?.quality}`);
+    console.log(`🔊 Audio guaranteed: ${result.audioGuaranteed}`);
+    console.log(`📺 Is Shorts: ${isShorts}`);
+    
     return result;
     
   } catch (err) {
     console.error('❌ YouTube service error:', err.message);
     
-    // Enhanced error information
     if (err.response) {
       console.error('📡 Response status:', err.response.status);
       console.error('📡 Response data:', err.response.data);
