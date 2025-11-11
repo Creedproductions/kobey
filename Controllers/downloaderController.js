@@ -418,33 +418,44 @@ const dataFormatters = {
     };
   },
 
-// In the dataFormatters object, update the youtube formatter:
-// In the dataFormatters object, update the youtube formatter:
+// ========================================
+// YOUTUBE FORMATTER - FIXED TO PASS QUALITY DATA
+// ========================================
 youtube(data) {
   console.log('🎬 Formatting YouTube data...');
   
-  if (!data || !data.formats || data.formats.length === 0) {
-    console.log('⚠️ No YouTube formats available, using fallback');
-    // Fallback to basic data
-    return {
-      title: data.title || 'YouTube Video',
-      url: data.url || '',
-      thumbnail: data.thumbnail || PLACEHOLDER_THUMBNAIL,
-      sizes: ['360p'],
-      duration: data.duration || 'unknown',
-      source: 'youtube',
-      allFormats: [
-        {
-          quality: '360p',
-          qualityNum: 360,
-          url: data.url,
-          type: 'video/mp4',
-          extension: 'mp4',
-          isPremium: false,
-          hasAudio: true
-        }
-      ],
-      selectedQuality: {
+  if (!data || !data.title) {
+    throw new Error('Invalid YouTube data received');
+  }
+
+  // Check if we have quality formats
+  const hasFormats = data.formats && data.formats.length > 0;
+  const hasAllFormats = data.allFormats && data.allFormats.length > 0;
+  
+  console.log(`📊 YouTube data: hasFormats=${hasFormats}, hasAllFormats=${hasAllFormats}`);
+  
+  let qualityOptions = [];
+  let selectedQuality = null;
+  let defaultUrl = data.url;
+
+  if (hasFormats || hasAllFormats) {
+    // Use formats if available, otherwise use allFormats
+    qualityOptions = data.formats || data.allFormats;
+    
+    // Find the default selected quality (360p or first available)
+    selectedQuality = qualityOptions.find(opt => 
+      opt.quality && opt.quality.includes('360p')
+    ) || qualityOptions[0];
+    
+    defaultUrl = selectedQuality?.url || data.url;
+    
+    console.log(`✅ YouTube: ${qualityOptions.length} quality options available`);
+    console.log(`🎯 Selected quality: ${selectedQuality?.quality}`);
+  } else {
+    console.log('⚠️ No quality formats found, creating fallback');
+    // Fallback: create basic quality option
+    qualityOptions = [
+      {
         quality: '360p',
         qualityNum: 360,
         url: data.url,
@@ -453,26 +464,31 @@ youtube(data) {
         isPremium: false,
         hasAudio: true
       }
-    };
+    ];
+    selectedQuality = qualityOptions[0];
   }
-  const sortedFormats = [...data.formats].sort((a, b) => a.qualityNum - b.qualityNum);
-  
-  // Select default format (360p for compatibility)
-  const defaultFormat = sortedFormats.find(f => f.qualityNum === 360) || sortedFormats[0];
-  
-  console.log(`✅ YouTube: ${sortedFormats.length} quality options available`);
 
-  return {
-    title: data.title || 'YouTube Video',
-    url: defaultFormat.url,
+  // Build the response object - THIS IS CRITICAL
+  const result = {
+    title: data.title,
+    url: defaultUrl,
     thumbnail: data.thumbnail || PLACEHOLDER_THUMBNAIL,
-    sizes: sortedFormats.map(f => f.quality),
+    sizes: qualityOptions.map(f => f.quality),
     duration: data.duration || 'unknown',
     source: 'youtube',
-    allFormats: sortedFormats,
-    selectedQuality: defaultFormat
+    // Include both formats and allFormats for compatibility
+    formats: qualityOptions,
+    allFormats: qualityOptions,
+    selectedQuality: selectedQuality
   };
-},threads(data) {
+
+  console.log(`✅ YouTube formatting complete`);
+  console.log(`📦 Sending to client: ${qualityOptions.length} formats`);
+  console.log(`🔗 Default URL length: ${defaultUrl?.length || 0}`);
+  
+  return result;
+},
+  threads(data) {
     console.log("Processing advanced Threads data...");
     return {
       title: data.title || 'Threads Post',
