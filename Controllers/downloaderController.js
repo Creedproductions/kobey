@@ -419,14 +419,42 @@ const dataFormatters = {
   },
 
 // In the dataFormatters object, update the youtube formatter:
+// In the dataFormatters object, update the youtube formatter:
 youtube(data) {
   console.log('🎬 Formatting YouTube data...');
   
   if (!data || !data.formats || data.formats.length === 0) {
-    throw new Error('No YouTube formats available');
+    console.log('⚠️ No YouTube formats available, using fallback');
+    // Fallback to basic data
+    return {
+      title: data.title || 'YouTube Video',
+      url: data.url || '',
+      thumbnail: data.thumbnail || PLACEHOLDER_THUMBNAIL,
+      sizes: ['360p'],
+      duration: data.duration || 'unknown',
+      source: 'youtube',
+      allFormats: [
+        {
+          quality: '360p',
+          qualityNum: 360,
+          url: data.url,
+          type: 'video/mp4',
+          extension: 'mp4',
+          isPremium: false,
+          hasAudio: true
+        }
+      ],
+      selectedQuality: {
+        quality: '360p',
+        qualityNum: 360,
+        url: data.url,
+        type: 'video/mp4',
+        extension: 'mp4',
+        isPremium: false,
+        hasAudio: true
+      }
+    };
   }
-
-  // Sort formats by quality number
   const sortedFormats = [...data.formats].sort((a, b) => a.qualityNum - b.qualityNum);
   
   // Select default format (360p for compatibility)
@@ -441,19 +469,10 @@ youtube(data) {
     sizes: sortedFormats.map(f => f.quality),
     duration: data.duration || 'unknown',
     source: 'youtube',
-    allFormats: sortedFormats.map(f => ({
-      quality: f.quality,
-      qualityNum: f.qualityNum,
-      url: f.url,
-      type: f.type,
-      extension: f.extension,
-      isPremium: f.isPremium,
-      hasAudio: f.hasAudio
-    })),
-    selectedQuality: defaultFormat.quality
+    allFormats: sortedFormats,
+    selectedQuality: defaultFormat
   };
-},
-  threads(data) {
+},threads(data) {
     console.log("Processing advanced Threads data...");
     return {
       title: data.title || 'Threads Post',
