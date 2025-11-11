@@ -418,37 +418,41 @@ const dataFormatters = {
     };
   },
 
-  // ========================================
-  // YOUTUBE FORMATTER - ADDED FOR HD QUALITY
-  // ========================================
-  youtube(data) {
-    console.log('🎬 Formatting YouTube data...');
-    
-    if (!data || !data.formats || data.formats.length === 0) {
-      throw new Error('No YouTube formats available');
-    }
+// In the dataFormatters object, update the youtube formatter:
+youtube(data) {
+  console.log('🎬 Formatting YouTube data...');
+  
+  if (!data || !data.formats || data.formats.length === 0) {
+    throw new Error('No YouTube formats available');
+  }
 
-    // Get the best quality format (already sorted in service)
-    const bestFormat = data.formats[0];
-    
-    console.log(`✅ YouTube: Selected ${bestFormat.quality} quality`);
+  // Sort formats by quality number
+  const sortedFormats = [...data.formats].sort((a, b) => a.qualityNum - b.qualityNum);
+  
+  // Select default format (360p for compatibility)
+  const defaultFormat = sortedFormats.find(f => f.qualityNum === 360) || sortedFormats[0];
+  
+  console.log(`✅ YouTube: ${sortedFormats.length} quality options available`);
 
-    return {
-      title: data.title || 'YouTube Video',
-      url: bestFormat.url,
-      thumbnail: data.thumbnail || PLACEHOLDER_THUMBNAIL,
-      sizes: data.formats.map(f => f.quality),
-      duration: data.duration || 'unknown',
-      source: 'youtube',
-      allFormats: data.formats.map(f => ({
-        quality: f.quality,
-        url: f.url,
-        type: f.type,
-        extension: f.extension
-      }))
-    };
-  },
-
+  return {
+    title: data.title || 'YouTube Video',
+    url: defaultFormat.url,
+    thumbnail: data.thumbnail || PLACEHOLDER_THUMBNAIL,
+    sizes: sortedFormats.map(f => f.quality),
+    duration: data.duration || 'unknown',
+    source: 'youtube',
+    allFormats: sortedFormats.map(f => ({
+      quality: f.quality,
+      qualityNum: f.qualityNum,
+      url: f.url,
+      type: f.type,
+      extension: f.extension,
+      isPremium: f.isPremium,
+      hasAudio: f.hasAudio
+    })),
+    selectedQuality: defaultFormat.quality
+  };
+},
   threads(data) {
     console.log("Processing advanced Threads data...");
     return {
