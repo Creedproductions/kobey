@@ -189,237 +189,72 @@ function processYouTubeData(data, url) {
   });
   
   // ========================================
-  // IMPROVED FORMAT PRIORITIZATION
-  // ========================================
-  
-  // Prefer mp4 formats for better compatibility
-  const formatPriority = (format) => {
-    const label = (format.label || '').toLowerCase();
-    const type = (format.type || '').toLowerCase();
-    
-    // Give higher priority to mp4 format with audio
-    if (type.includes('mp4') && !label.includes('video only')) {
-      return 10;
-    }
-    // Medium priority to other video formats with audio
-    else if (type.includes('video') && !label.includes('video only')) {
-      return 5;
-    }
-    // Lower priority to audio-only formats for regular videos
-    else if (type.includes('audio') || label.includes('audio only')) {
-      return 1;
-    }
-    return 0;
-  };
-  
-  // Sort formats by quality, with improved priority handling
-  availableFormats.sort((a, b) => {
-    // First, prioritize by format type
-    const priorityA = formatPriority(a);
-    const priorityB = formatPriority(b);
-    
-    if (priorityA !== priorityB) {
-      return priorityB - priorityA; // Higher priority first
-    }
-    
-    // Then, handle quality-based sorting
-    const getQualityValue = (label) => {
-      if (!label) return isShorts ? 9999 : 0;
-      
-      const labelLower = label.toLowerCase();
-      const match = labelLower.match(/(\d+)p/);
-      if (match) return parseInt(match[1]);
-      
-      if (labelLower.includes('1440') || labelLower.includes('2k')) return 1440;
-      if (labelLower.includes('2160') || labelLower.includes('4k')) return 2160;
-      if (labelLower.includes('1080')) return 1080;
-      if (labelLower.includes('720')) return 720;
-      if (labelLower.includes('480')) return 480;
-      if (labelLower.includes('360')) return 360;
-      if (labelLower.includes('240')) return 240;
-      if (labelLower.includes('144')) return 144;
-      
-      return isShorts ? 9999 : 0;
-    };
-    
-    const qualityA = getQualityValue(a.label);
-    const qualityB = getQualityValue(b.label);
-    
-    // For Shorts: prefer lower qualities (better audio compatibility)
-    // For regular videos: prefer higher qualities but cap at 720p for better reliability
-    if (isShorts) {
-      return qualityA - qualityB; // Ascending for shorts
-    } else {
-      // Prefer 720p or lower for regular videos (more reliable)
-      if (qualityA <= 720 && qualityB <= 720) {
-        return qualityB - qualityA; // Descending within 720p and below
-      } else if (qualityA <= 720) {
-        return -1; // Prefer A if it's 720p or below
-      } else if (qualityB <= 720) {
-        return 1; // Prefer B if it's 720p or below
-      } else {
-        return qualityB - qualityA; // Otherwise descending
-      }
-    }
-  });
-  
-  console.log('📊 Sorted formats with improved priorities:');
-  availableFormats.forEach((format, index) => {
-    console.log(`  ${index + 1}. ${format.label || format.type || 'unknown'}`);
-  });
-  
-  // ========================================
-  // IMPROVED QUALITY SELECTION
+  // CREATE QUALITY OPTIONS WITH PREMIUM FLAGS
   // ========================================
   
   const qualityOptions = availableFormats.map(format => {
     const quality = format.label || 'unknown';
-    const type = (format.type || '').toLowerCase();
+    const qualityNum = extractQualityNumber(quality);
     
-    // Mark as premium based on format and type
-    const isPremiumOnly = isShorts ? 
-      !['360p', '240p', '144p'].some(q => (quality.toLowerCase() || '').includes(q)) :
-      !['360p', '480p', '720p'].some(q => (quality.toLowerCase() || '').includes(q));
+    // Mark as premium: 360p and below are free, above 360p requires premium
+    const isPremium = qualityNum > 360;
     
     return {
       quality: quality,
+      qualityNum: qualityNum,
       url: format.url,
       type: format.type || 'video/mp4',
-      extension: format.ext || format.extension || getExtensionFromType(type),
+      extension: format.ext || format.extension || getExtensionFromType(format.type),
       filesize: format.filesize || 'unknown',
-      isPremium: isPremiumOnly,
-      hasAudio: !(quality.toLowerCase() || '').includes('video only')
+      isPremium: isPremium,
+      hasAudio: true
     };
   });
   
-  // ========================================
-  // IMPROVED FORMAT SELECTION LOGIC
-  // ========================================
+  // Sort by quality number (ascending)
+  qualityOptions.sort((a, b) => a.qualityNum - b.qualityNum);
   
-  let selectedFormat = availableFormats[0];
-  let selectedQualityOption = qualityOptions[0];
+  // Select default format (360p for free users, or highest available if premium)
+  let selectedFormat = qualityOptions.find(opt => opt.qualityNum === 360) || qualityOptions[0];
   
-  if (isShorts) {
-    console.log('🎬 SHORTS DETECTED - Using optimized shorts selection');
-    
-    // SHORTS: Prefer 360p, 240p, or 144p with confirmed audio
-    const shortsSafeQualities = ['360p', '240p', '144p'];
-    let foundSafeFormat = false;
-    
-    for (const safeQuality of shortsSafeQualities) {
-      const formatIndex = availableFormats.findIndex((format, index) => {
-        const quality = (format.label || '').toLowerCase();
-        return quality.includes(safeQuality) && qualityOptions[index]?.hasAudio;
-      });
-      
-      if (formatIndex !== -1) {
-        selectedFormat = availableFormats[formatIndex];
-        selectedQualityOption = qualityOptions[formatIndex];
-        foundSafeFormat = true;
-        console.log(`✅ Selected Shorts quality: ${selectedQualityOption.quality} (AUDIO SAFE)`);
-        break;
-      }
-    }
-    
-    // If no safe quality found, use first format with audio
-    if (!foundSafeFormat) {
-      const audioFormatIndex = availableFormats.findIndex((format, index) => 
-        qualityOptions[index]?.hasAudio
-      );
-      
-      if (audioFormatIndex !== -1) {
-        selectedFormat = availableFormats[audioFormatIndex];
-        selectedQualityOption = qualityOptions[audioFormatIndex];
-        console.log(`🔄 Using first audio format for Shorts: ${selectedQualityOption.quality}`);
-      } else {
-        console.log('⚠️ WARNING: No audio formats found for Shorts!');
-      }
-    }
-  } else {
-    // REGULAR VIDEOS: Prefer mp4 format with 720p or lower for reliability
-    console.log('🎥 REGULAR VIDEO - Using optimized video selection');
-    
-    const preferredFormats = ['mp4', 'webm'];
-    const preferredQualities = ['720p', '480p', '360p'];
-    let foundIdealFormat = false;
-    
-    // First try: Find mp4 with preferred quality
-    for (const format of preferredFormats) {
-      if (foundIdealFormat) break;
-      
-      for (const quality of preferredQualities) {
-        const formatIndex = availableFormats.findIndex((item, index) => {
-          const itemType = (item.type || '').toLowerCase();
-          const itemQuality = (item.label || '').toLowerCase();
-          return itemType.includes(format) && 
-                 itemQuality.includes(quality) && 
-                 qualityOptions[index]?.hasAudio;
-        });
-        
-        if (formatIndex !== -1) {
-          selectedFormat = availableFormats[formatIndex];
-          selectedQualityOption = qualityOptions[formatIndex];
-          foundIdealFormat = true;
-          console.log(`✅ Found ideal format: ${format} ${quality} with audio`);
-          break;
-        }
-      }
-    }
-    
-    // If no ideal format, use first mp4 with audio
-    if (!foundIdealFormat) {
-      const mp4Index = availableFormats.findIndex((item, index) => {
-        const itemType = (item.type || '').toLowerCase();
-        return itemType.includes('mp4') && qualityOptions[index]?.hasAudio;
-      });
-      
-      if (mp4Index !== -1) {
-        selectedFormat = availableFormats[mp4Index];
-        selectedQualityOption = qualityOptions[mp4Index];
-        console.log(`✅ Using mp4 format: ${selectedQualityOption.quality}`);
-      } else {
-        console.log(`⚠️ No mp4 with audio found, using first format with audio`);
-      }
-    }
-  }
-  
-  // Safety check to ensure we have a URL
-  if (!selectedFormat?.url) {
-    console.log('⚠️ Selected format has no URL! Falling back to first format with URL');
-    const firstWithUrl = availableFormats.find(f => f.url && f.url.length > 0);
-    if (firstWithUrl) {
-      selectedFormat = firstWithUrl;
-      const firstIndex = availableFormats.indexOf(firstWithUrl);
-      selectedQualityOption = qualityOptions[firstIndex];
-    } else {
-      throw new Error('No formats with valid URLs found');
-    }
-  }
-  
-  // Build result object with consistent selectedQuality property
+  // Build result with all quality options - THIS IS THE KEY FIX
   const result = {
     title: data.title,
     thumbnail: data.cover,
     duration: data.duration,
     isShorts: isShorts,
-    formats: qualityOptions,
+    formats: qualityOptions, // This ensures formats array is included
+    allFormats: qualityOptions, // Also include allFormats for backward compatibility
     url: selectedFormat.url,
-    selectedQuality: selectedQualityOption,
-    audioGuaranteed: selectedQualityOption?.hasAudio || false
+    selectedQuality: selectedFormat,
+    audioGuaranteed: true
   };
   
-  console.log(`✅ YouTube service completed successfully`);
-  console.log(`🎯 Final selection: ${selectedQualityOption.quality}`);
-  console.log(`🔊 Audio guaranteed: ${result.audioGuaranteed}`);
-  console.log(`📺 Is Shorts: ${isShorts}`);
-  console.log(`🔗 URL length: ${selectedFormat.url?.length || 0}`);
-  
-  // Validate URL before returning
-  if (!selectedFormat.url || selectedFormat.url.length < 10) {
-    throw new Error(`Invalid URL selected: ${selectedFormat.url}`);
-  }
+  console.log(`✅ YouTube service completed with ${qualityOptions.length} quality options`);
+  console.log(`📋 Sending formats:`, qualityOptions.map(f => `${f.quality} (premium: ${f.isPremium})`));
   
   return result;
+}
+
+/**
+ * Extract quality number from quality label
+ */
+function extractQualityNumber(qualityLabel) {
+  if (!qualityLabel) return 0;
+  
+  const match = qualityLabel.match(/(\d+)p/);
+  if (match) return parseInt(match[1]);
+  
+  if (qualityLabel.includes('1440') || qualityLabel.includes('2k')) return 1440;
+  if (qualityLabel.includes('2160') || qualityLabel.includes('4k')) return 2160;
+  if (qualityLabel.includes('1080')) return 1080;
+  if (qualityLabel.includes('720')) return 720;
+  if (qualityLabel.includes('480')) return 480;
+  if (qualityLabel.includes('360')) return 360;
+  if (qualityLabel.includes('240')) return 240;
+  if (qualityLabel.includes('144')) return 144;
+  
+  return 0;
 }
 
 /**
