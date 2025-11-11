@@ -535,6 +535,8 @@ const formatData = async (platform, data) => {
 
 // ===== MAIN CONTROLLER =====
 
+// ===== MAIN CONTROLLER =====
+
 const downloadMedia = async (req, res) => {
   const { url } = req.body;
   console.log("Received URL:", url);
@@ -608,11 +610,14 @@ const downloadMedia = async (req, res) => {
     }
 
     console.log(`Final ${platform} URL length:`, formattedData.url.length);
+    console.log(`Formats count: ${formattedData.formats?.length || 0}`);
+    console.log(`AllFormats count: ${formattedData.allFormats?.length || 0}`);
     console.info("Download Media: Media successfully downloaded and formatted.");
 
+    // ENSURE THE RESPONSE INCLUDES ALL DATA
     res.status(200).json({
       success: true,
-      data: formattedData,
+      data: formattedData, // This must include formats and allFormats
       platform: platform,
       timestamp: new Date().toISOString(),
       debug: {
@@ -620,7 +625,11 @@ const downloadMedia = async (req, res) => {
         cleanedUrl: cleanedUrl,
         processedUrl: processedUrl,
         hasValidUrl: !!formattedData.url,
-        finalUrlLength: formattedData.url ? formattedData.url.length : 0
+        finalUrlLength: formattedData.url ? formattedData.url.length : 0,
+        hasFormats: !!formattedData.formats,
+        formatsCount: formattedData.formats?.length || 0,
+        hasAllFormats: !!formattedData.allFormats,
+        allFormatsCount: formattedData.allFormats?.length || 0
       }
     });
 
@@ -647,7 +656,6 @@ const downloadMedia = async (req, res) => {
     });
   }
 };
-
 const getErrorSuggestions = (errorMessage, platform) => {
   const suggestions = [];
 
