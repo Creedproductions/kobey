@@ -2,15 +2,15 @@ const express = require('express');
 const cors = require('cors');
 const downloaderRoutes = require('./Routes/downloaderRoutes');
 const config = require('./Config/config');
+const { exec } = require('child_process');
+const { promisify } = require('util');
+const execPromise = promisify(exec);
 
-// Initialize Express app
 const app = express();
 
-// Configuration
 const PORT = config.PORT || process.env.PORT || 8000;
 const NODE_ENV = process.env.NODE_ENV || 'development';
 
-// CORS configuration
 const corsOptions = {
   origin: [
     'https://savedownloader.vercel.app',
@@ -21,18 +21,14 @@ const corsOptions = {
   allowedHeaders: ['Content-Type', 'Authorization'],
 };
 
-// Middleware setup
 const setupMiddleware = () => {
   app.use(express.json());
   app.use(cors(corsOptions));
 };
 
-// Routes setup
 const setupRoutes = () => {
-  // Main API routes
   app.use('/api', downloaderRoutes);
 
-  // Health check endpoint
   app.get('/health', (req, res) => {
     res.status(200).json({
       status: 'OK',
@@ -43,13 +39,31 @@ const setupRoutes = () => {
     });
   });
 
-  // Root endpoint
+  // FFmpeg test endpoint
+  app.get('/api/test/ffmpeg', async (req, res) => {
+    try {
+      const { stdout } = await execPromise('ffmpeg -version');
+      res.json({ 
+        success: true, 
+        ffmpeg: 'installed', 
+        version: stdout.split('\n')[0] 
+      });
+    } catch (error) {
+      res.json({ 
+        success: false, 
+        ffmpeg: 'not installed', 
+        error: error.message 
+      });
+    }
+  });
+
   app.get('/', (req, res) => {
     res.status(200).json({
       message: 'Media Downloader API',
       status: 'running',
       endpoints: {
         health: '/health',
+        ffmpeg: '/api/test/ffmpeg',
         download: '/api/download',
         mockVideos: '/api/mock-videos'
       }
@@ -57,12 +71,9 @@ const setupRoutes = () => {
   });
 };
 
-// Error handling setup
 const setupErrorHandling = () => {
-  // Global error handlers
   process.on('uncaughtException', (error) => {
     console.error('❌ Uncaught Exception:', error);
-    // Don't exit in production
     if (NODE_ENV !== 'production') {
       process.exit(1);
     }
@@ -70,10 +81,8 @@ const setupErrorHandling = () => {
 
   process.on('unhandledRejection', (reason, promise) => {
     console.error('❌ Unhandled Rejection at:', promise, 'reason:', reason);
-    // Don't exit in production
   });
 
-  // Graceful shutdown
   process.on('SIGTERM', () => {
     console.log('👋 SIGTERM received, shutting down gracefully');
     if (server) {
@@ -97,17 +106,15 @@ const setupErrorHandling = () => {
   });
 };
 
-// Server startup
 const startServer = () => {
   const server = app.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
     console.log(`🌍 Environment: ${NODE_ENV}`);
     console.log(`📊 Health check: http://localhost:${PORT}/health`);
+    console.log(`🎬 FFmpeg test: http://localhost:${PORT}/api/test/ffmpeg`);
     console.log(`📥 Download API: http://localhost:${PORT}/api/download`);
-    console.log(`⚠️ Database features disabled - downloads only`);
   });
 
-  // Handle server errors
   server.on('error', (error) => {
     console.error('❌ Server error:', error);
     if (error.code === 'EADDRINUSE') {
@@ -119,7 +126,6 @@ const startServer = () => {
   return server;
 };
 
-// Initialize application
 const initializeApp = () => {
   setupMiddleware();
   setupRoutes();
@@ -127,7 +133,6 @@ const initializeApp = () => {
   return startServer();
 };
 
-// Start the application
 let server;
 if (require.main === module) {
   server = initializeApp();
