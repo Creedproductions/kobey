@@ -605,46 +605,7 @@ const downloadMedia = async (req, res) => {
       });
     }
 
-    // ========================================
-    // YOUTUBE FFMPEG MERGE LOGIC (ONLY FOR YOUTUBE)
-    // ========================================
-    if (platform === 'youtube' && selectedQuality && selectedQuality.needsMerge && data.bestAudioUrl) {
-      console.log('🎬 YouTube: Starting FFmpeg merge for', selectedQuality.quality);
-      
-      try {
-        const safeTitle = data.title.replace(/[^a-z0-9]/gi, '_').substring(0, 50);
-        const outputFileName = `${safeTitle}_${selectedQuality.quality}.mp4`;
-        
-        const mergedFilePath = await mergeQualityWithAudio(
-          selectedQuality.url,
-          data.bestAudioUrl,
-          outputFileName
-        );
-        
-        console.log('✅ Merge completed, sending file...');
-        
-        return res.download(mergedFilePath, outputFileName, async (err) => {
-          if (err) {
-            console.error('Error sending file:', err);
-          }
-          
-          try {
-            await fs.unlink(mergedFilePath);
-            console.log('🗑️ Cleaned up merged file');
-          } catch (cleanupErr) {
-            console.error('Cleanup error:', cleanupErr);
-          }
-        });
-        
-      } catch (mergeError) {
-        console.error('❌ Merge failed:', mergeError);
-        formattedData.url = selectedQuality.url;
-        formattedData.warning = 'Audio merge failed - video only';
-      }
-    } else if (platform === 'youtube' && selectedQuality && selectedQuality.url) {
-      formattedData.url = selectedQuality.url;
-      formattedData.selectedQuality = selectedQuality;
-    }
+
 
     console.log(`Final ${platform} URL length:`, formattedData.url.length);
     console.log(`Formats count: ${formattedData.formats?.length || 0}`);
