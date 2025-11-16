@@ -605,8 +605,107 @@ const downloadMedia = async (req, res) => {
       });
     }
 
-
-
+    // ========================================
+    // YOUTUBE - PROXY DOWNLOAD THROUGH SERVER
+    // ========================================
+    if (platform === 'youtube') {
+      
+      let downloadUrl = formattedData.url;
+      let videoUrl = null;
+      let audioUrl = null;
+      let needsMerge = false;
+      let fileName = data.title.replace(/[^a-z0-9]/gi, '_').substring(0, 50) + '.mp4';
+      
+      if (selectedQuality) {
+        console.log(`🎯 User selected: ${selectedQuality.quality}`);
+        
+        if (selectedQuality.needsMerge && data.bestAudioUrl) {
+          needsMerge = true;
+          videoUrl = selectedQuality.url;
+          audioUrl = data.bestAudioUrl;
+          fileName = `${data.title.replace(/[^a-z0-9]/gi, '_').substring(0, 50)}_${selectedQuality.quality}.mp4`;
+          console.log('🎬 Will merge video + audio');
+        } else {
+          downloadUrl = selectedQuality.url;
+          fileName = `${data.title.replace(/[^a-z0-9]/gi, '_').substring(0, 50)}_${selectedQuality.quality}.mp4`;
+        }
+      } else {
+        fileName = `${data.title.replace(/[^a-z0-9]/gi, '_').substring(0, 50)}_360p.mp4`;
+      }
+      
+      // If needs merge, do it
+      if (needsMerge) {
+        try {
+          console.log('📥 Starting merge process...');
+          const mergedFilePath = await mergeQualityWithAudio(videoUrl, audioUrl, fileName);
+          console.log('✅ Merge completed, streaming file...');
+          
+          return res.download(mergedFilePath, fileName, async (err) => {
+            if (err) {
+              console.error('Error sending merged file:', err);
+            }
+            
+            try {
+              await fs.unlink(mergedFilePath);
+              console.log('🗑️ Cleaned up merged file');
+            } catch (cleanupErr) {
+              console.error('Cleanup error:', cleanupErr);
+            }
+          });
+          
+        } catch (mergeError) {
+          console.error('❌ Merge failed:', mergeError);
+          return res.status(500).json({
+            error: 'Video merge failed',
+            success: false,
+            details: mergeError.message
+          });
+        }
+      }
+      
+      // For non-merge downloads, proxy the stream
+      try {
+        console.log('📥 Proxying YouTube download through server...');
+        
+        const response = await axios({
+          method: 'GET',
+          url: downloadUrl,
+          responseType: 'stream',
+          timeout: 300000
+        });
+        
+        res.setHeader('Content-Type', response.headers['content-type'] || 'video/mp4');
+        res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+        if (response.headers['content-length']) {
+          res.setHeader('Content-Length', response.headers['content-length']);
+        }
+        
+        response.data.pipe(res);
+        
+        response.data.on('end', () => {
+          console.log('✅ YouTube download completed');
+        });
+        
+        response.data.on('error', (error) => {
+          console.error('❌ Stream error:', error);
+          if (!res.headersSent) {
+            res.status(500).json({ error: 'Download stream failed' });
+          }
+        });
+        
+        return;
+        
+      } catch (proxyError) {
+        console.error('❌ Proxy download failed:', proxyError);
+        return res.status(500).json({
+          error: 'Failed to proxy YouTube download',
+          success: false,
+          details: proxyError.message
+        });
+      }
+    }
+    
+    // For non-YouTube platforms, return JSON as before
     console.log(`Final ${platform} URL length:`, formattedData.url.length);
     console.log(`Formats count: ${formattedData.formats?.length || 0}`);
     console.info("Download Media: Media successfully downloaded and formatted.");
@@ -616,7 +715,6 @@ const downloadMedia = async (req, res) => {
       data: formattedData,
       platform: platform,
       timestamp: new Date().toISOString(),
-      merged: platform === 'youtube' && selectedQuality?.needsMerge && data.bestAudioUrl ? true : false,
       debug: {
         originalUrl: url,
         cleanedUrl: cleanedUrl,
