@@ -5,17 +5,10 @@ const fs = require('fs').promises;
 const path = require('path');
 const execPromise = promisify(exec);
 
-/**
- * Fetches YouTube video data with improved reliability and FFmpeg merging
- * @param {string} url YouTube URL
- * @returns {Promise<object>} Processed video data
- */
 async function fetchYouTubeData(url) {
-  // Normalize YouTube URL format
   const normalizedUrl = normalizeYouTubeUrl(url);
   console.log(`🔍 Fetching YouTube data for: ${normalizedUrl}`);
   
-  // Add retry mechanism
   let attempts = 0;
   const maxAttempts = 3;
   let lastError = null;
@@ -23,13 +16,11 @@ async function fetchYouTubeData(url) {
   while (attempts < maxAttempts) {
     attempts++;
     try {
-      // Try primary API
       return await fetchWithVidFlyApi(normalizedUrl, attempts);
     } catch (err) {
       lastError = err;
       console.error(`❌ Attempt ${attempts}/${maxAttempts} failed: ${err.message}`);
       
-      // Add exponential backoff
       if (attempts < maxAttempts) {
         const backoffMs = Math.min(1000 * Math.pow(2, attempts - 1), 8000);
         console.log(`⏱️ Retrying in ${backoffMs/1000} seconds...`);
@@ -38,31 +29,23 @@ async function fetchYouTubeData(url) {
     }
   }
   
-  // All attempts failed, throw the last error
   throw new Error(`YouTube download failed after ${maxAttempts} attempts: ${lastError.message}`);
 }
 
-/**
- * Normalizes various YouTube URL formats
- */
 function normalizeYouTubeUrl(url) {
-  // Handle youtu.be short links
   if (url.includes('youtu.be/')) {
     const videoId = url.split('youtu.be/')[1].split('?')[0].split('&')[0];
     return `https://www.youtube.com/watch?v=${videoId}`;
   }
   
-  // Handle m.youtube.com links
   if (url.includes('m.youtube.com')) {
     return url.replace('m.youtube.com', 'www.youtube.com');
   }
   
-  // Handle youtube.com/shorts/ links (maintain shorts path)
   if (url.includes('/shorts/')) {
     return url;
   }
   
-  // Handle YouTube watch links that might be missing www
   if (url.includes('youtube.com/watch') && !url.includes('www.youtube.com')) {
     return url.replace('youtube.com', 'www.youtube.com');
   }
@@ -70,9 +53,6 @@ function normalizeYouTubeUrl(url) {
   return url;
 }
 
-/**
- * Primary API implementation using vidfly.ai
- */
 async function fetchWithVidFlyApi(url, attemptNum) {
   try {
     const timeout = 30000 + ((attemptNum - 1) * 10000);
@@ -117,9 +97,6 @@ async function fetchWithVidFlyApi(url, attemptNum) {
   }
 }
 
-/**
- * Download a file from URL
- */
 async function downloadFile(url, outputPath) {
   const writer = require('fs').createWriteStream(outputPath);
   
@@ -127,7 +104,7 @@ async function downloadFile(url, outputPath) {
     url,
     method: 'GET',
     responseType: 'stream',
-    timeout: 300000, // 5 minutes
+    timeout: 300000,
   });
 
   response.data.pipe(writer);
@@ -138,23 +115,14 @@ async function downloadFile(url, outputPath) {
   });
 }
 
-/**
- * Merge video and audio using FFmpeg
- */
 async function mergeVideoAudio(videoPath, audioPath, outputPath) {
   console.log('🎬 Starting FFmpeg merge...');
   
-  // FFmpeg command to merge video and audio
-  // -i: input files
-  // -c:v copy: copy video codec (no re-encoding)
-  // -c:a aac: encode audio to AAC
-  // -b:a 192k: audio bitrate 192kbps
-  // -movflags +faststart: optimize for web streaming
   const command = `ffmpeg -i "${videoPath}" -i "${audioPath}" -c:v copy -c:a aac -b:a 192k -movflags +faststart "${outputPath}"`;
   
   try {
     const { stdout, stderr } = await execPromise(command, {
-      maxBuffer: 1024 * 1024 * 10, // 10MB buffer
+      maxBuffer: 1024 * 1024 * 10,
     });
     
     console.log('✅ FFmpeg merge completed successfully');
@@ -165,30 +133,10 @@ async function mergeVideoAudio(videoPath, audioPath, outputPath) {
   }
 }
 
-/**
- * Get best audio format from available formats
- */
-function getBestAudioFormat(audioFormats) {
-  if (!audioFormats || audioFormats.length === 0) return null;
-  
-  // Sort by bitrate (descending) and return the best one
-  const sorted = [...audioFormats].sort((a, b) => {
-    const aBitrate = parseInt(a.label?.match(/(\d+)\s*kb\/s/)?.[1] || '0');
-    const bBitrate = parseInt(b.label?.match(/(\d+)\s*kb\/s/)?.[1] || '0');
-    return bBitrate - aBitrate;
-  });
-  
-  return sorted[0];
-}
-
-/**
- * Process YouTube data and merge if needed
- */
-async function processYouTubeData(data, url) {
+function processYouTubeData(data, url) {
   const isShorts = url.includes('/shorts/');
   console.log(`📊 YouTube: Found ${data.items.length} total formats (${isShorts ? 'SHORTS' : 'REGULAR'})`);
   
-  // Categorize formats
   const videoFormats = [];
   const audioFormats = [];
   
@@ -199,23 +147,30 @@ async function processYouTubeData(data, url) {
     
     if (!hasUrl) return;
     
-    const isAudioOnly = label.includes('audio only') || 
-                       label.includes('only audio') ||
-                       type.includes('audio only') ||
-                       type === 'audio/mp4' ||
-                       type === 'audio/webm';
+    // FIXED: Better audio detection
+    const isAudioOnly = 
+      type.includes('audio/') ||
+      type === 'audio/mp4' ||
+      type === 'audio/webm' ||
+      type === 'audio/m4a' ||
+      label.includes('audio only') ||
+      label.includes('only audio') ||
+      label.includes('m4a') ||
+      label.includes('opus') ||
+      (label.match(/\d+kb\/s/i) && !label.includes('p')); // Bitrate without resolution = audio
     
-    const isVideoOnly = label.includes('video only') || 
-                       label.includes('only video') ||
-                       label.includes('vid only') ||
-                       label.includes('without audio') ||
-                       type.includes('video only');
+    const isVideoOnly = 
+      label.includes('video only') || 
+      label.includes('only video') ||
+      label.includes('vid only') ||
+      label.includes('without audio');
     
     const isCombined = !isAudioOnly && !isVideoOnly && 
                       (type.includes('video') || label.includes('p'));
     
     if (isAudioOnly) {
       audioFormats.push(item);
+      console.log(`🔊 Audio format detected: ${label} (${type})`);
     } else if (isVideoOnly || isCombined) {
       videoFormats.push(item);
     }
@@ -223,7 +178,7 @@ async function processYouTubeData(data, url) {
   
   console.log(`✅ Found ${videoFormats.length} video formats and ${audioFormats.length} audio formats`);
   
-  // Process video formats with merge capability
+  // Process video formats
   const videoOptions = videoFormats.map(format => {
     const quality = format.label || 'unknown';
     const qualityNum = extractQualityNumber(quality);
@@ -245,7 +200,7 @@ async function processYouTubeData(data, url) {
       isPremium: isPremium,
       hasAudio: hasAudio,
       isVideoOnly: !hasAudio,
-      needsMerge: !hasAudio && audioFormats.length > 0 // Flag for merging
+      needsMerge: !hasAudio && audioFormats.length > 0
     };
   });
   
@@ -269,22 +224,19 @@ async function processYouTubeData(data, url) {
     };
   });
   
-  // Store best audio format for merging
-  const bestAudio = getBestAudioFormat(audioFormats);
-  
-  // Combine all formats
   const allQualityOptions = [...videoOptions, ...audioOptions];
   allQualityOptions.sort((a, b) => a.qualityNum - b.qualityNum);
   
   console.log(`✅ Total quality options: ${allQualityOptions.length} (${videoOptions.length} video + ${audioOptions.length} audio)`);
   
-  // Select default format
+  // Get best audio for merging
+  const bestAudio = audioOptions.length > 0 ? audioOptions[audioOptions.length - 1] : null;
+  
   let selectedFormat = videoOptions.find(opt => opt.qualityNum === 360 && opt.hasAudio) ||
                       videoOptions.find(opt => opt.hasAudio) ||
                       videoOptions[0] ||
                       allQualityOptions[0];
   
-  // Build result
   const result = {
     title: data.title,
     thumbnail: data.cover,
@@ -297,25 +249,19 @@ async function processYouTubeData(data, url) {
     url: selectedFormat.url,
     selectedQuality: selectedFormat,
     audioGuaranteed: selectedFormat.hasAudio,
-    // Add merge support data
     bestAudioUrl: bestAudio?.url,
     supportsMerge: bestAudio !== null
   };
   
   console.log(`✅ YouTube service completed with ${allQualityOptions.length} quality options`);
-  console.log(`🎯 Best audio for merge: ${bestAudio?.label || 'None'}`);
+  console.log(`🎯 Best audio for merge: ${bestAudio?.quality || 'None'}`);
   
   return result;
 }
 
-/**
- * Merge video and audio for a specific quality selection
- * This is called from the download endpoint when user selects a quality
- */
 async function mergeQualityWithAudio(videoUrl, audioUrl, outputFileName) {
-  const tempDir = path.join(__dirname, '../temp');
+  const tempDir = path.join('/tmp', 'video-merges');
   
-  // Ensure temp directory exists
   try {
     await fs.mkdir(tempDir, { recursive: true });
   } catch (err) {
@@ -339,47 +285,16 @@ async function mergeQualityWithAudio(videoUrl, audioUrl, outputFileName) {
     await mergeVideoAudio(videoPath, audioPath, outputPath);
     console.log('✅ Merge completed');
     
-    // Clean up input files
     await fs.unlink(videoPath).catch(() => {});
     await fs.unlink(audioPath).catch(() => {});
     
     return outputPath;
   } catch (error) {
-    // Clean up on error
     await fs.unlink(videoPath).catch(() => {});
     await fs.unlink(audioPath).catch(() => {});
     await fs.unlink(outputPath).catch(() => {});
     
     throw error;
-  }
-}
-
-/**
- * Clean up old merged files (call this periodically)
- */
-async function cleanupOldMergedFiles(maxAgeMinutes = 30) {
-  const tempDir = path.join(__dirname, '../temp');
-  
-  try {
-    const files = await fs.readdir(tempDir);
-    const now = Date.now();
-    
-    for (const file of files) {
-      const filePath = path.join(tempDir, file);
-      try {
-        const stats = await fs.stat(filePath);
-        const ageMinutes = (now - stats.mtimeMs) / 1000 / 60;
-        
-        if (ageMinutes > maxAgeMinutes) {
-          await fs.unlink(filePath);
-          console.log(`🗑️ Cleaned up old file: ${file}`);
-        }
-      } catch (err) {
-        // Ignore errors for individual files
-      }
-    }
-  } catch (err) {
-    console.error('Cleanup error:', err);
   }
 }
 
@@ -432,11 +347,7 @@ function getRandomUserAgent() {
   return userAgents[Math.floor(Math.random() * userAgents.length)];
 }
 
-// Schedule cleanup every 15 minutes
-setInterval(() => cleanupOldMergedFiles(30), 15 * 60 * 1000);
-
 module.exports = { 
   fetchYouTubeData,
-  mergeQualityWithAudio,
-  cleanupOldMergedFiles
+  mergeQualityWithAudio
 };
