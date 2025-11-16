@@ -6,6 +6,11 @@ const { BitlyClient } = require('bitly');
 const axios = require('axios');
 const { ytdl, pindl } = require('jer-api');
 const fetch = require('node-fetch');
+const { exec } = require('child_process');
+const { promisify } = require('util');
+const fs = require('fs').promises;
+const path = require('path');
+const execPromise = promisify(exec);
 
 // Local services
 const config = require('../Config/config');
@@ -13,7 +18,7 @@ const { advancedThreadsDownloader } = require('../Services/advancedThreadsServic
 const fetchLinkedinData = require('../Services/linkedinService');
 const facebookInsta = require('../Services/facebookInstaService');
 const { downloadTwmateData } = require('../Services/twitterService');
-const { fetchYouTubeData } = require('../Services/youtubeService');
+const { fetchYouTubeData, mergeQualityWithAudio } = require('../Services/youtubeService');
 
 // Initialize external services
 const bitly = new BitlyClient(config.BITLY_ACCESS_TOKEN);
@@ -215,9 +220,6 @@ const platformDownloaders = {
     }
   },
 
-  // ========================================
-  // YOUTUBE - UPDATED FOR HD QUALITY
-  // ========================================
   async youtube(url) {
     console.log('YouTube: Processing URL:', url);
 
@@ -418,76 +420,69 @@ const dataFormatters = {
     };
   },
 
-// ========================================
-// YOUTUBE FORMATTER - FIXED TO PASS QUALITY DATA
-// ========================================
-youtube(data) {
-  console.log('🎬 Formatting YouTube data...');
-  
-  if (!data || !data.title) {
-    throw new Error('Invalid YouTube data received');
-  }
-
-  // Check if we have quality formats
-  const hasFormats = data.formats && data.formats.length > 0;
-  const hasAllFormats = data.allFormats && data.allFormats.length > 0;
-  
-  console.log(`📊 YouTube data: hasFormats=${hasFormats}, hasAllFormats=${hasAllFormats}`);
-  
-  let qualityOptions = [];
-  let selectedQuality = null;
-  let defaultUrl = data.url;
-
-  if (hasFormats || hasAllFormats) {
-    // Use formats if available, otherwise use allFormats
-    qualityOptions = data.formats || data.allFormats;
+  youtube(data) {
+    console.log('🎬 Formatting YouTube data...');
     
-    // Find the default selected quality (360p or first available)
-    selectedQuality = qualityOptions.find(opt => 
-      opt.quality && opt.quality.includes('360p')
-    ) || qualityOptions[0];
-    
-    defaultUrl = selectedQuality?.url || data.url;
-    
-    console.log(`✅ YouTube: ${qualityOptions.length} quality options available`);
-    console.log(`🎯 Selected quality: ${selectedQuality?.quality}`);
-  } else {
-    console.log('⚠️ No quality formats found, creating fallback');
-    // Fallback: create basic quality option
-    qualityOptions = [
-      {
-        quality: '360p',
-        qualityNum: 360,
-        url: data.url,
-        type: 'video/mp4',
-        extension: 'mp4',
-        isPremium: false,
-        hasAudio: true
-      }
-    ];
-    selectedQuality = qualityOptions[0];
-  }
+    if (!data || !data.title) {
+      throw new Error('Invalid YouTube data received');
+    }
 
-  // Build the response object - THIS IS CRITICAL
-  const result = {
-    title: data.title,
-    url: defaultUrl,
-    thumbnail: data.thumbnail || PLACEHOLDER_THUMBNAIL,
-    sizes: qualityOptions.map(f => f.quality),
-    duration: data.duration || 'unknown',
-    source: 'youtube',
-    // Include both formats and allFormats for compatibility
-    formats: qualityOptions,
-    allFormats: qualityOptions,
-    selectedQuality: selectedQuality
-  };
+    const hasFormats = data.formats && data.formats.length > 0;
+    const hasAllFormats = data.allFormats && data.allFormats.length > 0;
+    
+    console.log(`📊 YouTube data: hasFormats=${hasFormats}, hasAllFormats=${hasAllFormats}`);
+    
+    let qualityOptions = [];
+    let selectedQuality = null;
+    let defaultUrl = data.url;
 
-  console.log(`✅ YouTube formatting complete`);
-  console.log(`📦 Sending to client: ${qualityOptions.length} formats`);
-  console.log(`🔗 Default URL length: ${defaultUrl?.length || 0}`);
-  
-  return result;
-},
+    if (hasFormats || hasAllFormats) {
+      qualityOptions = data.formats || data.allFormats;
+      
+      selectedQuality = qualityOptions.find(opt => 
+        opt.quality && opt.quality.includes('360p')
+      ) || qualityOptions[0];
+      
+      defaultUrl = selectedQuality?.url || data.url;
+      
+      console.log(`✅ YouTube: ${qualityOptions.length} quality options available`);
+      console.log(`🎯 Selected quality: ${selectedQuality?.quality}`);
+    } else {
+      console.log('⚠️ No quality formats found, creating fallback');
+      qualityOptions = [
+        {
+          quality: '360p',
+          qualityNum: 360,
+          url: data.url,
+          type: 'video/mp4',
+          extension: 'mp4',
+          isPremium: false,
+          hasAudio: true
+        }
+      ];
+      selectedQuality = qualityOptions[0];
+    }
+
+    const result = {
+      title: data.title,
+      url: defaultUrl,
+      thumbnail: data.thumbnail || PLACEHOLDER_THUMBNAIL,
+      sizes: qualityOptions.map(f => f.quality),
+      duration: data.duration || 'unknown',
+      source: 'youtube',
+      formats: qualityOptions,
+      allFormats: qualityOptions,
+      selectedQuality: selectedQuality,
+      bestAudioUrl: data.bestAudioUrl,
+      supportsMerge: data.supportsMerge
+    };
+
+    console.log(`✅ YouTube formatting complete`);
+    console.log(`📦 Sending to client: ${qualityOptions.length} formats`);
+    
+    return result;
+  },
+
   threads(data) {
     console.log("Processing advanced Threads data...");
     return {
@@ -535,11 +530,12 @@ const formatData = async (platform, data) => {
 
 // ===== MAIN CONTROLLER =====
 
-// ===== MAIN CONTROLLER =====
-
 const downloadMedia = async (req, res) => {
-  const { url } = req.body;
+  const { url, selectedQuality } = req.body;
   console.log("Received URL:", url);
+  if (selectedQuality) {
+    console.log("Selected Quality:", selectedQuality.quality);
+  }
 
   try {
     const urlValidation = validateUrl(url);
@@ -609,17 +605,57 @@ const downloadMedia = async (req, res) => {
       });
     }
 
+    // ========================================
+    // YOUTUBE FFMPEG MERGE LOGIC (ONLY FOR YOUTUBE)
+    // ========================================
+    if (platform === 'youtube' && selectedQuality && selectedQuality.needsMerge && data.bestAudioUrl) {
+      console.log('🎬 YouTube: Starting FFmpeg merge for', selectedQuality.quality);
+      
+      try {
+        const safeTitle = data.title.replace(/[^a-z0-9]/gi, '_').substring(0, 50);
+        const outputFileName = `${safeTitle}_${selectedQuality.quality}.mp4`;
+        
+        const mergedFilePath = await mergeQualityWithAudio(
+          selectedQuality.url,
+          data.bestAudioUrl,
+          outputFileName
+        );
+        
+        console.log('✅ Merge completed, sending file...');
+        
+        return res.download(mergedFilePath, outputFileName, async (err) => {
+          if (err) {
+            console.error('Error sending file:', err);
+          }
+          
+          try {
+            await fs.unlink(mergedFilePath);
+            console.log('🗑️ Cleaned up merged file');
+          } catch (cleanupErr) {
+            console.error('Cleanup error:', cleanupErr);
+          }
+        });
+        
+      } catch (mergeError) {
+        console.error('❌ Merge failed:', mergeError);
+        formattedData.url = selectedQuality.url;
+        formattedData.warning = 'Audio merge failed - video only';
+      }
+    } else if (platform === 'youtube' && selectedQuality && selectedQuality.url) {
+      formattedData.url = selectedQuality.url;
+      formattedData.selectedQuality = selectedQuality;
+    }
+
     console.log(`Final ${platform} URL length:`, formattedData.url.length);
     console.log(`Formats count: ${formattedData.formats?.length || 0}`);
-    console.log(`AllFormats count: ${formattedData.allFormats?.length || 0}`);
     console.info("Download Media: Media successfully downloaded and formatted.");
 
-    // ENSURE THE RESPONSE INCLUDES ALL DATA
     res.status(200).json({
       success: true,
-      data: formattedData, // This must include formats and allFormats
+      data: formattedData,
       platform: platform,
       timestamp: new Date().toISOString(),
+      merged: platform === 'youtube' && selectedQuality?.needsMerge && data.bestAudioUrl ? true : false,
       debug: {
         originalUrl: url,
         cleanedUrl: cleanedUrl,
@@ -628,8 +664,7 @@ const downloadMedia = async (req, res) => {
         finalUrlLength: formattedData.url ? formattedData.url.length : 0,
         hasFormats: !!formattedData.formats,
         formatsCount: formattedData.formats?.length || 0,
-        hasAllFormats: !!formattedData.allFormats,
-        allFormatsCount: formattedData.allFormats?.length || 0
+        selectedQuality: selectedQuality?.quality || 'default'
       }
     });
 
@@ -656,6 +691,7 @@ const downloadMedia = async (req, res) => {
     });
   }
 };
+
 const getErrorSuggestions = (errorMessage, platform) => {
   const suggestions = [];
 
