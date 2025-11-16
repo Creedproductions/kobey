@@ -2,9 +2,6 @@ const express = require('express');
 const cors = require('cors');
 const downloaderRoutes = require('./Routes/downloaderRoutes');
 const config = require('./Config/config');
-const { exec } = require('child_process');
-const { promisify } = require('util');
-const execPromise = promisify(exec);
 
 const app = express();
 
@@ -39,31 +36,12 @@ const setupRoutes = () => {
     });
   });
 
-  // FFmpeg test endpoint
-  app.get('/api/test/ffmpeg', async (req, res) => {
-    try {
-      const { stdout } = await execPromise('ffmpeg -version');
-      res.json({ 
-        success: true, 
-        ffmpeg: 'installed', 
-        version: stdout.split('\n')[0] 
-      });
-    } catch (error) {
-      res.json({ 
-        success: false, 
-        ffmpeg: 'not installed', 
-        error: error.message 
-      });
-    }
-  });
-
   app.get('/', (req, res) => {
     res.status(200).json({
       message: 'Media Downloader API',
       status: 'running',
       endpoints: {
         health: '/health',
-        ffmpeg: '/api/test/ffmpeg',
         download: '/api/download',
         mockVideos: '/api/mock-videos'
       }
@@ -111,7 +89,6 @@ const startServer = () => {
     console.log(`🚀 Server running on port ${PORT}`);
     console.log(`🌍 Environment: ${NODE_ENV}`);
     console.log(`📊 Health check: http://localhost:${PORT}/health`);
-    console.log(`🎬 FFmpeg test: http://localhost:${PORT}/api/test/ffmpeg`);
     console.log(`📥 Download API: http://localhost:${PORT}/api/download`);
   });
 
