@@ -5,6 +5,11 @@ const fs = require('fs').promises;
 const path = require('path');
 const execPromise = promisify(exec);
 
+/**
+ * Fetches YouTube video data with improved reliability and FFmpeg merging
+ * @param {string} url YouTube URL
+ * @returns {Promise<object>} Processed video data
+ */
 async function fetchYouTubeData(url) {
   const normalizedUrl = normalizeYouTubeUrl(url);
   console.log(`🔍 Fetching YouTube data for: ${normalizedUrl}`);
@@ -32,6 +37,9 @@ async function fetchYouTubeData(url) {
   throw new Error(`YouTube download failed after ${maxAttempts} attempts: ${lastError.message}`);
 }
 
+/**
+ * Normalizes various YouTube URL formats
+ */
 function normalizeYouTubeUrl(url) {
   if (url.includes('youtu.be/')) {
     const videoId = url.split('youtu.be/')[1].split('?')[0].split('&')[0];
@@ -53,6 +61,9 @@ function normalizeYouTubeUrl(url) {
   return url;
 }
 
+/**
+ * Primary API implementation using vidfly.ai
+ */
 async function fetchWithVidFlyApi(url, attemptNum) {
   try {
     const timeout = 30000 + ((attemptNum - 1) * 10000);
@@ -97,6 +108,9 @@ async function fetchWithVidFlyApi(url, attemptNum) {
   }
 }
 
+/**
+ * Download a file from URL
+ */
 async function downloadFile(url, outputPath) {
   const writer = require('fs').createWriteStream(outputPath);
   
@@ -115,6 +129,9 @@ async function downloadFile(url, outputPath) {
   });
 }
 
+/**
+ * Merge video and audio using FFmpeg
+ */
 async function mergeVideoAudio(videoPath, audioPath, outputPath) {
   console.log('🎬 Starting FFmpeg merge...');
   
@@ -133,6 +150,9 @@ async function mergeVideoAudio(videoPath, audioPath, outputPath) {
   }
 }
 
+/**
+ * Process YouTube data and merge if needed
+ */
 function processYouTubeData(data, url) {
   const isShorts = url.includes('/shorts/');
   console.log(`📊 YouTube: Found ${data.items.length} total formats (${isShorts ? 'SHORTS' : 'REGULAR'})`);
@@ -147,7 +167,7 @@ function processYouTubeData(data, url) {
     
     if (!hasUrl) return;
     
-    // FIXED: Better audio detection
+    // Enhanced audio detection
     const isAudioOnly = 
       type.includes('audio/') ||
       type === 'audio/mp4' ||
@@ -157,7 +177,7 @@ function processYouTubeData(data, url) {
       label.includes('only audio') ||
       label.includes('m4a') ||
       label.includes('opus') ||
-      (label.match(/\d+kb\/s/i) && !label.includes('p')); // Bitrate without resolution = audio
+      (label.match(/\d+kb\/s/i) && !label.includes('p'));
     
     const isVideoOnly = 
       label.includes('video only') || 
@@ -170,7 +190,6 @@ function processYouTubeData(data, url) {
     
     if (isAudioOnly) {
       audioFormats.push(item);
-      console.log(`🔊 Audio format detected: ${label} (${type})`);
     } else if (isVideoOnly || isCombined) {
       videoFormats.push(item);
     }
@@ -224,27 +243,33 @@ function processYouTubeData(data, url) {
     };
   });
   
-  const allQualityOptions = [...videoOptions, ...audioOptions];
+  // Deduplicate formats
+  const deduplicatedVideos = deduplicateFormats(videoOptions);
+  const deduplicatedAudio = deduplicateFormats(audioOptions);
+  
+  const allQualityOptions = [...deduplicatedVideos, ...deduplicatedAudio];
   allQualityOptions.sort((a, b) => a.qualityNum - b.qualityNum);
   
-  console.log(`✅ Total quality options: ${allQualityOptions.length} (${videoOptions.length} video + ${audioOptions.length} audio)`);
+  console.log(`✅ Total quality options: ${allQualityOptions.length} (${deduplicatedVideos.length} video + ${deduplicatedAudio.length} audio) after deduplication`);
   
   // Get best audio for merging
-  const bestAudio = audioOptions.length > 0 ? audioOptions[audioOptions.length - 1] : null;
+  const bestAudio = deduplicatedAudio.length > 0 ? deduplicatedAudio[deduplicatedAudio.length - 1] : null;
   
-  let selectedFormat = videoOptions.find(opt => opt.qualityNum === 360 && opt.hasAudio) ||
-                      videoOptions.find(opt => opt.hasAudio) ||
-                      videoOptions[0] ||
+  // Select default format
+  let selectedFormat = deduplicatedVideos.find(opt => opt.qualityNum === 360 && opt.hasAudio) ||
+                      deduplicatedVideos.find(opt => opt.hasAudio) ||
+                      deduplicatedVideos[0] ||
                       allQualityOptions[0];
   
+  // Build result
   const result = {
     title: data.title,
     thumbnail: data.cover,
     duration: data.duration,
     isShorts: isShorts,
     formats: allQualityOptions,
-    videoFormats: videoOptions,
-    audioFormats: audioOptions,
+    videoFormats: deduplicatedVideos,
+    audioFormats: deduplicatedAudio,
     allFormats: allQualityOptions,
     url: selectedFormat.url,
     selectedQuality: selectedFormat,
@@ -259,6 +284,35 @@ function processYouTubeData(data, url) {
   return result;
 }
 
+/**
+ * Deduplicate formats by quality number
+ */
+function deduplicateFormats(formats) {
+  const qualityMap = new Map();
+  
+  formats.forEach(format => {
+    const existing = qualityMap.get(format.qualityNum);
+    
+    if (!existing) {
+      qualityMap.set(format.qualityNum, format);
+    } else {
+      // Prefer formats with audio and MP4 container
+      const preferNew = 
+        (format.hasAudio && !existing.hasAudio) ||
+        (format.hasAudio === existing.hasAudio && format.type?.includes('mp4') && !existing.type?.includes('mp4'));
+      
+      if (preferNew) {
+        qualityMap.set(format.qualityNum, format);
+      }
+    }
+  });
+  
+  return Array.from(qualityMap.values()).sort((a, b) => a.qualityNum - b.qualityNum);
+}
+
+/**
+ * Merge video and audio for a specific quality selection
+ */
 async function mergeQualityWithAudio(videoUrl, audioUrl, outputFileName) {
   const tempDir = path.join('/tmp', 'video-merges');
   
@@ -285,11 +339,13 @@ async function mergeQualityWithAudio(videoUrl, audioUrl, outputFileName) {
     await mergeVideoAudio(videoPath, audioPath, outputPath);
     console.log('✅ Merge completed');
     
+    // Clean up input files
     await fs.unlink(videoPath).catch(() => {});
     await fs.unlink(audioPath).catch(() => {});
     
     return outputPath;
   } catch (error) {
+    // Clean up on error
     await fs.unlink(videoPath).catch(() => {});
     await fs.unlink(audioPath).catch(() => {});
     await fs.unlink(outputPath).catch(() => {});
