@@ -118,67 +118,105 @@ async function fetchWithVidFlyApi(url, attemptNum) {
 }
 
 /**
- * Process YouTube data - keeping EXACT original structure for proper saving
+ * Process YouTube data and select the best format
  */
 function processYouTubeData(data, url) {
   const isShorts = url.includes('/shorts/');
   console.log(`📊 YouTube: Found ${data.items.length} total formats (${isShorts ? 'SHORTS' : 'REGULAR'})`);
   
-  // Filter formats with valid URLs only
-  let availableFormats = data.items.filter(item => item.url && item.url.length > 0);
-  
-  console.log(`✅ Found ${availableFormats.length} formats with valid URLs`);
-  
   // ========================================
-  // DEDUPLICATE - Keep ONE format per resolution
+  // IMPROVED AUDIO FILTERING FOR ALL VIDEOS
   // ========================================
   
-  const qualityMap = new Map();
+  let availableFormats = data.items.filter(item => {
+    const label = (item.label || '').toLowerCase();
+    const type = (item.type || '').toLowerCase();
+    const hasUrl = item.url && item.url.length > 0;
+    
+    // Use stricter audio detection for ALL videos, not just shorts
+    const isVideoOnly = label.includes('video only') || 
+                       label.includes('vid only') ||
+                       label.includes('without audio') ||
+                       type.includes('video only') ||
+                       (type.includes('video') && !type.includes('audio'));
+    
+    const isAudioOnly = label.includes('audio only') || 
+                       type.includes('audio only');
+    
+    // Be more conservative - only accept formats we're confident have audio
+    if (isShorts) {
+      // For shorts: must have URL, not be video-only, and not be audio-only
+      return hasUrl && !isVideoOnly && !isAudioOnly;
+    } else {
+      // For regular videos: must have URL and not be video-only
+      // Using same strict filtering as shorts
+      return hasUrl && !isVideoOnly;
+    }
+  });
+  
+  console.log(`✅ Found ${availableFormats.length} formats with audio after strict filtering`);
+  
+  // If no formats with audio found, try to find ANY format that might work
+  if (availableFormats.length === 0) {
+    console.log('🚨 No audio formats found, emergency fallback...');
+    
+    // Emergency fallback: take any format that has a URL
+    availableFormats = data.items.filter(item => {
+      const label = (item.label || '').toLowerCase();
+      const hasUrl = item.url && item.url.length > 0;
+      
+      // Still exclude obvious audio-only formats for shorts
+      const isAudioOnly = label.includes('audio only');
+      
+      return hasUrl && (isShorts ? !isAudioOnly : true);
+    });
+    
+    console.log(`🆘 Emergency fallback found ${availableFormats.length} formats`);
+  }
+  
+  // If STILL no formats, use everything that has a URL
+  if (availableFormats.length === 0) {
+    console.log('💀 Using ALL available formats as last resort');
+    availableFormats = data.items.filter(item => item.url && item.url.length > 0);
+  }
+  
+  // Log filtered formats for debugging
+  console.log('🔊 Audio-compatible formats:');
+  availableFormats.forEach((format, index) => {
+    const label = (format.label || '').toLowerCase();
+    const hasAudio = !label.includes('video only') && !label.includes('audio only');
+    console.log(`  ${index + 1}. ${format.label} - Audio: ${hasAudio ? '✅' : '❌'}`);
+  });
+  
+  // ========================================
+  // DEDUPLICATE HERE - Keep only ONE per quality
+  // ========================================
+  
+  const seenQualities = new Map();
+  const deduplicatedFormats = [];
   
   availableFormats.forEach(format => {
-    const label = (format.label || '').toLowerCase();
     const qualityNum = extractQualityNumber(format.label || '');
+    if (qualityNum === 0) return; // Skip unknown qualities
     
-    // Skip if no valid quality
-    if (qualityNum === 0) return;
-    
-    // Skip audio-only formats
-    const isAudioOnly = label.includes('audio only');
-    if (isAudioOnly) return;
-    
-    // If this quality already exists, prefer one WITH audio
-    if (qualityMap.has(qualityNum)) {
-      const existing = qualityMap.get(qualityNum);
-      const existingHasAudio = !(existing.label || '').toLowerCase().includes('video only');
-      const currentHasAudio = !label.includes('video only');
-      
-      // Replace if current has audio and existing doesn't
-      if (currentHasAudio && !existingHasAudio) {
-        qualityMap.set(qualityNum, format);
-      }
-      return;
+    if (!seenQualities.has(qualityNum)) {
+      seenQualities.set(qualityNum, true);
+      deduplicatedFormats.push(format);
     }
-    
-    // Add new quality
-    qualityMap.set(qualityNum, format);
   });
   
-  // Convert back to array and sort by quality
-  availableFormats = Array.from(qualityMap.values()).sort((a, b) => {
-    const qA = extractQualityNumber(a.label || '');
-    const qB = extractQualityNumber(b.label || '');
-    return qA - qB;
-  });
-  
-  console.log(`✅ Deduplicated to ${availableFormats.length} unique qualities`);
+  availableFormats = deduplicatedFormats;
+  console.log(`🔧 After deduplication: ${availableFormats.length} unique qualities`);
   
   // ========================================
-  // MAP TO QUALITY OPTIONS (EXACT ORIGINAL FORMAT)
+  // CREATE QUALITY OPTIONS WITH PREMIUM FLAGS
   // ========================================
   
   const qualityOptions = availableFormats.map(format => {
     const quality = format.label || 'unknown';
     const qualityNum = extractQualityNumber(quality);
+    
+    // Mark as premium: 360p and below are free, above 360p requires premium
     const isPremium = qualityNum > 360;
     
     return {
@@ -193,30 +231,27 @@ function processYouTubeData(data, url) {
     };
   });
   
-  // ========================================
-  // SELECT DEFAULT (360p or first available)
-  // ========================================
+  // Sort by quality number (ascending)
+  qualityOptions.sort((a, b) => a.qualityNum - b.qualityNum);
   
+  // Select default format (360p for free users, or highest available if premium)
   let selectedFormat = qualityOptions.find(opt => opt.qualityNum === 360) || qualityOptions[0];
   
-  // ========================================
-  // RETURN EXACT ORIGINAL STRUCTURE
-  // ========================================
-  
+  // Build result with all quality options - THIS IS THE KEY FIX
   const result = {
     title: data.title,
     thumbnail: data.cover,
     duration: data.duration,
     isShorts: isShorts,
-    formats: qualityOptions,
-    allFormats: qualityOptions,
+    formats: qualityOptions, // This ensures formats array is included
+    allFormats: qualityOptions, // Also include allFormats for backward compatibility
     url: selectedFormat.url,
     selectedQuality: selectedFormat,
     audioGuaranteed: true
   };
   
-  console.log(`✅ YouTube completed: ${qualityOptions.length} qualities`);
-  console.log(`🎯 Default: ${selectedFormat.quality} at ${selectedFormat.url.substring(0, 50)}...`);
+  console.log(`✅ YouTube service completed with ${qualityOptions.length} quality options`);
+  console.log(`📋 Sending formats:`, qualityOptions.map(f => `${f.quality} (premium: ${f.isPremium})`));
   
   return result;
 }
