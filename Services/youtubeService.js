@@ -201,14 +201,13 @@ function processYouTubeData(data, url) {
   // Select default format (360p for free users, or highest available if premium)
   let selectedFormat = qualityOptions.find(opt => opt.qualityNum === 360) || qualityOptions[0];
   
-  // Build result with all quality options - THIS IS THE KEY FIX
+  // Build result with unique quality options - FIXED: Remove duplicate formats array
   const result = {
     title: data.title,
     thumbnail: data.cover,
     duration: data.duration,
     isShorts: isShorts,
-    formats: qualityOptions, // This ensures formats array is included
-    allFormats: qualityOptions, // Also include allFormats for backward compatibility
+    formats: qualityOptions, // Only include formats array (removed allFormats duplicate)
     url: selectedFormat.url,
     selectedQuality: selectedFormat,
     audioGuaranteed: selectedFormat.hasAudio
