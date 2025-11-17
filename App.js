@@ -1,213 +1,246 @@
 const express = require('express');
-const cors = require('cors');
-const downloaderRoutes = require('./Routes/downloaderRoutes');
-const config = require('./Config/config');
+const router = express.Router();
+const { spawn, execSync } = require('child_process');
+const { downloadMedia } = require('../Controllers/downloaderController');
+const mockController = require('../Controllers/mockController');
+const audioMergerService = require('../Services/audioMergerService');
 
-const app = express();
+// POST route to download media
+router.post('/download', downloadMedia);
 
-const PORT = config.PORT || process.env.PORT || 8000;
-const NODE_ENV = process.env.NODE_ENV || 'development';
+// GET route to fetch mock data
+router.get('/mock-videos', mockController.getMockVideos);
 
-// CORS configuration
-const corsOptions = {
-  origin: [
-    'https://savedownloader.vercel.app',
-    'https://savedownloaderweb.vercel.app',
-    'http://localhost:5173'
-  ],
-  methods: ['GET', 'POST', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
-  credentials: true
-};
-
-const setupMiddleware = () => {
-  // Increase payload size limit for large requests
-  app.use(express.json({ limit: '50mb' }));
-  app.use(express.urlencoded({ extended: true, limit: '50mb' }));
-  
-  app.use(cors(corsOptions));
-  
-  // Request logging in development
-  if (NODE_ENV === 'development') {
-    app.use((req, res, next) => {
-      console.log(`${req.method} ${req.path}`);
-      next();
-    });
-  }
-  
-  // Set timeout for all requests (important for video merging)
-  app.use((req, res, next) => {
-    // Increase timeout to 5 minutes for merge operations
-    req.setTimeout(300000); // 5 minutes
-    res.setTimeout(300000); // 5 minutes
-    next();
-  });
-};
-
-const setupRoutes = () => {
-  // API routes
-  app.use('/api', downloaderRoutes);
-
-  // Health check endpoint
-  app.get('/health', (req, res) => {
-    res.status(200).json({
-      status: 'OK',
-      timestamp: new Date().toISOString(),
-      environment: NODE_ENV,
-      features: ['downloads', 'audio_merging', 'ffmpeg'],
-      database: 'disabled',
-      uptime: process.uptime()
-    });
-  });
-
-  // Root endpoint
-  app.get('/', (req, res) => {
-    res.status(200).json({
-      message: 'Media Downloader API',
-      status: 'running',
-      version: '2.0.0',
-      endpoints: {
-        health: '/health',
-        download: 'POST /api/download',
-        mergeAudio: 'GET /api/merge-audio?videoUrl=&audioUrl=',
-        ffmpegStatus: 'GET /api/ffmpeg-status',
-        systemInfo: 'GET /api/system-info',
-        mockVideos: 'GET /api/mock-videos',
-        test: 'GET /api/test'
-      },
-      features: {
-        platforms: ['instagram', 'tiktok', 'facebook', 'twitter', 'youtube', 'pinterest', 'threads', 'linkedin'],
-        audioMerging: true,
-        multipleQualities: true,
-        ffmpegIntegration: true
-      }
-    });
-  });
-
-  // 404 handler
-  app.use((req, res) => {
-    res.status(404).json({
-      error: 'Endpoint not found',
-      path: req.path,
-      method: req.method,
-      availableEndpoints: {
-        root: 'GET /',
-        health: 'GET /health',
-        api: 'GET /api/test'
-      }
-    });
-  });
-
-  // Global error handler
-  app.use((err, req, res, next) => {
-    console.error('❌ Global error handler:', err);
+// Audio merging endpoint for YouTube videos - IMPROVED VERSION
+router.get('/merge-audio', async (req, res) => {
+  try {
+    const { videoUrl, audioUrl } = req.query;
     
-    if (!res.headersSent) {
-      res.status(err.status || 500).json({
-        error: 'Internal server error',
-        message: NODE_ENV === 'development' ? err.message : 'Something went wrong',
-        path: req.path,
-        timestamp: new Date().toISOString()
+    if (!videoUrl || !audioUrl) {
+      return res.status(400).json({
+        error: 'Both videoUrl and audioUrl parameters are required',
+        success: false
       });
     }
-  });
-};
 
-// Store server instance globally for cleanup
-let server;
+    // Decode URLs in case they're encoded
+    const decodedVideoUrl = decodeURIComponent(videoUrl);
+    const decodedAudioUrl = decodeURIComponent(audioUrl);
 
-const setupErrorHandling = () => {
-  process.on('uncaughtException', (error) => {
-    console.error('❌ Uncaught Exception:', error);
-    console.error('Stack:', error.stack);
+    console.log(`🎬 Starting audio merge request`);
+    console.log(`📹 Video URL: ${decodedVideoUrl.substring(0, 100)}...`);
+    console.log(`🎵 Audio URL: ${decodedAudioUrl.substring(0, 100)}...`);
+
+    // Set a timeout for the merge operation (5 minutes)
+    req.setTimeout(300000);
+    res.setTimeout(300000);
+
+    // Call the merge service
+    await audioMergerService.merge(decodedVideoUrl, decodedAudioUrl, res);
+
+  } catch (error) {
+    console.error('❌ Audio merge failed:', error);
     
-    if (NODE_ENV === 'production') {
-      // Log and continue in production
-      console.error('⚠️ Continuing despite uncaught exception');
-    } else {
-      // Exit in development to catch bugs
-      process.exit(1);
+    // Only send error response if headers haven't been sent yet
+    if (!res.headersSent) {
+      res.status(500).json({
+        error: 'Audio merging failed',
+        success: false,
+        details: error.message
+      });
     }
-  });
-
-  process.on('unhandledRejection', (reason, promise) => {
-    console.error('❌ Unhandled Rejection at:', promise);
-    console.error('Reason:', reason);
-  });
-
-  process.on('SIGTERM', () => {
-    console.log('👋 SIGTERM received, shutting down gracefully');
-    gracefulShutdown();
-  });
-
-  process.on('SIGINT', () => {
-    console.log('👋 SIGINT received, shutting down gracefully');
-    gracefulShutdown();
-  });
-};
-
-const gracefulShutdown = () => {
-  if (server) {
-    console.log('🛑 Closing server...');
-    server.close(() => {
-      console.log('✅ Server closed successfully');
-      process.exit(0);
-    });
-
-    // Force shutdown after 10 seconds
-    setTimeout(() => {
-      console.error('⚠️ Forcing shutdown after timeout');
-      process.exit(1);
-    }, 10000);
-  } else {
-    process.exit(0);
   }
-};
+});
 
-const startServer = () => {
-  server = app.listen(PORT, '0.0.0.0', () => {
-    console.log(`🚀 Server running on port ${PORT}`);
-    console.log(`🌍 Environment: ${NODE_ENV}`);
-    console.log(`📊 Health check: http://localhost:${PORT}/health`);
-    console.log(`📥 Download API: http://localhost:${PORT}/api/download`);
-    console.log(`🎬 Merge Audio: http://localhost:${PORT}/api/merge-audio`);
-    console.log(`🔧 FFmpeg Status: http://localhost:${PORT}/api/ffmpeg-status`);
-    console.log(`⏰ Request timeout: 5 minutes`);
-  });
+// FFmpeg status check endpoint - ENHANCED VERSION
+router.get('/ffmpeg-status', (req, res) => {
+  console.log('🔍 Checking FFmpeg installation...');
+  
+  try {
+    // Try to get FFmpeg location
+    let ffmpegPath = 'Not found';
+    try {
+      ffmpegPath = execSync('which ffmpeg').toString().trim();
+    } catch (e) {
+      console.warn('Could not locate FFmpeg with "which" command');
+    }
 
-  // Increase server timeout for long-running operations
-  server.timeout = 300000; // 5 minutes
-  server.keepAliveTimeout = 310000; // Slightly higher than timeout
-  server.headersTimeout = 320000; // Slightly higher than keepAliveTimeout
+    // Check for required codecs
+    let codecs = {};
+    try {
+      const codecOutput = execSync('ffmpeg -codecs 2>/dev/null').toString();
+      codecs = {
+        aac: codecOutput.includes('aac'),
+        h264: codecOutput.includes('h264'),
+        mp4: codecOutput.includes('mp4')
+      };
+    } catch (e) {
+      console.warn('Could not check codecs');
+    }
 
-  server.on('error', (error) => {
-    console.error('❌ Server error:', error);
-    if (error.code === 'EADDRINUSE') {
-      console.error(`Port ${PORT} is already in use`);
-      process.exit(1);
+    // Spawn FFmpeg process to get version
+    const ffmpeg = spawn('ffmpeg', ['-version']);
+    let output = '';
+    let errorOutput = '';
+    
+    ffmpeg.stdout.on('data', (data) => {
+      output += data.toString();
+    });
+    
+    ffmpeg.stderr.on('data', (data) => {
+      errorOutput += data.toString();
+    });
+    
+    ffmpeg.on('close', (code) => {
+      const versionMatch = output.match(/ffmpeg version ([^\s]+)/);
+      const version = versionMatch ? versionMatch[1] : 'Unknown';
+      
+      res.json({
+        success: code === 0,
+        installed: code === 0,
+        exitCode: code,
+        path: ffmpegPath,
+        version: version,
+        fullVersion: output.split('\n')[0] || 'Unknown',
+        codecs: codecs,
+        detailedOutput: output.substring(0, 500),
+        error: errorOutput,
+        timestamp: new Date().toISOString(),
+        message: code === 0 ? '✅ FFmpeg is installed and working' : '❌ FFmpeg check failed'
+      });
+    });
+    
+    ffmpeg.on('error', (error) => {
+      console.error('❌ FFmpeg error:', error);
+      res.status(500).json({
+        success: false,
+        installed: false,
+        error: error.message,
+        message: '❌ FFmpeg is not installed or not accessible',
+        timestamp: new Date().toISOString()
+      });
+    });
+    
+  } catch (error) {
+    console.error('❌ FFmpeg status check failed:', error);
+    res.status(500).json({
+      success: false,
+      installed: false,
+      error: error.message,
+      timestamp: new Date().toISOString()
+    });
+  }
+});
+
+// System information endpoint - DEBUGGING HELPER
+router.get('/system-info', (req, res) => {
+  try {
+    const os = require('os');
+    
+    res.json({
+      success: true,
+      system: {
+        platform: os.platform(),
+        architecture: os.arch(),
+        cpus: os.cpus().length,
+        totalMemory: `${(os.totalmem() / 1024 / 1024 / 1024).toFixed(2)} GB`,
+        freeMemory: `${(os.freemem() / 1024 / 1024 / 1024).toFixed(2)} GB`,
+        nodeVersion: process.version,
+        uptime: `${Math.floor(process.uptime())} seconds`
+      },
+      environment: {
+        nodeEnv: process.env.NODE_ENV || 'development',
+        port: process.env.PORT || 8080,
+        ffmpegPath: process.env.FFMPEG_PATH || 'default'
+      },
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// Test merge with sample URLs - TESTING ENDPOINT
+router.get('/test-merge', async (req, res) => {
+  const testVideoUrl = req.query.videoUrl;
+  const testAudioUrl = req.query.audioUrl;
+  
+  if (!testVideoUrl || !testAudioUrl) {
+    return res.status(400).json({
+      error: 'Please provide both videoUrl and audioUrl query parameters',
+      example: '/api/test-merge?videoUrl=VIDEO_URL&audioUrl=AUDIO_URL',
+      success: false
+    });
+  }
+  
+  console.log('🧪 Testing audio merge with provided URLs');
+  
+  try {
+    // Set timeout for test
+    req.setTimeout(300000);
+    res.setTimeout(300000);
+    
+    await audioMergerService.merge(testVideoUrl, testAudioUrl, res);
+  } catch (error) {
+    console.error('❌ Test merge failed:', error);
+    if (!res.headersSent) {
+      res.status(500).json({
+        error: 'Test merge failed',
+        details: error.message,
+        success: false
+      });
+    }
+  }
+});
+
+// Main test endpoint
+router.get('/test', (req, res) => {
+  res.status(200).json({
+    success: true,
+    message: 'Download API is working',
+    timestamp: new Date().toISOString(),
+    supportedPlatforms: [
+      'instagram',
+      'tiktok',
+      'facebook',
+      'twitter',
+      'youtube',
+      'pinterest',
+      'threads',
+      'linkedin'
+    ],
+    features: [
+      'media_download',
+      'audio_merging',
+      'multiple_qualities',
+      'ffmpeg_integration'
+    ],
+    endpoints: {
+      download: 'POST /api/download',
+      mergeAudio: 'GET /api/merge-audio?videoUrl=&audioUrl=',
+      ffmpegStatus: 'GET /api/ffmpeg-status',
+      systemInfo: 'GET /api/system-info',
+      testMerge: 'GET /api/test-merge?videoUrl=&audioUrl=',
+      mockVideos: 'GET /api/mock-videos'
     }
   });
+});
 
-  // Handle server timeout
-  server.on('timeout', (socket) => {
-    console.warn('⚠️ Server timeout occurred');
-    socket.destroy();
+// Health check endpoint for monitoring
+router.get('/health', (req, res) => {
+  res.status(200).json({
+    status: 'healthy',
+    uptime: process.uptime(),
+    timestamp: new Date().toISOString(),
+    memoryUsage: {
+      rss: `${(process.memoryUsage().rss / 1024 / 1024).toFixed(2)} MB`,
+      heapTotal: `${(process.memoryUsage().heapTotal / 1024 / 1024).toFixed(2)} MB`,
+      heapUsed: `${(process.memoryUsage().heapUsed / 1024 / 1024).toFixed(2)} MB`
+    }
   });
+});
 
-  return server;
-};
-
-const initializeApp = () => {
-  console.log('🔧 Initializing application...');
-  setupMiddleware();
-  setupRoutes();
-  setupErrorHandling();
-  return startServer();
-};
-
-// Start server only if this file is run directly
-if (require.main === module) {
-  server = initializeApp();
-}
-
-module.exports = app;
+module.exports = router;
