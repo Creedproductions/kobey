@@ -125,68 +125,50 @@ function processYouTubeData(data, url) {
   console.log(`📊 YouTube: Found ${data.items.length} total formats (${isShorts ? 'SHORTS' : 'REGULAR'})`);
   
   // ========================================
-  // IMPROVED AUDIO FILTERING FOR ALL VIDEOS
+  // SHOW ALL FORMATS - Let app handle audio logic
   // ========================================
   
+  // Get ALL formats that have a valid URL (no filtering by audio)
   let availableFormats = data.items.filter(item => {
+    return item.url && item.url.length > 0;
+  });
+  
+  console.log(`✅ Found ${availableFormats.length} total formats with URLs (no audio filtering)`);
+  
+  // Detect audio presence for metadata
+  const formatWithAudioInfo = availableFormats.map(item => {
     const label = (item.label || '').toLowerCase();
     const type = (item.type || '').toLowerCase();
-    const hasUrl = item.url && item.url.length > 0;
     
-    // Use stricter audio detection for ALL videos, not just shorts
+    // Detect if format has audio
     const isVideoOnly = label.includes('video only') || 
                        label.includes('vid only') ||
                        label.includes('without audio') ||
-                       type.includes('video only') ||
-                       (type.includes('video') && !type.includes('audio'));
+                       type.includes('video only');
     
     const isAudioOnly = label.includes('audio only') || 
-                       type.includes('audio only');
+                       type.includes('audio only') ||
+                       label.includes('audio') && !label.includes('video');
     
-    // Be more conservative - only accept formats we're confident have audio
-    if (isShorts) {
-      // For shorts: must have URL, not be video-only, and not be audio-only
-      return hasUrl && !isVideoOnly && !isAudioOnly;
-    } else {
-      // For regular videos: must have URL and not be video-only
-      // Using same strict filtering as shorts
-      return hasUrl && !isVideoOnly;
-    }
+    // Add audio metadata to the format
+    return {
+      ...item,
+      hasAudio: !isVideoOnly && !isAudioOnly,
+      isVideoOnly: isVideoOnly,
+      isAudioOnly: isAudioOnly
+    };
   });
   
-  console.log(`✅ Found ${availableFormats.length} formats with audio after strict filtering`);
-  
-  // If no formats with audio found, try to find ANY format that might work
-  if (availableFormats.length === 0) {
-    console.log('🚨 No audio formats found, emergency fallback...');
-    
-    // Emergency fallback: take any format that has a URL
-    availableFormats = data.items.filter(item => {
-      const label = (item.label || '').toLowerCase();
-      const hasUrl = item.url && item.url.length > 0;
-      
-      // Still exclude obvious audio-only formats for shorts
-      const isAudioOnly = label.includes('audio only');
-      
-      return hasUrl && (isShorts ? !isAudioOnly : true);
-    });
-    
-    console.log(`🆘 Emergency fallback found ${availableFormats.length} formats`);
-  }
-  
-  // If STILL no formats, use everything that has a URL
-  if (availableFormats.length === 0) {
-    console.log('💀 Using ALL available formats as last resort');
-    availableFormats = data.items.filter(item => item.url && item.url.length > 0);
-  }
-  
-  // Log filtered formats for debugging
-  console.log('🔊 Audio-compatible formats:');
-  availableFormats.forEach((format, index) => {
-    const label = (format.label || '').toLowerCase();
-    const hasAudio = !label.includes('video only') && !label.includes('audio only');
-    console.log(`  ${index + 1}. ${format.label} - Audio: ${hasAudio ? '✅' : '❌'}`);
+  // Log all formats with audio info for debugging
+  console.log('🎬 All available formats:');
+  formatWithAudioInfo.forEach((format, index) => {
+    const audioStatus = format.isAudioOnly ? '🎵 Audio' : 
+                       format.isVideoOnly ? '📹 Video' : 
+                       format.hasAudio ? '🎬 Video+Audio' : '❓ Unknown';
+    console.log(`  ${index + 1}. ${format.label} - ${audioStatus}`);
   });
+  
+  availableFormats = formatWithAudioInfo;
   
   // ========================================
   // CREATE QUALITY OPTIONS WITH PREMIUM FLAGS
@@ -207,7 +189,9 @@ function processYouTubeData(data, url) {
       extension: format.ext || format.extension || getExtensionFromType(format.type),
       filesize: format.filesize || 'unknown',
       isPremium: isPremium,
-      hasAudio: true
+      hasAudio: format.hasAudio,
+      isVideoOnly: format.isVideoOnly,
+      isAudioOnly: format.isAudioOnly
     };
   });
   
@@ -227,11 +211,11 @@ function processYouTubeData(data, url) {
     allFormats: qualityOptions, // Also include allFormats for backward compatibility
     url: selectedFormat.url,
     selectedQuality: selectedFormat,
-    audioGuaranteed: true
+    audioGuaranteed: selectedFormat.hasAudio
   };
   
   console.log(`✅ YouTube service completed with ${qualityOptions.length} quality options`);
-  console.log(`📋 Sending formats:`, qualityOptions.map(f => `${f.quality} (premium: ${f.isPremium})`));
+  console.log(`📋 Sending formats:`, qualityOptions.map(f => `${f.quality} (premium: ${f.isPremium}, audio: ${f.hasAudio})`));
   
   return result;
 }
