@@ -189,26 +189,6 @@ function processYouTubeData(data, url) {
   });
   
   // ========================================
-  // DEDUPLICATE HERE - Keep only ONE per quality
-  // ========================================
-  
-  const seenQualities = new Map();
-  const deduplicatedFormats = [];
-  
-  availableFormats.forEach(format => {
-    const qualityNum = extractQualityNumber(format.label || '');
-    if (qualityNum === 0) return; // Skip unknown qualities
-    
-    if (!seenQualities.has(qualityNum)) {
-      seenQualities.set(qualityNum, true);
-      deduplicatedFormats.push(format);
-    }
-  });
-  
-  availableFormats = deduplicatedFormats;
-  console.log(`🔧 After deduplication: ${availableFormats.length} unique qualities`);
-  
-  // ========================================
   // CREATE QUALITY OPTIONS WITH PREMIUM FLAGS
   // ========================================
   
@@ -257,7 +237,7 @@ function processYouTubeData(data, url) {
 }
 
 /**
- * Extract quality number from quality label (for video)
+ * Extract quality number from quality label
  */
 function extractQualityNumber(qualityLabel) {
   if (!qualityLabel) return 0;
