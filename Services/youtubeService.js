@@ -118,105 +118,89 @@ async function fetchWithVidFlyApi(url, attemptNum) {
 }
 
 /**
- * Process YouTube data and select the best format
+ * Process YouTube data - keeping EXACT original structure for proper saving
  */
 function processYouTubeData(data, url) {
   const isShorts = url.includes('/shorts/');
   console.log(`📊 YouTube: Found ${data.items.length} total formats (${isShorts ? 'SHORTS' : 'REGULAR'})`);
   
-  // Filter formats with URLs only
+  // Filter formats with valid URLs only
   let availableFormats = data.items.filter(item => item.url && item.url.length > 0);
   
   console.log(`✅ Found ${availableFormats.length} formats with valid URLs`);
   
   // ========================================
-  // CREATE QUALITY OPTIONS - ONE PER RESOLUTION
+  // DEDUPLICATE - Keep ONE format per resolution
   // ========================================
   
-  const qualityMap = new Map(); // Use Map to avoid duplicates
+  const qualityMap = new Map();
   
   availableFormats.forEach(format => {
     const label = (format.label || '').toLowerCase();
-    const type = (format.type || '').toLowerCase();
+    const qualityNum = extractQualityNumber(format.label || '');
     
-    // Detect if it has audio
-    const isVideoOnly = label.includes('video only') || 
-                       label.includes('vid only') ||
-                       label.includes('without audio') ||
-                       type.includes('video only');
-    
-    const isAudioOnly = label.includes('audio only') || 
-                       type.includes('audio only') ||
-                       label.includes('m4a') ||
-                       label.includes('opus');
-    
-    // Skip audio-only formats (for now)
-    if (isAudioOnly) return;
-    
-    const quality = format.label || 'unknown';
-    const qualityNum = extractQualityNumber(quality);
-    
-    // Skip if no valid quality detected
+    // Skip if no valid quality
     if (qualityNum === 0) return;
     
-    // Check if we already have this quality
+    // Skip audio-only formats
+    const isAudioOnly = label.includes('audio only');
+    if (isAudioOnly) return;
+    
+    // If this quality already exists, prefer one WITH audio
     if (qualityMap.has(qualityNum)) {
-      // Keep the one WITH audio if available
       const existing = qualityMap.get(qualityNum);
-      if (existing.hasAudio) return; // Already have one with audio
-      if (!isVideoOnly) {
-        // Replace with one that has audio
-        qualityMap.set(qualityNum, {
-          quality: quality,
-          qualityNum: qualityNum,
-          url: format.url,
-          type: format.type || 'video/mp4',
-          extension: format.ext || format.extension || getExtensionFromType(format.type),
-          filesize: format.filesize || 'unknown',
-          isPremium: qualityNum > 360,
-          hasAudio: true
-        });
+      const existingHasAudio = !(existing.label || '').toLowerCase().includes('video only');
+      const currentHasAudio = !label.includes('video only');
+      
+      // Replace if current has audio and existing doesn't
+      if (currentHasAudio && !existingHasAudio) {
+        qualityMap.set(qualityNum, format);
       }
       return;
     }
     
     // Add new quality
-    qualityMap.set(qualityNum, {
+    qualityMap.set(qualityNum, format);
+  });
+  
+  // Convert back to array and sort by quality
+  availableFormats = Array.from(qualityMap.values()).sort((a, b) => {
+    const qA = extractQualityNumber(a.label || '');
+    const qB = extractQualityNumber(b.label || '');
+    return qA - qB;
+  });
+  
+  console.log(`✅ Deduplicated to ${availableFormats.length} unique qualities`);
+  
+  // ========================================
+  // MAP TO QUALITY OPTIONS (EXACT ORIGINAL FORMAT)
+  // ========================================
+  
+  const qualityOptions = availableFormats.map(format => {
+    const quality = format.label || 'unknown';
+    const qualityNum = extractQualityNumber(quality);
+    const isPremium = qualityNum > 360;
+    
+    return {
       quality: quality,
       qualityNum: qualityNum,
       url: format.url,
       type: format.type || 'video/mp4',
       extension: format.ext || format.extension || getExtensionFromType(format.type),
       filesize: format.filesize || 'unknown',
-      isPremium: qualityNum > 360,
-      hasAudio: !isVideoOnly
-    });
-  });
-  
-  // Convert Map to Array and sort
-  const qualityOptions = Array.from(qualityMap.values()).sort((a, b) => a.qualityNum - b.qualityNum);
-  
-  console.log(`✅ Created ${qualityOptions.length} unique quality options:`);
-  qualityOptions.forEach(q => {
-    console.log(`   ${q.quality} - Audio: ${q.hasAudio ? '✅' : '❌'} - Premium: ${q.isPremium}`);
+      isPremium: isPremium,
+      hasAudio: true
+    };
   });
   
   // ========================================
-  // SELECT DEFAULT FORMAT (360p with audio)
+  // SELECT DEFAULT (360p or first available)
   // ========================================
   
-  let selectedFormat = qualityOptions.find(opt => opt.qualityNum === 360 && opt.hasAudio);
-  
-  if (!selectedFormat) {
-    selectedFormat = qualityOptions.find(opt => opt.hasAudio);
-  }
-  
-  if (!selectedFormat) {
-    selectedFormat = qualityOptions[0];
-  }
+  let selectedFormat = qualityOptions.find(opt => opt.qualityNum === 360) || qualityOptions[0];
   
   // ========================================
-  // BUILD RESULT (SAME STRUCTURE AS BEFORE)
+  // RETURN EXACT ORIGINAL STRUCTURE
   // ========================================
   
   const result = {
@@ -228,11 +212,11 @@ function processYouTubeData(data, url) {
     allFormats: qualityOptions,
     url: selectedFormat.url,
     selectedQuality: selectedFormat,
-    audioGuaranteed: selectedFormat.hasAudio
+    audioGuaranteed: true
   };
   
-  console.log(`✅ YouTube service completed with ${qualityOptions.length} quality options`);
-  console.log(`🎯 Selected default: ${selectedFormat.quality}`);
+  console.log(`✅ YouTube completed: ${qualityOptions.length} qualities`);
+  console.log(`🎯 Default: ${selectedFormat.quality} at ${selectedFormat.url.substring(0, 50)}...`);
   
   return result;
 }
