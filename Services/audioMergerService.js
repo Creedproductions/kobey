@@ -1,6 +1,7 @@
 const { spawn } = require("child_process");
 const axios = require("axios");
 const stream = require("stream");
+const { PassThrough } = require("stream");
 
 class AudioMergerService {
     
@@ -59,10 +60,10 @@ class AudioMergerService {
             throw new Error("Response object is required");
         }
 
-        let videoStream = null;
-        let audioStream = null;
         let ffmpegProcess = null;
         let hasError = false;
+        let videoResponse = null;
+        let audioResponse = null;
 
         try {
             // Set response headers BEFORE starting any streams
@@ -70,46 +71,89 @@ class AudioMergerService {
             res.setHeader('Content-Disposition', 'attachment; filename="merged_video.mp4"');
             res.setHeader('Transfer-Encoding', 'chunked');
             res.setHeader('Cache-Control', 'no-cache');
+            res.setHeader('Connection', 'keep-alive');
 
-            console.log("📥 Downloading video stream...");
-            videoStream = await this.createDownloadStream(videoUrl);
-            
-            console.log("📥 Downloading audio stream...");
-            audioStream = await this.createDownloadStream(audioUrl);
+            console.log("📥 Fetching video stream...");
+            videoResponse = await axios({
+                method: 'get',
+                url: videoUrl,
+                responseType: 'stream',
+                timeout: 120000,  // 2 minute timeout
+                maxContentLength: Infinity,
+                maxBodyLength: Infinity,
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    'Accept': '*/*',
+                    'Accept-Encoding': 'gzip, deflate, br',
+                    'Connection': 'keep-alive',
+                    'Range': 'bytes=0-'  // Support range requests
+                }
+            });
+
+            console.log("📥 Fetching audio stream...");
+            audioResponse = await axios({
+                method: 'get',
+                url: audioUrl,
+                responseType: 'stream',
+                timeout: 120000,  // 2 minute timeout
+                maxContentLength: Infinity,
+                maxBodyLength: Infinity,
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    'Accept': '*/*',
+                    'Accept-Encoding': 'gzip, deflate, br',
+                    'Connection': 'keep-alive',
+                    'Range': 'bytes=0-'  // Support range requests
+                }
+            });
+
+            const videoStream = videoResponse.data;
+            const audioStream = audioResponse.data;
 
             console.log("🔧 Spawning FFmpeg process...");
             
-            // FFmpeg command with proper input handling
+            // FFmpeg command with optimized settings for streaming
             const ffmpegArgs = [
-                '-loglevel', 'warning',           // Show warnings but not too verbose
-                '-i', 'pipe:0',                   // Video from stdin
-                '-i', 'pipe:3',                   // Audio from pipe 3
-                '-c:v', 'copy',                   // Copy video codec (no re-encode)
-                '-c:a', 'aac',                    // Encode audio to AAC
+                '-i', 'pipe:0',                   // Video input from stdin
+                '-i', 'pipe:1',                   // Audio input from pipe:1
+                '-c:v', 'copy',                   // Copy video codec (no re-encoding)
+                '-c:a', 'aac',                    // Audio codec AAC
                 '-b:a', '192k',                   // Audio bitrate
+                '-ar', '44100',                   // Audio sample rate
+                '-ac', '2',                       // Audio channels (stereo)
                 '-map', '0:v:0',                  // Map video from first input
                 '-map', '1:a:0',                  // Map audio from second input
-                '-shortest',                       // End when shortest stream ends
-                '-movflags', '+faststart',        // Enable fast start for streaming
+                '-movflags', 'frag_keyframe+empty_moov+default_base_moof+faststart', // Optimize for streaming
+                '-fflags', '+genpts',            // Generate presentation timestamps
+                '-avoid_negative_ts', 'make_zero', // Handle timestamp issues
+                '-max_muxing_queue_size', '9999', // Increase muxing queue size
                 '-f', 'mp4',                      // Output format
-                'pipe:1'                          // Output to stdout
+                '-loglevel', 'warning',           // Log level
+                'pipe:2'                          // Output to pipe:2 (stdout)
             ];
 
             ffmpegProcess = spawn('ffmpeg', ffmpegArgs, {
-                stdio: ['pipe', 'pipe', 'pipe', 'pipe'] // stdin, stdout, stderr, pipe3
+                stdio: ['pipe', 'pipe', 'pipe', 'pipe', 'pipe'], // stdin, stdout, stderr, pipe:3, pipe:4
+                windowsHide: true
             });
 
             // Handle FFmpeg stderr (logs)
+            let errorBuffer = '';
             ffmpegProcess.stderr.on('data', (data) => {
                 const message = data.toString();
-                console.log('FFmpeg:', message);
+                errorBuffer += message;
+                if (message.toLowerCase().includes('error')) {
+                    console.error('FFmpeg Error:', message);
+                } else {
+                    console.log('FFmpeg Log:', message.substring(0, 200));
+                }
             });
 
             // Handle FFmpeg errors
             ffmpegProcess.on('error', (error) => {
                 if (!hasError) {
                     hasError = true;
-                    console.error('❌ FFmpeg process error:', error);
+                    console.error('❌ FFmpeg process error:', error.message);
                     this.cleanup(videoStream, audioStream, ffmpegProcess);
                     if (!res.headersSent) {
                         res.status(500).json({ 
@@ -121,79 +165,98 @@ class AudioMergerService {
             });
 
             // Handle FFmpeg exit
-            ffmpegProcess.on('close', (code) => {
-                console.log(`FFmpeg process closed with code: ${code}`);
-                if (code !== 0 && !hasError) {
+            ffmpegProcess.on('exit', (code, signal) => {
+                if (code === 0) {
+                    console.log('✅ Audio merge completed successfully');
+                } else if (!hasError && code !== null) {
                     hasError = true;
-                    console.error(`❌ FFmpeg exited with error code ${code}`);
+                    console.error(`❌ FFmpeg exited with code ${code}, signal: ${signal}`);
+                    console.error('FFmpeg error output:', errorBuffer);
                     if (!res.headersSent) {
                         res.status(500).json({ 
                             error: 'Merge failed', 
-                            code: code 
+                            code: code,
+                            details: errorBuffer
                         });
                     }
-                } else if (code === 0) {
-                    console.log('✅ Audio merge completed successfully');
                 }
                 this.cleanup(videoStream, audioStream, null);
             });
 
-            // Pipe streams to FFmpeg
-            console.log("📤 Piping video stream to FFmpeg stdin...");
+            // Setup stream error handlers
+            const handleStreamError = (streamName) => (error) => {
+                if (!hasError) {
+                    hasError = true;
+                    console.error(`❌ ${streamName} stream error:`, error.message);
+                    this.cleanup(videoStream, audioStream, ffmpegProcess);
+                    if (!res.headersSent) {
+                        res.status(500).json({ 
+                            error: `${streamName} stream failed`, 
+                            details: error.message 
+                        });
+                    }
+                }
+            };
+
+            videoStream.on('error', handleStreamError('Video'));
+            audioStream.on('error', handleStreamError('Audio'));
+
+            // Handle stdin close
+            ffmpegProcess.stdin.on('error', (error) => {
+                if (!hasError && !error.message.includes('EPIPE')) {
+                    console.error('FFmpeg stdin error:', error.message);
+                }
+            });
+
+            ffmpegProcess.stdio[1].on('error', (error) => {
+                if (!hasError && !error.message.includes('EPIPE')) {
+                    console.error('FFmpeg audio pipe error:', error.message);
+                }
+            });
+
+            // Pipe video to FFmpeg stdin
+            console.log("📤 Piping video stream to FFmpeg...");
             videoStream.pipe(ffmpegProcess.stdin);
 
-            console.log("📤 Piping audio stream to FFmpeg pipe:3...");
-            audioStream.pipe(ffmpegProcess.stdio[3]);
+            // Pipe audio to FFmpeg pipe:1
+            console.log("📤 Piping audio stream to FFmpeg...");
+            audioStream.pipe(ffmpegProcess.stdio[1]);
 
             // Pipe FFmpeg output to response
             console.log("📤 Piping FFmpeg output to response...");
-            ffmpegProcess.stdout.pipe(res);
+            ffmpegProcess.stdio[2].pipe(res);
 
-            // Handle stream errors
-            videoStream.on('error', (error) => {
-                if (!hasError) {
-                    hasError = true;
-                    console.error('❌ Video stream error:', error);
-                    this.cleanup(videoStream, audioStream, ffmpegProcess);
-                    if (!res.headersSent) {
-                        res.status(500).json({ 
-                            error: 'Video download failed', 
-                            details: error.message 
-                        });
-                    }
-                }
-            });
-
-            audioStream.on('error', (error) => {
-                if (!hasError) {
-                    hasError = true;
-                    console.error('❌ Audio stream error:', error);
-                    this.cleanup(videoStream, audioStream, ffmpegProcess);
-                    if (!res.headersSent) {
-                        res.status(500).json({ 
-                            error: 'Audio download failed', 
-                            details: error.message 
-                        });
-                    }
-                }
-            });
-
+            // Handle response errors
             res.on('error', (error) => {
                 if (!hasError) {
                     hasError = true;
-                    console.error('❌ Response stream error:', error);
+                    console.error('❌ Response stream error:', error.message);
                     this.cleanup(videoStream, audioStream, ffmpegProcess);
                 }
             });
 
+            // Handle client disconnect
             res.on('close', () => {
                 console.log('📡 Client closed connection');
                 this.cleanup(videoStream, audioStream, ffmpegProcess);
             });
 
+            // Monitor progress
+            let dataReceived = false;
+            ffmpegProcess.stdio[2].on('data', () => {
+                if (!dataReceived) {
+                    dataReceived = true;
+                    console.log('✅ Started sending merged video data to client');
+                }
+            });
+
         } catch (error) {
-            console.error('❌ Merge setup failed:', error);
-            this.cleanup(videoStream, audioStream, ffmpegProcess);
+            console.error('❌ Merge setup failed:', error.message);
+            this.cleanup(
+                videoResponse?.data, 
+                audioResponse?.data, 
+                ffmpegProcess
+            );
             
             if (!res.headersSent) {
                 res.status(500).json({ 
@@ -207,71 +270,40 @@ class AudioMergerService {
     }
 
     /**
-     * Create a download stream from URL with proper headers
-     */
-    async createDownloadStream(url) {
-        try {
-            const response = await axios({
-                method: 'get',
-                url: url,
-                responseType: 'stream',
-                timeout: 60000,  // 60 second timeout
-                maxContentLength: Infinity,
-                maxBodyLength: Infinity,
-                headers: {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                    'Accept': '*/*',
-                    'Accept-Encoding': 'gzip, deflate, br',
-                    'Connection': 'keep-alive'
-                }
-            });
-
-            if (response.status !== 200) {
-                throw new Error(`Download failed with status ${response.status}`);
-            }
-
-            return response.data;
-        } catch (error) {
-            console.error('❌ Failed to create download stream:', error.message);
-            throw new Error(`Stream creation failed: ${error.message}`);
-        }
-    }
-
-    /**
      * Cleanup resources
      */
     cleanup(videoStream, audioStream, ffmpegProcess) {
         console.log('🧹 Cleaning up resources...');
         
-        if (videoStream) {
-            try {
+        try {
+            if (videoStream && typeof videoStream.destroy === 'function') {
                 videoStream.destroy();
-            } catch (e) {
-                console.warn('Failed to destroy video stream:', e.message);
             }
+        } catch (e) {
+            console.warn('Failed to destroy video stream:', e.message);
         }
         
-        if (audioStream) {
-            try {
+        try {
+            if (audioStream && typeof audioStream.destroy === 'function') {
                 audioStream.destroy();
-            } catch (e) {
-                console.warn('Failed to destroy audio stream:', e.message);
             }
+        } catch (e) {
+            console.warn('Failed to destroy audio stream:', e.message);
         }
         
-        if (ffmpegProcess && !ffmpegProcess.killed) {
-            try {
+        try {
+            if (ffmpegProcess && !ffmpegProcess.killed) {
                 ffmpegProcess.kill('SIGTERM');
                 
                 // Force kill after 2 seconds if still running
                 setTimeout(() => {
-                    if (!ffmpegProcess.killed) {
+                    if (ffmpegProcess && !ffmpegProcess.killed) {
                         ffmpegProcess.kill('SIGKILL');
                     }
                 }, 2000);
-            } catch (e) {
-                console.warn('Failed to kill FFmpeg process:', e.message);
             }
+        } catch (e) {
+            console.warn('Failed to kill FFmpeg process:', e.message);
         }
     }
 }
