@@ -1,170 +1,112 @@
-// AudioMergerService.js
 const { spawn } = require("child_process");
 const axios = require("axios");
-const fs = require("fs");
-const path = require("path");
-const ffmpeg = require("fluent-ffmpeg");
+const stream = require("stream");
+const { promisify } = require("util");
+
+const pipeline = promisify(stream.pipeline);
 
 class AudioMergerService {
+    
+    /**
+     * Find compatible audio stream based on same container type
+     */
+    findCompatibleAudio(videoFormat, audioFormats) {
+        const videoExt = this.getExt(videoFormat.url);
+        
+        // 1. Try to find same container (best)
+        const match = audioFormats.find(a => this.getExt(a.url) === videoExt);
+        if (match) return match;
 
-  /**
-   * ============================================================
-   *  PRIMARY MERGE FUNCTION (tries streaming → falls back to temp)
-   * ============================================================
-   */
-  async mergeVideoAudio(videoUrl, audioUrl, res) {
-    console.log("🎬 Incoming merge request:", {
-      video: videoUrl.substring(0, 80) + "...",
-      audio: audioUrl.substring(0, 80) + "..."
-    });
-
-    try {
-      // Try fast stream merging first
-      await this.mergeStreamMode(videoUrl, audioUrl, res);
-    } catch (streamErr) {
-      console.warn("⚠ Stream merging failed, falling back to temp method…", streamErr.message);
-
-      // Fallback to temp-file method
-      await this.mergeWithTempFiles(videoUrl, audioUrl, res);
+        // 2. Otherwise return best quality audio
+        return audioFormats[0];
     }
-  }
 
-  /**
-   * ============================================================
-   *     STREAM MODE  (FASTEST — NO TEMP FILES)
-   * ============================================================
-   */
-  async mergeStreamMode(videoUrl, audioUrl, res) {
-    return new Promise((resolve, reject) => {
-      console.log("⚡ Using STREAM mode merge…");
-
-      const ffmpegArgs = [
-        "-i", "pipe:0",
-        "-i", "pipe:1",
-        "-c:v", "copy",
-        "-c:a", "aac",
-        "-shortest",
-        "-f", "mp4",
-        "-movflags", "frag_keyframe+empty_moov",
-        "pipe:2"
-      ];
-
-      const ffmpegProcess = spawn("ffmpeg", ffmpegArgs);
-      let hadError = false;
-
-      // FFmpeg logging
-      ffmpegProcess.stderr.on("data", d => console.log("FFmpeg:", d.toString()));
-
-      ffmpegProcess.on("error", err => {
-        hadError = true;
-        reject(new Error("FFmpeg crashed: " + err.message));
-      });
-
-      ffmpegProcess.on("close", code => {
-        if (!hadError && code === 0) resolve();
-        else reject(new Error("FFmpeg exited with code " + code));
-      });
-
-      // Output to client
-      res.setHeader("Content-Type", "video/mp4");
-      res.setHeader("Content-Disposition", "attachment; filename=merged_video.mp4");
-      res.setHeader("Cache-Control", "no-cache");
-
-      ffmpegProcess.stdout.pipe(res);
-
-      // Pipe Video
-      this.pipeUrlToFFmpeg(videoUrl, ffmpegProcess.stdin)
-        .catch(err => reject(new Error("Video pipe failed: " + err.message)));
-
-      // Pipe Audio
-      this.pipeUrlToFFmpeg(audioUrl, ffmpegProcess.stdin)
-        .catch(err => reject(new Error("Audio pipe failed: " + err.message)));
-    });
-  }
-
-  /**
-   * Pipe remote stream → FFmpeg stdin
-   */
-  async pipeUrlToFFmpeg(url, ffmpegInput) {
-    return new Promise((resolve, reject) => {
-      axios({
-        method: "GET",
-        url,
-        responseType: "stream",
-        timeout: 30000,
-        headers: { "User-Agent": "Mozilla/5.0" }
-      })
-        .then(resp => {
-          resp.data.pipe(ffmpegInput, { end: false });
-          resp.data.on("end", resolve);
-          resp.data.on("error", reject);
-        })
-        .catch(reject);
-    });
-  }
-
-  /**
-   * ============================================================
-   *   TEMP-FILE FALLBACK MODE (100% RELIABLE, HANDLES ALL CODECS)
-   * ============================================================
-   */
-  async mergeWithTempFiles(videoUrl, audioUrl, res) {
-    console.log("💾 Using TEMP FILE fallback merge…");
-
-    const tempDir = path.join(__dirname, "../temp");
-    if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir);
-
-    const videoPath = path.join(tempDir, "video_" + Date.now() + ".mp4");
-    const audioPath = path.join(tempDir, "audio_" + Date.now() + ".m4a");
-    const outputPath = path.join(tempDir, "merged_" + Date.now() + ".mp4");
-
-    try {
-      // Download files
-      await this.downloadStream(videoUrl, videoPath);
-      await this.downloadStream(audioUrl, audioPath);
-
-      // MERGE FILES USING FLUENT-FFMPEG
-      await new Promise((resolve, reject) => {
-        ffmpeg()
-          .input(videoPath)
-          .input(audioPath)
-          .videoCodec("copy")  // keep VP9 / H264 / AV1
-          .audioCodec("aac")
-          .outputOptions(["-shortest"])
-          .save(outputPath)
-          .on("end", resolve)
-          .on("error", reject);
-      });
-
-      // Send to user
-      res.download(outputPath, "video.mp4", () => {
-        fs.unlinkSync(videoPath);
-        fs.unlinkSync(audioPath);
-        fs.unlinkSync(outputPath);
-      });
-
-    } catch (err) {
-      console.error("❌ Temp-file merge failed:", err.message);
-      res.status(500).json({ error: "Merge failed", details: err.message });
+    /**
+     * Extract extension from URL
+     */
+    getExt(url) {
+        try {
+            const path = new URL(url).pathname;
+            return path.split(".").pop().toLowerCase();
+        } catch {
+            return "mp4";
+        }
     }
-  }
 
-  /**
-   * Download remote file → local path
-   */
-  async downloadStream(url, pathOut) {
-    return new Promise(async (resolve, reject) => {
-      try {
-        const writer = fs.createWriteStream(pathOut);
-        const response = await axios({ url, method: "GET", responseType: "stream" });
-        response.data.pipe(writer);
-        writer.on("finish", resolve);
-        writer.on("error", reject);
-      } catch (e) {
-        reject(e);
-      }
-    });
-  }
+    /**
+     * Merge video + audio URLs using FFmpeg
+     */
+    async merge(videoUrl, audioUrl, res) {
+        console.log("🎬 Starting merge:");
+        console.log("📹 Video:", videoUrl);
+        console.log("🎵 Audio:", audioUrl);
+
+        try {
+            // Create readable streams
+            const videoStream = await this.downloadStream(videoUrl);
+            const audioStream = await this.downloadStream(audioUrl);
+
+            // ffmpeg command (ALWAYS produces MP4)
+            const ffmpeg = spawn("ffmpeg", [
+                "-loglevel", "error",  // suppress useless logs
+                "-i", "pipe:3",        // video input
+                "-i", "pipe:4",        // audio input
+                "-c:v", "copy",        // copy video
+                "-c:a", "aac",         // convert audio to AAC
+                "-map", "0:v:0",
+                "-map", "1:a:0",
+                "-shortest",
+                "-f", "mp4",
+                "pipe:1"
+            ], {
+                stdio: ["pipe", "pipe", "pipe", "pipe", "pipe"]
+            });
+
+            // Pipe input streams
+            videoStream.pipe(ffmpeg.stdio[3]);
+            audioStream.pipe(ffmpeg.stdio[4]);
+
+            // Handle output
+            ffmpeg.stdout.pipe(res);
+
+            ffmpeg.stderr.on("data", (d) => {
+                console.log("FFmpeg:", d.toString());
+            });
+
+            ffmpeg.on("close", (code) => {
+                if (code !== 0) {
+                    console.error("❌ FFmpeg merge failed:", code);
+                    if (!res.headersSent) {
+                        res.status(500).send("FFmpeg merging error");
+                    }
+                } else {
+                    console.log("✅ Merge complete");
+                }
+            });
+
+        } catch (err) {
+            console.error("❌ Merge error:", err);
+            if (!res.headersSent) {
+                res.status(500).send("Audio merge failed");
+            }
+        }
+    }
+
+    /**
+     * Download a remote file as a stream
+     */
+    async downloadStream(url) {
+        const response = await axios({
+            method: "get",
+            url,
+            responseType: "stream",
+            timeout: 30000,
+            maxContentLength: Infinity,
+            maxBodyLength: Infinity
+        });
+
+        return response.data;
+    }
 }
 
 module.exports = new AudioMergerService();
