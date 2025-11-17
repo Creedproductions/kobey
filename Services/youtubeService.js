@@ -1,16 +1,13 @@
 const axios = require("axios");
+const audioMergerService = require("./audioMergerService");
 
 /**
- * Fetches YouTube video data with improved reliability
- * @param {string} url YouTube URL
- * @returns {Promise<object>} Processed video data
+ * Fetches YouTube video data with automatic audio merging
  */
 async function fetchYouTubeData(url) {
-  // Normalize YouTube URL format
   const normalizedUrl = normalizeYouTubeUrl(url);
   console.log(`🔍 Fetching YouTube data for: ${normalizedUrl}`);
   
-  // Add retry mechanism
   let attempts = 0;
   const maxAttempts = 3;
   let lastError = null;
@@ -18,13 +15,11 @@ async function fetchYouTubeData(url) {
   while (attempts < maxAttempts) {
     attempts++;
     try {
-      // Try primary API
       return await fetchWithVidFlyApi(normalizedUrl, attempts);
     } catch (err) {
       lastError = err;
       console.error(`❌ Attempt ${attempts}/${maxAttempts} failed: ${err.message}`);
       
-      // Add exponential backoff
       if (attempts < maxAttempts) {
         const backoffMs = Math.min(1000 * Math.pow(2, attempts - 1), 8000);
         console.log(`⏱️ Retrying in ${backoffMs/1000} seconds...`);
@@ -33,7 +28,6 @@ async function fetchYouTubeData(url) {
     }
   }
   
-  // All attempts failed, throw the last error
   throw new Error(`YouTube download failed after ${maxAttempts} attempts: ${lastError.message}`);
 }
 
@@ -41,24 +35,19 @@ async function fetchYouTubeData(url) {
  * Normalizes various YouTube URL formats
  */
 function normalizeYouTubeUrl(url) {
-  // Handle youtu.be short links
   if (url.includes('youtu.be/')) {
     const videoId = url.split('youtu.be/')[1].split('?')[0].split('&')[0];
     return `https://www.youtube.com/watch?v=${videoId}`;
   }
   
-  // Handle m.youtube.com links
   if (url.includes('m.youtube.com')) {
     return url.replace('m.youtube.com', 'www.youtube.com');
   }
   
-  // Handle youtube.com/shorts/ links (maintain shorts path)
   if (url.includes('/shorts/')) {
-    // Keep as shorts link for proper detection
     return url;
   }
   
-  // Handle YouTube watch links that might be missing www
   if (url.includes('youtube.com/watch') && !url.includes('www.youtube.com')) {
     return url.replace('youtube.com', 'www.youtube.com');
   }
@@ -71,7 +60,6 @@ function normalizeYouTubeUrl(url) {
  */
 async function fetchWithVidFlyApi(url, attemptNum) {
   try {
-    // Increase timeout for higher attempt numbers
     const timeout = 30000 + ((attemptNum - 1) * 10000);
     
     const res = await axios.get(
@@ -84,14 +72,12 @@ async function fetchWithVidFlyApi(url, attemptNum) {
           "x-app-name": "vidfly-web",
           "x-app-version": "1.0.0",
           Referer: "https://vidfly.ai/",
-          // Add a random user agent to prevent blocking
           "User-Agent": getRandomUserAgent(),
         },
         timeout: timeout,
       }
     );
     
-    // Validate response
     const data = res.data?.data;
     if (!data || !data.items || !data.title) {
       throw new Error("Invalid or empty response from YouTube downloader API");
@@ -103,7 +89,6 @@ async function fetchWithVidFlyApi(url, attemptNum) {
     
     if (err.response) {
       console.error(`📡 Response status: ${err.response.status}`);
-      // Log only a portion of response data to avoid console flood
       if (err.response.data) {
         console.error(`📡 Response data:`, 
           typeof err.response.data === 'object' 
@@ -118,29 +103,24 @@ async function fetchWithVidFlyApi(url, attemptNum) {
 }
 
 /**
- * Process YouTube data and select the best format
+ * Process YouTube data with automatic audio merging
  */
 function processYouTubeData(data, url) {
   const isShorts = url.includes('/shorts/');
   console.log(`📊 YouTube: Found ${data.items.length} total formats (${isShorts ? 'SHORTS' : 'REGULAR'})`);
   
-  // ========================================
-  // SHOW ALL FORMATS - Let app handle audio logic
-  // ========================================
-  
-  // Get ALL formats that have a valid URL (no filtering by audio)
+  // Get ALL formats that have a valid URL
   let availableFormats = data.items.filter(item => {
     return item.url && item.url.length > 0;
   });
   
-  console.log(`✅ Found ${availableFormats.length} total formats with URLs (no audio filtering)`);
+  console.log(`✅ Found ${availableFormats.length} total formats with URLs`);
   
   // Detect audio presence for metadata
   const formatWithAudioInfo = availableFormats.map(item => {
     const label = (item.label || '').toLowerCase();
     const type = (item.type || '').toLowerCase();
     
-    // Detect if format has audio
     const isVideoOnly = label.includes('video only') || 
                        label.includes('vid only') ||
                        label.includes('without audio') ||
@@ -150,7 +130,6 @@ function processYouTubeData(data, url) {
                        type.includes('audio only') ||
                        label.includes('audio') && !label.includes('video');
     
-    // Add audio metadata to the format
     return {
       ...item,
       hasAudio: !isVideoOnly && !isAudioOnly,
@@ -162,33 +141,31 @@ function processYouTubeData(data, url) {
   availableFormats = formatWithAudioInfo;
   
   // ========================================
-  // DEDUPLICATE FORMATS - Keep only ONE video format per quality + all audio formats
+  // DEDUPLICATE FORMATS + PREPARE FOR MERGING
   // ========================================
   
   const seenVideoQualities = new Map();
   const deduplicatedFormats = [];
+  const audioFormats = [];
 
+  // First pass: separate audio formats and deduplicate video formats
   availableFormats.forEach(format => {
     if (format.isAudioOnly) {
-      // Always keep audio-only formats - never deduplicate them
+      audioFormats.push(format);
       deduplicatedFormats.push(format);
     } else {
-      // For video formats (with or without audio), deduplicate by quality
       const qualityNum = extractQualityNumber(format.label || '');
       if (qualityNum === 0) {
         deduplicatedFormats.push(format);
         return;
       }
       
-      // If we haven't seen this video quality yet, OR if this format has audio and the existing one doesn't
       if (!seenVideoQualities.has(qualityNum)) {
         seenVideoQualities.set(qualityNum, format);
         deduplicatedFormats.push(format);
       } else {
-        // Smart selection: Replace with video format that has audio if current one doesn't
         const existingFormat = seenVideoQualities.get(qualityNum);
         if (!existingFormat.hasAudio && format.hasAudio) {
-          // Replace the existing format in both the map and array
           const index = deduplicatedFormats.findIndex(f => 
             !f.isAudioOnly && extractQualityNumber(f.label || '') === qualityNum
           );
@@ -203,13 +180,57 @@ function processYouTubeData(data, url) {
 
   availableFormats = deduplicatedFormats;
   
-  console.log(`🔄 After deduplication: ${availableFormats.length} formats (video + audio)`);
+  console.log(`🔄 After deduplication: ${availableFormats.length} formats (${audioFormats.length} audio-only)`);
   
-  // Log all formats with audio info for debugging
-  console.log('🎬 All available formats after deduplication:');
+  // ========================================
+  // AUTOMATIC AUDIO MERGING FOR VIDEO-ONLY FORMATS
+  // ========================================
+  
+  const mergedFormats = [];
+  
+  availableFormats.forEach(format => {
+    if (format.isVideoOnly && audioFormats.length > 0) {
+      // Find compatible audio for this video format
+      const compatibleAudio = audioMergerService.findCompatibleAudio(format, audioFormats);
+      
+      if (compatibleAudio) {
+        console.log(`🎵 Found audio for ${format.label}: ${compatibleAudio.label}`);
+        
+        // Create merged format entry
+        const mergedFormat = {
+          ...format,
+          // Create special URL that triggers audio merging
+          url: `MERGE:${format.url}:${compatibleAudio.url}`,
+          hasAudio: true, // Mark as having audio now
+          isVideoOnly: false, // No longer video-only
+          isMergedFormat: true, // Flag as merged format
+          originalVideoUrl: format.url,
+          audioUrl: compatibleAudio.url,
+          audioQuality: compatibleAudio.label
+        };
+        
+        mergedFormats.push(mergedFormat);
+        console.log(`✅ Created merged format: ${format.label} + ${compatibleAudio.label}`);
+      } else {
+        // Keep original video-only format if no audio found
+        mergedFormats.push(format);
+      }
+    } else {
+      // Keep original format (already has audio or is audio-only)
+      mergedFormats.push(format);
+    }
+  });
+  
+  availableFormats = mergedFormats;
+  
+  console.log(`🎬 After audio merging: ${availableFormats.length} total formats`);
+  
+  // Log final formats
+  console.log('🎬 Final available formats:');
   availableFormats.forEach((format, index) => {
     const audioStatus = format.isAudioOnly ? '🎵 Audio Only' : 
                        format.isVideoOnly ? '📹 Video Only' : 
+                       format.isMergedFormat ? '🎬 Merged Video+Audio' :
                        format.hasAudio ? '🎬 Video+Audio' : '❓ Unknown';
     console.log(`  ${index + 1}. ${format.label} - ${audioStatus}`);
   });
@@ -229,14 +250,18 @@ function processYouTubeData(data, url) {
     return {
       quality: quality,
       qualityNum: qualityNum,
-      url: format.url,
+      url: format.url, // This may be a MERGE: URL for merged formats
       type: format.type || 'video/mp4',
       extension: format.ext || format.extension || getExtensionFromType(format.type),
       filesize: format.filesize || 'unknown',
       isPremium: isPremium,
       hasAudio: format.hasAudio,
       isVideoOnly: format.isVideoOnly,
-      isAudioOnly: format.isAudioOnly
+      isAudioOnly: format.isAudioOnly,
+      // Additional fields for merged formats
+      isMergedFormat: format.isMergedFormat || false,
+      originalVideoUrl: format.originalVideoUrl,
+      audioUrl: format.audioUrl
     };
   });
   
@@ -252,14 +277,14 @@ function processYouTubeData(data, url) {
                       qualityOptions.find(opt => !opt.isAudioOnly) || 
                       qualityOptions[0];
   
-  // Build result with all quality options - THIS IS THE KEY FIX
+  // Build result with all quality options
   const result = {
     title: data.title,
     thumbnail: data.cover,
     duration: data.duration,
     isShorts: isShorts,
-    formats: qualityOptions, // This ensures formats array is included
-    allFormats: qualityOptions, // Also include allFormats for backward compatibility
+    formats: qualityOptions,
+    allFormats: qualityOptions,
     url: selectedFormat.url,
     selectedQuality: selectedFormat,
     audioGuaranteed: selectedFormat.hasAudio
@@ -267,7 +292,9 @@ function processYouTubeData(data, url) {
   
   console.log(`✅ YouTube service completed with ${qualityOptions.length} quality options`);
   console.log(`📋 Sending formats:`, qualityOptions.map(f => {
-    const type = f.isAudioOnly ? '🎵 Audio' : f.isVideoOnly ? '📹 Video' : '🎬 Video+Audio';
+    const type = f.isAudioOnly ? '🎵 Audio' : 
+                 f.isMergedFormat ? '🎬 Merged' :
+                 f.isVideoOnly ? '📹 Video' : '🎬 Video+Audio';
     return `${f.quality} (${type}, premium: ${f.isPremium})`;
   }));
   
@@ -315,7 +342,7 @@ function getExtensionFromType(mimeType) {
     if (mimeType.includes(type)) return ext;
   }
   
-  return 'mp4'; // Default
+  return 'mp4';
 }
 
 /**
