@@ -1,150 +1,169 @@
-const { spawn } = require('child_process');
-const axios = require('axios');
-const stream = require('stream');
+// AudioMergerService.js
+const { spawn } = require("child_process");
+const axios = require("axios");
+const fs = require("fs");
+const path = require("path");
+const ffmpeg = require("fluent-ffmpeg");
 
-/**
- * Merges video and audio streams using FFmpeg
- */
 class AudioMergerService {
-  
+
   /**
-   * Merge video URL with audio URL and return merged stream
+   * ============================================================
+   *  PRIMARY MERGE FUNCTION (tries streaming → falls back to temp)
+   * ============================================================
    */
   async mergeVideoAudio(videoUrl, audioUrl, res) {
+    console.log("🎬 Incoming merge request:", {
+      video: videoUrl.substring(0, 80) + "...",
+      audio: audioUrl.substring(0, 80) + "..."
+    });
+
+    try {
+      // Try fast stream merging first
+      await this.mergeStreamMode(videoUrl, audioUrl, res);
+    } catch (streamErr) {
+      console.warn("⚠ Stream merging failed, falling back to temp method…", streamErr.message);
+
+      // Fallback to temp-file method
+      await this.mergeWithTempFiles(videoUrl, audioUrl, res);
+    }
+  }
+
+  /**
+   * ============================================================
+   *     STREAM MODE  (FASTEST — NO TEMP FILES)
+   * ============================================================
+   */
+  async mergeStreamMode(videoUrl, audioUrl, res) {
     return new Promise((resolve, reject) => {
-      try {
-        console.log(`🎬 Starting audio merge:`, {
-          videoUrl: videoUrl?.substring(0, 100) + '...',
-          audioUrl: audioUrl?.substring(0, 100) + '...'
-        });
+      console.log("⚡ Using STREAM mode merge…");
 
-        // Create FFmpeg process
-        const ffmpegArgs = [
-          '-i', 'pipe:0',           // Video input from stdin
-          '-i', 'pipe:1',           // Audio input from stdin
-          '-c:v', 'copy',           // Copy video stream (no re-encode)
-          '-c:a', 'aac',            // Encode audio to AAC
-          '-shortest',              // Match shortest stream duration
-          '-f', 'mp4',              // Output format
-          '-movflags', 'frag_keyframe+empty_moov', // For streaming
-          'pipe:2'                  // Output to stdout
-        ];
+      const ffmpegArgs = [
+        "-i", "pipe:0",
+        "-i", "pipe:1",
+        "-c:v", "copy",
+        "-c:a", "aac",
+        "-shortest",
+        "-f", "mp4",
+        "-movflags", "frag_keyframe+empty_moov",
+        "pipe:2"
+      ];
 
-        const ffmpegProcess = spawn('ffmpeg', ffmpegArgs);
-        
-        let hasError = false;
+      const ffmpegProcess = spawn("ffmpeg", ffmpegArgs);
+      let hadError = false;
 
-        // Handle FFmpeg errors
-        ffmpegProcess.stderr.on('data', (data) => {
-          console.log('FFmpeg:', data.toString());
-        });
+      // FFmpeg logging
+      ffmpegProcess.stderr.on("data", d => console.log("FFmpeg:", d.toString()));
 
-        ffmpegProcess.on('error', (error) => {
-          if (!hasError) {
-            hasError = true;
-            console.error('❌ FFmpeg process error:', error);
-            reject(new Error(`FFmpeg processing failed: ${error.message}`));
-          }
-        });
+      ffmpegProcess.on("error", err => {
+        hadError = true;
+        reject(new Error("FFmpeg crashed: " + err.message));
+      });
 
-        ffmpegProcess.on('close', (code) => {
-          if (code !== 0 && !hasError) {
-            hasError = true;
-            console.error(`❌ FFmpeg process exited with code ${code}`);
-            reject(new Error(`FFmpeg process failed with code ${code}`));
-          } else if (!hasError) {
-            console.log('✅ Audio merge completed successfully');
-            resolve();
-          }
-        });
+      ffmpegProcess.on("close", code => {
+        if (!hadError && code === 0) resolve();
+        else reject(new Error("FFmpeg exited with code " + code));
+      });
 
-        // Set response headers for video streaming
-        res.setHeader('Content-Type', 'video/mp4');
-        res.setHeader('Content-Disposition', 'attachment; filename="merged_video.mp4"');
-        res.setHeader('Cache-Control', 'no-cache');
+      // Output to client
+      res.setHeader("Content-Type", "video/mp4");
+      res.setHeader("Content-Disposition", "attachment; filename=merged_video.mp4");
+      res.setHeader("Cache-Control", "no-cache");
 
-        // Pipe FFmpeg output to response
-        ffmpegProcess.stdout.pipe(res);
+      ffmpegProcess.stdout.pipe(res);
 
-        // Stream video and audio to FFmpeg
-        this.streamToFFmpeg(videoUrl, ffmpegProcess.stdin, 0)
-          .catch(error => {
-            if (!hasError) {
-              hasError = true;
-              reject(new Error(`Video stream failed: ${error.message}`));
-            }
-          });
+      // Pipe Video
+      this.pipeUrlToFFmpeg(videoUrl, ffmpegProcess.stdin)
+        .catch(err => reject(new Error("Video pipe failed: " + err.message)));
 
-        this.streamToFFmpeg(audioUrl, ffmpegProcess.stdin, 1)
-          .catch(error => {
-            if (!hasError) {
-              hasError = true;
-              reject(new Error(`Audio stream failed: ${error.message}`));
-            }
-          });
-
-      } catch (error) {
-        console.error('❌ Audio merge setup failed:', error);
-        reject(new Error(`Merge setup failed: ${error.message}`));
-      }
+      // Pipe Audio
+      this.pipeUrlToFFmpeg(audioUrl, ffmpegProcess.stdin)
+        .catch(err => reject(new Error("Audio pipe failed: " + err.message)));
     });
   }
 
   /**
-   * Stream URL to FFmpeg stdin
+   * Pipe remote stream → FFmpeg stdin
    */
-  async streamToFFmpeg(url, writableStream, inputIndex) {
+  async pipeUrlToFFmpeg(url, ffmpegInput) {
     return new Promise((resolve, reject) => {
       axios({
-        method: 'get',
-        url: url,
-        responseType: 'stream',
+        method: "GET",
+        url,
+        responseType: "stream",
         timeout: 30000,
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        }
+        headers: { "User-Agent": "Mozilla/5.0" }
       })
-      .then(response => {
-        response.data.pipe(writableStream, { end: false });
-        response.data.on('end', resolve);
-        response.data.on('error', reject);
-      })
-      .catch(reject);
+        .then(resp => {
+          resp.data.pipe(ffmpegInput, { end: false });
+          resp.data.on("end", resolve);
+          resp.data.on("error", reject);
+        })
+        .catch(reject);
     });
   }
 
   /**
-   * Find compatible audio format for video
+   * ============================================================
+   *   TEMP-FILE FALLBACK MODE (100% RELIABLE, HANDLES ALL CODECS)
+   * ============================================================
    */
-  findCompatibleAudio(videoFormat, audioFormats) {
-    if (!audioFormats || audioFormats.length === 0) return null;
+  async mergeWithTempFiles(videoUrl, audioUrl, res) {
+    console.log("💾 Using TEMP FILE fallback merge…");
 
-    // Prefer formats with similar quality characteristics
-    const videoQuality = this.extractQualityTier(videoFormat.qualityNum);
-    
-    // Sort audio formats by quality (higher first)
-    const sortedAudio = [...audioFormats].sort((a, b) => {
-      const aQuality = this.extractAudioQuality(a);
-      const bQuality = this.extractAudioQuality(b);
-      return bQuality - aQuality;
+    const tempDir = path.join(__dirname, "../temp");
+    if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir);
+
+    const videoPath = path.join(tempDir, "video_" + Date.now() + ".mp4");
+    const audioPath = path.join(tempDir, "audio_" + Date.now() + ".m4a");
+    const outputPath = path.join(tempDir, "merged_" + Date.now() + ".mp4");
+
+    try {
+      // Download files
+      await this.downloadStream(videoUrl, videoPath);
+      await this.downloadStream(audioUrl, audioPath);
+
+      // MERGE FILES USING FLUENT-FFMPEG
+      await new Promise((resolve, reject) => {
+        ffmpeg()
+          .input(videoPath)
+          .input(audioPath)
+          .videoCodec("copy")  // keep VP9 / H264 / AV1
+          .audioCodec("aac")
+          .outputOptions(["-shortest"])
+          .save(outputPath)
+          .on("end", resolve)
+          .on("error", reject);
+      });
+
+      // Send to user
+      res.download(outputPath, "video.mp4", () => {
+        fs.unlinkSync(videoPath);
+        fs.unlinkSync(audioPath);
+        fs.unlinkSync(outputPath);
+      });
+
+    } catch (err) {
+      console.error("❌ Temp-file merge failed:", err.message);
+      res.status(500).json({ error: "Merge failed", details: err.message });
+    }
+  }
+
+  /**
+   * Download remote file → local path
+   */
+  async downloadStream(url, pathOut) {
+    return new Promise(async (resolve, reject) => {
+      try {
+        const writer = fs.createWriteStream(pathOut);
+        const response = await axios({ url, method: "GET", responseType: "stream" });
+        response.data.pipe(writer);
+        writer.on("finish", resolve);
+        writer.on("error", reject);
+      } catch (e) {
+        reject(e);
+      }
     });
-
-    return sortedAudio[0];
-  }
-
-  extractQualityTier(qualityNum) {
-    if (qualityNum >= 1080) return 'high';
-    if (qualityNum >= 720) return 'medium';
-    return 'low';
-  }
-
-  extractAudioQuality(audioFormat) {
-    // Extract audio quality from label or use default
-    const label = (audioFormat.label || '').toLowerCase();
-    if (label.includes('high') || label.includes('best')) return 3;
-    if (label.includes('medium')) return 2;
-    if (label.includes('low')) return 1;
-    return 2; // Default medium quality
   }
 }
 
