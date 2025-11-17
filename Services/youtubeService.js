@@ -159,16 +159,51 @@ function processYouTubeData(data, url) {
     };
   });
   
+  availableFormats = formatWithAudioInfo;
+  
+  // ========================================
+  // DEDUPLICATE FORMATS - Keep only ONE per quality
+  // ========================================
+  
+  const seenQualities = new Map();
+  const deduplicatedFormats = [];
+
+  availableFormats.forEach(format => {
+    const qualityNum = extractQualityNumber(format.label || '');
+    if (qualityNum === 0) return;
+    
+    // If we haven't seen this quality yet, OR if this format has audio and the existing one doesn't
+    if (!seenQualities.has(qualityNum)) {
+      seenQualities.set(qualityNum, format);
+      deduplicatedFormats.push(format);
+    } else {
+      // Smart selection: Replace with format that has audio if current one doesn't
+      const existingFormat = seenQualities.get(qualityNum);
+      if (!existingFormat.hasAudio && format.hasAudio) {
+        // Replace the existing format in both the map and array
+        const index = deduplicatedFormats.findIndex(f => 
+          extractQualityNumber(f.label || '') === qualityNum
+        );
+        if (index !== -1) {
+          deduplicatedFormats[index] = format;
+          seenQualities.set(qualityNum, format);
+        }
+      }
+    }
+  });
+
+  availableFormats = deduplicatedFormats;
+  
+  console.log(`🔄 After deduplication: ${availableFormats.length} unique quality formats`);
+  
   // Log all formats with audio info for debugging
-  console.log('🎬 All available formats:');
-  formatWithAudioInfo.forEach((format, index) => {
+  console.log('🎬 All available formats after deduplication:');
+  availableFormats.forEach((format, index) => {
     const audioStatus = format.isAudioOnly ? '🎵 Audio' : 
                        format.isVideoOnly ? '📹 Video' : 
                        format.hasAudio ? '🎬 Video+Audio' : '❓ Unknown';
     console.log(`  ${index + 1}. ${format.label} - ${audioStatus}`);
   });
-  
-  availableFormats = formatWithAudioInfo;
   
   // ========================================
   // CREATE QUALITY OPTIONS WITH PREMIUM FLAGS
@@ -201,13 +236,14 @@ function processYouTubeData(data, url) {
   // Select default format (360p for free users, or highest available if premium)
   let selectedFormat = qualityOptions.find(opt => opt.qualityNum === 360) || qualityOptions[0];
   
-  // Build result with unique quality options - FIXED: Remove duplicate formats array
+  // Build result with all quality options - THIS IS THE KEY FIX
   const result = {
     title: data.title,
     thumbnail: data.cover,
     duration: data.duration,
     isShorts: isShorts,
-    formats: qualityOptions, // Only include formats array (removed allFormats duplicate)
+    formats: qualityOptions, // This ensures formats array is included
+    allFormats: qualityOptions, // Also include allFormats for backward compatibility
     url: selectedFormat.url,
     selectedQuality: selectedFormat,
     audioGuaranteed: selectedFormat.hasAudio
