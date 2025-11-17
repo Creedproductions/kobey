@@ -11,7 +11,7 @@ router.post('/download', downloadMedia);
 // GET route to fetch mock data
 router.get('/mock-videos', mockController.getMockVideos);
 
-// Audio merging endpoint for YouTube videos - IMPROVED VERSION
+// Audio merging endpoint for YouTube videos
 router.get('/merge-audio', async (req, res) => {
   try {
     const { videoUrl, audioUrl } = req.query;
@@ -23,20 +23,12 @@ router.get('/merge-audio', async (req, res) => {
       });
     }
 
-    // Decode URLs in case they're encoded
-    const decodedVideoUrl = decodeURIComponent(videoUrl);
-    const decodedAudioUrl = decodeURIComponent(audioUrl);
-
     console.log(`🎬 Starting audio merge request`);
-    console.log(`📹 Video URL: ${decodedVideoUrl.substring(0, 100)}...`);
-    console.log(`🎵 Audio URL: ${decodedAudioUrl.substring(0, 100)}...`);
+    console.log(`📹 Video URL: ${videoUrl.substring(0, 100)}...`);
+    console.log(`🎵 Audio URL: ${audioUrl.substring(0, 100)}...`);
 
-    // Set a timeout for the merge operation (5 minutes)
-    req.setTimeout(300000);
-    res.setTimeout(300000);
-
-    // Call the merge service
-    await audioMergerService.merge(decodedVideoUrl, decodedAudioUrl, res);
+    // Use the updated merge method from the fixed audioMergerService
+    await audioMergerService.merge(videoUrl, audioUrl, res);
 
   } catch (error) {
     console.error('❌ Audio merge failed:', error);
@@ -52,7 +44,7 @@ router.get('/merge-audio', async (req, res) => {
   }
 });
 
-// FFmpeg status check endpoint - ENHANCED VERSION
+// FFmpeg status check endpoint - VERIFY INSTALLATION
 router.get('/ffmpeg-status', (req, res) => {
   console.log('🔍 Checking FFmpeg installation...');
   
@@ -63,19 +55,6 @@ router.get('/ffmpeg-status', (req, res) => {
       ffmpegPath = execSync('which ffmpeg').toString().trim();
     } catch (e) {
       console.warn('Could not locate FFmpeg with "which" command');
-    }
-
-    // Check for required codecs
-    let codecs = {};
-    try {
-      const codecOutput = execSync('ffmpeg -codecs 2>/dev/null').toString();
-      codecs = {
-        aac: codecOutput.includes('aac'),
-        h264: codecOutput.includes('h264'),
-        mp4: codecOutput.includes('mp4')
-      };
-    } catch (e) {
-      console.warn('Could not check codecs');
     }
 
     // Spawn FFmpeg process to get version
@@ -102,8 +81,7 @@ router.get('/ffmpeg-status', (req, res) => {
         path: ffmpegPath,
         version: version,
         fullVersion: output.split('\n')[0] || 'Unknown',
-        codecs: codecs,
-        detailedOutput: output.substring(0, 500),
+        detailedOutput: output,
         error: errorOutput,
         timestamp: new Date().toISOString(),
         message: code === 0 ? '✅ FFmpeg is installed and working' : '❌ FFmpeg check failed'
@@ -150,8 +128,7 @@ router.get('/system-info', (req, res) => {
       },
       environment: {
         nodeEnv: process.env.NODE_ENV || 'development',
-        port: process.env.PORT || 8080,
-        ffmpegPath: process.env.FFMPEG_PATH || 'default'
+        port: process.env.PORT || 8080
       },
       timestamp: new Date().toISOString()
     });
@@ -179,10 +156,6 @@ router.get('/test-merge', async (req, res) => {
   console.log('🧪 Testing audio merge with provided URLs');
   
   try {
-    // Set timeout for test
-    req.setTimeout(300000);
-    res.setTimeout(300000);
-    
     await audioMergerService.merge(testVideoUrl, testAudioUrl, res);
   } catch (error) {
     console.error('❌ Test merge failed:', error);
@@ -234,12 +207,7 @@ router.get('/health', (req, res) => {
   res.status(200).json({
     status: 'healthy',
     uptime: process.uptime(),
-    timestamp: new Date().toISOString(),
-    memoryUsage: {
-      rss: `${(process.memoryUsage().rss / 1024 / 1024).toFixed(2)} MB`,
-      heapTotal: `${(process.memoryUsage().heapTotal / 1024 / 1024).toFixed(2)} MB`,
-      heapUsed: `${(process.memoryUsage().heapUsed / 1024 / 1024).toFixed(2)} MB`
-    }
+    timestamp: new Date().toISOString()
   });
 });
 
