@@ -119,125 +119,176 @@ async function fetchWithVidFlyApi(url, attemptNum) {
 
 /**
  * Process YouTube data and select the best format
+ * FIXED: Now properly handles video-only formats for high quality
  */
 function processYouTubeData(data, url) {
   const isShorts = url.includes('/shorts/');
   console.log(`📊 YouTube: Found ${data.items.length} total formats (${isShorts ? 'SHORTS' : 'REGULAR'})`);
   
   // ========================================
-  // IMPROVED AUDIO FILTERING FOR ALL VIDEOS
+  // IMPROVED FORMAT CATEGORIZATION
   // ========================================
   
-  let availableFormats = data.items.filter(item => {
+  // Categorize all formats
+  const videoWithAudio = [];
+  const videoOnly = [];
+  const audioOnly = [];
+  
+  data.items.forEach(item => {
     const label = (item.label || '').toLowerCase();
     const type = (item.type || '').toLowerCase();
     const hasUrl = item.url && item.url.length > 0;
     
-    // Use stricter audio detection for ALL videos, not just shorts
-    const isVideoOnly = label.includes('video only') || 
-                       label.includes('vid only') ||
-                       label.includes('without audio') ||
-                       type.includes('video only') ||
-                       (type.includes('video') && !type.includes('audio'));
+    if (!hasUrl) return; // Skip formats without URLs
     
-    const isAudioOnly = label.includes('audio only') || 
-                       type.includes('audio only');
+    // Detect format type
+    const isVideoOnlyFormat = label.includes('video only') || 
+                              label.includes('vid only') ||
+                              label.includes('without audio') ||
+                              type.includes('video only');
     
-    // Be more conservative - only accept formats we're confident have audio
-    if (isShorts) {
-      // For shorts: must have URL, not be video-only, and not be audio-only
-      return hasUrl && !isVideoOnly && !isAudioOnly;
+    const isAudioOnlyFormat = label.includes('audio only') || 
+                              type.includes('audio only') ||
+                              label.includes('m4a') ||
+                              label.includes('opus') ||
+                              type.includes('audio/');
+    
+    if (isAudioOnlyFormat) {
+      audioOnly.push(item);
+    } else if (isVideoOnlyFormat) {
+      videoOnly.push(item);
     } else {
-      // For regular videos: must have URL and not be video-only
-      // Using same strict filtering as shorts
-      return hasUrl && !isVideoOnly;
+      // Has both video and audio
+      videoWithAudio.push(item);
     }
   });
   
-  console.log(`✅ Found ${availableFormats.length} formats with audio after strict filtering`);
-  
-  // If no formats with audio found, try to find ANY format that might work
-  if (availableFormats.length === 0) {
-    console.log('🚨 No audio formats found, emergency fallback...');
-    
-    // Emergency fallback: take any format that has a URL
-    availableFormats = data.items.filter(item => {
-      const label = (item.label || '').toLowerCase();
-      const hasUrl = item.url && item.url.length > 0;
-      
-      // Still exclude obvious audio-only formats for shorts
-      const isAudioOnly = label.includes('audio only');
-      
-      return hasUrl && (isShorts ? !isAudioOnly : true);
-    });
-    
-    console.log(`🆘 Emergency fallback found ${availableFormats.length} formats`);
-  }
-  
-  // If STILL no formats, use everything that has a URL
-  if (availableFormats.length === 0) {
-    console.log('💀 Using ALL available formats as last resort');
-    availableFormats = data.items.filter(item => item.url && item.url.length > 0);
-  }
-  
-  // Log filtered formats for debugging
-  console.log('🔊 Audio-compatible formats:');
-  availableFormats.forEach((format, index) => {
-    const label = (format.label || '').toLowerCase();
-    const hasAudio = !label.includes('video only') && !label.includes('audio only');
-    console.log(`  ${index + 1}. ${format.label} - Audio: ${hasAudio ? '✅' : '❌'}`);
-  });
+  console.log(`📊 Format breakdown:`);
+  console.log(`   🎥+🔊 Video with audio: ${videoWithAudio.length}`);
+  console.log(`   🎥 Video only: ${videoOnly.length}`);
+  console.log(`   🔊 Audio only: ${audioOnly.length}`);
   
   // ========================================
-  // CREATE QUALITY OPTIONS WITH PREMIUM FLAGS
+  // CREATE QUALITY OPTIONS
   // ========================================
   
-  const qualityOptions = availableFormats.map(format => {
+  const qualityOptions = [];
+  
+  // 1. Add video formats WITH audio (these work immediately - FREE)
+  videoWithAudio.forEach(format => {
     const quality = format.label || 'unknown';
     const qualityNum = extractQualityNumber(quality);
     
-    // Mark as premium: 360p and below are free, above 360p requires premium
-    const isPremium = qualityNum > 360;
-    
-    return {
+    qualityOptions.push({
       quality: quality,
       qualityNum: qualityNum,
       url: format.url,
       type: format.type || 'video/mp4',
       extension: format.ext || format.extension || getExtensionFromType(format.type),
       filesize: format.filesize || 'unknown',
-      isPremium: isPremium,
-      hasAudio: true
-    };
+      isPremium: false, // These work without merging
+      hasAudio: true,
+      requiresAudioMerge: false
+    });
+  });
+  
+  // 2. Add video-only formats (these need audio merging - PREMIUM)
+  videoOnly.forEach(format => {
+    const quality = format.label || 'unknown';
+    const qualityNum = extractQualityNumber(quality);
+    
+    // Only add if quality is above 360p (360p should already be in videoWithAudio)
+    if (qualityNum > 360) {
+      qualityOptions.push({
+        quality: quality,
+        qualityNum: qualityNum,
+        url: format.url,
+        type: format.type || 'video/mp4',
+        extension: format.ext || format.extension || getExtensionFromType(format.type),
+        filesize: format.filesize || 'unknown',
+        isPremium: true, // Requires audio merging
+        hasAudio: false,
+        requiresAudioMerge: true,
+        audioUrl: audioOnly.length > 0 ? audioOnly[audioOnly.length - 1].url : null // Best audio
+      });
+    }
+  });
+  
+  // 3. Add audio-only formats separately (for audio extraction - PREMIUM)
+  audioOnly.forEach(format => {
+    const quality = format.label || 'unknown';
+    
+    qualityOptions.push({
+      quality: quality,
+      qualityNum: extractBitrateNumber(quality),
+      url: format.url,
+      type: format.type || 'audio/mp4',
+      extension: format.ext || format.extension || getExtensionFromType(format.type),
+      filesize: format.filesize || 'unknown',
+      isPremium: true, // Audio extraction is premium
+      hasAudio: true,
+      isAudioOnly: true,
+      requiresAudioMerge: false
+    });
   });
   
   // Sort by quality number (ascending)
   qualityOptions.sort((a, b) => a.qualityNum - b.qualityNum);
   
-  // Select default format (360p for free users, or highest available if premium)
-  let selectedFormat = qualityOptions.find(opt => opt.qualityNum === 360) || qualityOptions[0];
+  console.log(`✅ Created ${qualityOptions.length} quality options`);
   
-  // Build result with all quality options - THIS IS THE KEY FIX
+  // ========================================
+  // SELECT DEFAULT FORMAT
+  // ========================================
+  
+  // Default to 360p with audio (free), or highest available with audio
+  let selectedFormat = qualityOptions.find(opt => 
+    opt.qualityNum === 360 && opt.hasAudio && !opt.requiresAudioMerge
+  );
+  
+  if (!selectedFormat) {
+    // Fallback: Find any format with audio that doesn't require merging
+    selectedFormat = qualityOptions.find(opt => 
+      opt.hasAudio && !opt.requiresAudioMerge
+    );
+  }
+  
+  if (!selectedFormat) {
+    // Last resort: use first available
+    selectedFormat = qualityOptions[0];
+  }
+  
+  // ========================================
+  // BUILD RESULT
+  // ========================================
+  
   const result = {
     title: data.title,
     thumbnail: data.cover,
     duration: data.duration,
     isShorts: isShorts,
-    formats: qualityOptions, // This ensures formats array is included
-    allFormats: qualityOptions, // Also include allFormats for backward compatibility
+    formats: qualityOptions,
+    allFormats: qualityOptions,
     url: selectedFormat.url,
     selectedQuality: selectedFormat,
-    audioGuaranteed: true
+    audioGuaranteed: selectedFormat.hasAudio && !selectedFormat.requiresAudioMerge,
+    
+    // Metadata for client
+    hasHighQualityOptions: qualityOptions.some(f => f.qualityNum > 360),
+    requiresAudioMerging: qualityOptions.some(f => f.requiresAudioMerge),
+    bestAudioUrl: audioOnly.length > 0 ? audioOnly[audioOnly.length - 1].url : null
   };
   
-  console.log(`✅ YouTube service completed with ${qualityOptions.length} quality options`);
-  console.log(`📋 Sending formats:`, qualityOptions.map(f => `${f.quality} (premium: ${f.isPremium})`));
+  console.log(`✅ YouTube service completed`);
+  console.log(`   📋 Total options: ${qualityOptions.length}`);
+  console.log(`   🎯 Default: ${selectedFormat.quality} (requires merge: ${selectedFormat.requiresAudioMerge})`);
+  console.log(`   🔊 Audio merging needed for HD: ${result.requiresAudioMerging}`);
   
   return result;
 }
 
 /**
- * Extract quality number from quality label
+ * Extract quality number from quality label (for video)
  */
 function extractQualityNumber(qualityLabel) {
   if (!qualityLabel) return 0;
@@ -253,6 +304,22 @@ function extractQualityNumber(qualityLabel) {
   if (qualityLabel.includes('360')) return 360;
   if (qualityLabel.includes('240')) return 240;
   if (qualityLabel.includes('144')) return 144;
+  
+  return 0;
+}
+
+/**
+ * Extract bitrate number from audio quality label
+ */
+function extractBitrateNumber(qualityLabel) {
+  if (!qualityLabel) return 0;
+  
+  const match = qualityLabel.match(/(\d+)kb\/s/);
+  if (match) return parseInt(match[1]);
+  
+  // Default audio bitrates if not specified
+  if (qualityLabel.includes('opus')) return 128;
+  if (qualityLabel.includes('m4a')) return 128;
   
   return 0;
 }
