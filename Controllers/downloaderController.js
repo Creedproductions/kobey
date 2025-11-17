@@ -157,6 +157,11 @@ const downloadWithTimeout = (downloadFunction, timeout = DOWNLOAD_TIMEOUT) => {
   ]);
 };
 
+// Helper function to get server base URL
+function getServerBaseUrl() {
+  return process.env.SERVER_BASE_URL || `http://localhost:${process.env.PORT || 8000}`;
+}
+
 // ===== PLATFORM-SPECIFIC DOWNLOADERS =====
 
 const platformDownloaders = {
@@ -216,7 +221,7 @@ const platformDownloaders = {
   },
 
   // ========================================
-  // YOUTUBE - UPDATED FOR HD QUALITY
+  // YOUTUBE - UPDATED FOR AUDIO MERGING
   // ========================================
   async youtube(url) {
     console.log('YouTube: Processing URL:', url);
@@ -225,11 +230,38 @@ const platformDownloaders = {
       const timeout = url.includes('/shorts/') ? 30000 : 60000;
       const data = await downloadWithTimeout(() => fetchYouTubeData(url), timeout);
 
-      if (!data || !data.title || !data.formats) {
+      if (!data || !data.title) {
         throw new Error('YouTube service returned invalid data');
       }
 
       console.log('YouTube: Successfully fetched data, formats count:', data.formats?.length || 0);
+      
+      // Check for merged formats and convert their URLs
+      if (data.formats) {
+        data.formats.forEach(format => {
+          if (format.url && format.url.startsWith('MERGE:')) {
+            // Convert MERGE: URL to actual merge endpoint URL
+            const parts = format.url.split(':');
+            if (parts.length >= 3) {
+              const videoUrl = parts[1];
+              const audioUrl = parts[2];
+              format.url = `${getServerBaseUrl()}/api/merge-audio?videoUrl=${encodeURIComponent(videoUrl)}&audioUrl=${encodeURIComponent(audioUrl)}`;
+              console.log(`🔄 Converted merge URL for: ${format.quality}`);
+            }
+          }
+        });
+        
+        // Also update the default URL if it's a merge URL
+        if (data.url && data.url.startsWith('MERGE:')) {
+          const parts = data.url.split(':');
+          if (parts.length >= 3) {
+            const videoUrl = parts[1];
+            const audioUrl = parts[2];
+            data.url = `${getServerBaseUrl()}/api/merge-audio?videoUrl=${encodeURIComponent(videoUrl)}&audioUrl=${encodeURIComponent(audioUrl)}`;
+          }
+        }
+      }
+
       return data;
     } catch (error) {
       if (error.message.includes('Status code: 410')) {
@@ -535,8 +567,6 @@ const formatData = async (platform, data) => {
 
 // ===== MAIN CONTROLLER =====
 
-// ===== MAIN CONTROLLER =====
-
 const downloadMedia = async (req, res) => {
   const { url } = req.body;
   console.log("Received URL:", url);
@@ -656,6 +686,7 @@ const downloadMedia = async (req, res) => {
     });
   }
 };
+
 const getErrorSuggestions = (errorMessage, platform) => {
   const suggestions = [];
 
