@@ -157,6 +157,14 @@ const downloadWithTimeout = (downloadFunction, timeout = DOWNLOAD_TIMEOUT) => {
   ]);
 };
 
+// Helper function to get server base URL
+function getServerBaseUrl(req) {
+  // Use the request host or environment variable
+  const host = req.get('host');
+  const protocol = req.secure ? 'https' : 'http';
+  return process.env.SERVER_BASE_URL || `${protocol}://${host}`;
+}
+
 // ===== PLATFORM-SPECIFIC DOWNLOADERS =====
 
 const platformDownloaders = {
@@ -216,20 +224,48 @@ const platformDownloaders = {
   },
 
   // ========================================
-  // YOUTUBE - UPDATED FOR HD QUALITY
+  // YOUTUBE - UPDATED FOR AUDIO MERGING
   // ========================================
-  async youtube(url) {
+  async youtube(url, req) {
     console.log('YouTube: Processing URL:', url);
 
     try {
       const timeout = url.includes('/shorts/') ? 30000 : 60000;
       const data = await downloadWithTimeout(() => fetchYouTubeData(url), timeout);
 
-      if (!data || !data.title || !data.formats) {
+      if (!data || !data.title) {
         throw new Error('YouTube service returned invalid data');
       }
 
       console.log('YouTube: Successfully fetched data, formats count:', data.formats?.length || 0);
+      
+      // Check for merged formats and convert their URLs
+      if (data.formats) {
+        const serverBaseUrl = getServerBaseUrl(req);
+        data.formats.forEach(format => {
+          if (format.url && format.url.startsWith('MERGE:')) {
+            // Convert MERGE: URL to actual merge endpoint URL
+            const parts = format.url.split(':');
+            if (parts.length >= 3) {
+              const videoUrl = parts[1];
+              const audioUrl = parts[2];
+              format.url = `${serverBaseUrl}/api/merge-audio?videoUrl=${encodeURIComponent(videoUrl)}&audioUrl=${encodeURIComponent(audioUrl)}`;
+              console.log(`🔄 Converted merge URL for: ${format.quality}`);
+            }
+          }
+        });
+        
+        // Also update the default URL if it's a merge URL
+        if (data.url && data.url.startsWith('MERGE:')) {
+          const parts = data.url.split(':');
+          if (parts.length >= 3) {
+            const videoUrl = parts[1];
+            const audioUrl = parts[2];
+            data.url = `${serverBaseUrl}/api/merge-audio?videoUrl=${encodeURIComponent(videoUrl)}&audioUrl=${encodeURIComponent(audioUrl)}`;
+          }
+        }
+      }
+
       return data;
     } catch (error) {
       if (error.message.includes('Status code: 410')) {
@@ -421,7 +457,7 @@ const dataFormatters = {
 // ========================================
 // YOUTUBE FORMATTER - FIXED TO PASS QUALITY DATA
 // ========================================
-youtube(data) {
+youtube(data, req) {
   console.log('🎬 Formatting YouTube data...');
   
   if (!data || !data.title) {
@@ -451,6 +487,31 @@ youtube(data) {
     
     console.log(`✅ YouTube: ${qualityOptions.length} quality options available`);
     console.log(`🎯 Selected quality: ${selectedQuality?.quality}`);
+    
+    // CRITICAL FIX: Convert MERGE URLs in ALL formats
+    const serverBaseUrl = getServerBaseUrl(req);
+    qualityOptions.forEach(format => {
+      if (format.url && format.url.startsWith('MERGE:')) {
+        const parts = format.url.split(':');
+        if (parts.length >= 3) {
+          const videoUrl = parts[1];
+          const audioUrl = parts[2];
+          format.url = `${serverBaseUrl}/api/merge-audio?videoUrl=${encodeURIComponent(videoUrl)}&audioUrl=${encodeURIComponent(audioUrl)}`;
+          console.log(`🔄 Formatter: Converted merge URL for: ${format.quality}`);
+        }
+      }
+    });
+    
+    // Also update the selected quality URL if it's a merge URL
+    if (selectedQuality && selectedQuality.url && selectedQuality.url.startsWith('MERGE:')) {
+      const parts = selectedQuality.url.split(':');
+      if (parts.length >= 3) {
+        const videoUrl = parts[1];
+        const audioUrl = parts[2];
+        selectedQuality.url = `${serverBaseUrl}/api/merge-audio?videoUrl=${encodeURIComponent(videoUrl)}&audioUrl=${encodeURIComponent(audioUrl)}`;
+        defaultUrl = selectedQuality.url;
+      }
+    }
   } else {
     console.log('⚠️ No quality formats found, creating fallback');
     // Fallback: create basic quality option
@@ -515,7 +576,7 @@ youtube(data) {
   }
 };
 
-const formatData = async (platform, data) => {
+const formatData = async (platform, data, req) => {
   console.info(`Data Formatting: Formatting data for platform '${platform}'.`);
 
   const formatter = dataFormatters[platform];
@@ -530,10 +591,13 @@ const formatData = async (platform, data) => {
     };
   }
 
+  // Pass the request object to YouTube formatter for URL conversion
+  if (platform === 'youtube') {
+    return formatter(data, req);
+  }
+
   return formatter(data);
 };
-
-// ===== MAIN CONTROLLER =====
 
 // ===== MAIN CONTROLLER =====
 
@@ -576,7 +640,10 @@ const downloadMedia = async (req, res) => {
       throw new Error(`No downloader available for platform: ${platform}`);
     }
 
-    const data = await downloader(processedUrl);
+    // Pass the request object to YouTube downloader for URL conversion
+    const data = platform === 'youtube' 
+      ? await downloader(processedUrl, req)
+      : await downloader(processedUrl);
 
     if (!data) {
       console.error("Download Media: No data returned for the platform.");
@@ -589,7 +656,7 @@ const downloadMedia = async (req, res) => {
 
     let formattedData;
     try {
-      formattedData = await formatData(platform, data);
+      formattedData = await formatData(platform, data, req);
     } catch (formatError) {
       console.error(`Download Media: Data formatting failed - ${formatError.message}`);
       return res.status(500).json({
@@ -612,6 +679,13 @@ const downloadMedia = async (req, res) => {
     console.log(`Final ${platform} URL length:`, formattedData.url.length);
     console.log(`Formats count: ${formattedData.formats?.length || 0}`);
     console.log(`AllFormats count: ${formattedData.allFormats?.length || 0}`);
+    
+    // Log merge URLs for debugging
+    if (platform === 'youtube' && formattedData.formats) {
+      const mergeFormats = formattedData.formats.filter(f => f.url && f.url.includes('/api/merge-audio'));
+      console.log(`🎵 Merge formats available: ${mergeFormats.length}`);
+    }
+    
     console.info("Download Media: Media successfully downloaded and formatted.");
 
     // ENSURE THE RESPONSE INCLUDES ALL DATA
@@ -656,6 +730,7 @@ const downloadMedia = async (req, res) => {
     });
   }
 };
+
 const getErrorSuggestions = (errorMessage, platform) => {
   const suggestions = [];
 
