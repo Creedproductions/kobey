@@ -104,6 +104,7 @@ async function fetchWithVidFlyApi(url, attemptNum) {
 
 /**
  * Process YouTube data with automatic audio merging
+ * FIXED: Better MERGE URL encoding to avoid parsing issues
  */
 function processYouTubeData(data, url) {
   const isShorts = url.includes('/shorts/');
@@ -184,6 +185,7 @@ function processYouTubeData(data, url) {
   
   // ========================================
   // AUTOMATIC AUDIO MERGING FOR VIDEO-ONLY FORMATS
+  // FIXED: Use base64 encoding to avoid URL parsing issues
   // ========================================
   
   const mergedFormats = [];
@@ -196,11 +198,15 @@ function processYouTubeData(data, url) {
       if (compatibleAudio) {
         console.log(`🎵 Found audio for ${format.label}: ${compatibleAudio.label}`);
         
-        // Create merged format entry
+        // FIXED: Use base64 encoding to safely encode URLs
+        const videoB64 = Buffer.from(format.url).toString('base64');
+        const audioB64 = Buffer.from(compatibleAudio.url).toString('base64');
+        
+        // Create merged format entry with safe encoding
         const mergedFormat = {
           ...format,
-          // Create special URL that triggers audio merging
-          url: `MERGE:${format.url}:${compatibleAudio.url}`,
+          // Use pipe delimiter and base64 to avoid colon issues in URLs
+          url: `MERGE_V2|${videoB64}|${audioB64}`,
           hasAudio: true, // Mark as having audio now
           isVideoOnly: false, // No longer video-only
           isMergedFormat: true, // Flag as merged format
@@ -250,7 +256,7 @@ function processYouTubeData(data, url) {
     return {
       quality: quality,
       qualityNum: qualityNum,
-      url: format.url, // This may be a MERGE: URL for merged formats
+      url: format.url, // This may be a MERGE_V2 URL for merged formats
       type: format.type || 'video/mp4',
       extension: format.ext || format.extension || getExtensionFromType(format.type),
       filesize: format.filesize || 'unknown',
