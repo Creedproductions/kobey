@@ -216,6 +216,9 @@ const platformDownloaders = {
     }
   },
 
+// In downloaderController.js, find the youtube downloader function (around line 240)
+// Replace it with this:
+
 async youtube(url, req) {
   console.log('YouTube: Processing URL:', url);
 
@@ -234,6 +237,7 @@ async youtube(url, req) {
 
     console.log('YouTube: Successfully fetched data');
     
+    // CONVERT MERGE URLs HERE - ONCE
     const serverBaseUrl = getServerBaseUrl(req);
     const videoTitle = data.title || 'video';
     
@@ -249,6 +253,9 @@ async youtube(url, req) {
     if (data.selectedQuality && data.selectedQuality.url) {
       data.selectedQuality.url = decodeMergeUrl(data.selectedQuality.url, serverBaseUrl, videoTitle);
     }
+
+    // Mark as already converted
+    data._urlsConverted = true;
 
     return data;
   } catch (error) {
@@ -268,7 +275,6 @@ async youtube(url, req) {
     throw new Error(`YouTube download failed: ${error.message}`);
   }
 },
-
   async pinterest(url) {
     try {
       const data = await downloadWithTimeout(() => pindl(url));
