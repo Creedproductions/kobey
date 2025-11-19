@@ -439,36 +439,31 @@ const dataFormatters = {
   },
 
   youtube(data, req) {
-    console.log('🎬 Formatting YouTube data...');
-    
-    if (!data || !data.title) {
-      throw new Error('Invalid YouTube data received');
-    }
+  console.log('🎬 Formatting YouTube data...');
+  
+  if (!data || !data.title) {
+    throw new Error('Invalid YouTube data received');
+  }
 
-    const hasFormats = data.formats && data.formats.length > 0;
-    
-    console.log(`📊 YouTube data: hasFormats=${hasFormats}`);
-    
-    const serverBaseUrl = getServerBaseUrl(req);
-    let qualityOptions = data.formats || [];
-    
-    qualityOptions = convertMergeUrls(qualityOptions, serverBaseUrl);
-    
-    const selectedQuality = qualityOptions.find(opt => opt.qualityNum === 360) || qualityOptions[0];
-    const defaultUrl = decodeMergeUrl(selectedQuality?.url || data.url, serverBaseUrl);
+  const hasFormats = data.formats && data.formats.length > 0;
+  console.log(`📊 YouTube data: hasFormats=${hasFormats}`);
+  
+  // Data already converted in downloader - just return it
+  const qualityOptions = data.formats || [];
+  const selectedQuality = data.selectedQuality || qualityOptions[0];
 
-    return {
-      title: data.title,
-      url: defaultUrl,
-      thumbnail: data.thumbnail || PLACEHOLDER_THUMBNAIL,
-      sizes: qualityOptions.map(f => f.quality),
-      duration: data.duration || 'unknown',
-      source: 'youtube',
-      formats: qualityOptions,
-      allFormats: qualityOptions,
-      selectedQuality: selectedQuality
-    };
-  },
+  return {
+    title: data.title,
+    url: data.url,
+    thumbnail: data.thumbnail || PLACEHOLDER_THUMBNAIL,
+    sizes: qualityOptions.map(f => f.quality),
+    duration: data.duration || 'unknown',
+    source: 'youtube',
+    formats: qualityOptions,
+    allFormats: qualityOptions,
+    selectedQuality: selectedQuality
+  };
+},
 
   threads(data) {
     console.log("Processing advanced Threads data...");
