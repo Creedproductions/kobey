@@ -1,5 +1,4 @@
 const axios = require("axios");
-const audioMergerService = require("./audioMergerService");
 
 async function fetchYouTubeData(url) {
   const normalizedUrl = normalizeYouTubeUrl(url);
@@ -108,16 +107,16 @@ function processYouTubeData(data, url) {
   console.log(`📹 Video formats: ${videoFormats.length}`);
   console.log(`🎵 Audio formats: ${audioFormats.length}`);
   
-  // Build quality options - FORCE MERGE for all videos
+  // Build quality options - NO DUPLICATION
   const qualityOptions = [];
   
-  // Add video formats with merge URLs
+  // Get best audio for merging
+  const bestAudio = audioFormats.length > 0 ? audioFormats[audioFormats.length - 1] : null;
+  
+  // Add video formats with merge URLs (NO AUDIO FORMATS ADDED HERE)
   videoFormats.forEach(video => {
     const quality = video.label || 'unknown';
     const qualityNum = extractQualityNumber(quality);
-    
-    // Get best audio
-    const bestAudio = audioFormats.length > 0 ? audioFormats[audioFormats.length - 1] : null;
     
     if (bestAudio) {
       // Create MERGE URL
@@ -148,28 +147,13 @@ function processYouTubeData(data, url) {
     }
   });
   
-  // Add audio formats
-  audioFormats.forEach(audio => {
-    const label = audio.label || 'audio';
-    qualityOptions.push({
-      quality: label,
-      qualityNum: 0,
-      url: audio.url,
-      type: audio.type || 'audio/mp4',
-      extension: audio.ext || 'm4a',
-      isPremium: false,
-      hasAudio: true,
-      isAudioOnly: true
-    });
-  });
-  
-  // Sort
+  // Sort by quality number
   qualityOptions.sort((a, b) => a.qualityNum - b.qualityNum);
   
-  // Select default
+  // Select default (360p or first)
   const selectedFormat = qualityOptions.find(opt => opt.qualityNum === 360) || qualityOptions[0];
   
-  console.log(`✅ Created ${qualityOptions.length} quality options`);
+  console.log(`✅ Created ${qualityOptions.length} quality options (no duplicates)`);
   console.log(`🎵 Formats with merge: ${qualityOptions.filter(f => f.isMergedFormat).length}`);
   
   return {
