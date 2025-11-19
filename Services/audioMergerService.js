@@ -43,303 +43,209 @@ class AudioMergerService {
     /**
      * Merge video + audio URLs using FFmpeg with improved error handling
      */
-async merge(videoUrl, audioUrl, res, title = 'video') {
-  console.log("🎬 Starting audio merge process");
-  console.log(`📹 Video URL length: ${videoUrl?.length || 0}`);
-  console.log(`🎵 Audio URL length: ${audioUrl?.length || 0}`);
+    async merge(videoUrl, audioUrl, res, title = 'video') {
+        console.log("🎬 Starting audio merge process");
+        console.log(`📹 Video URL length: ${videoUrl?.length || 0}`);
+        console.log(`🎵 Audio URL length: ${audioUrl?.length || 0}`);
 
-  if (!videoUrl || !audioUrl) {
-    throw new Error("Missing video or audio URL");
-  }
-
-  if (!res) {
-    throw new Error("Response object is required");
-  }
-
-  // Check if client is still connected BEFORE starting
-  if (res.destroyed || res.writableEnded) {
-    console.log('⚠️ Client already disconnected, aborting merge');
-    throw new Error('Client disconnected before merge started');
-  }
-
-  let ffmpegProcess = null;
-  let hasError = false;
-  let videoResponse = null;
-  let audioResponse = null;
-  let clientDisconnected = false;
-
-  try {
-    // Clean title for filename
-    const safeTitle = title
-      .replace(/[^a-z0-9\s\-_]/gi, '')
-      .replace(/\s+/g, '_')
-      .substring(0, 50) || 'video';
-    const filename = `${safeTitle}.mp4`;
-    
-    console.log(`📝 Output filename: ${filename}`);
-
-    // Set response headers BEFORE starting any streams
-    res.setHeader('Content-Type', 'video/mp4');
-    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-    res.setHeader('Transfer-Encoding', 'chunked');
-    res.setHeader('Cache-Control', 'no-cache');
-    res.setHeader('Connection', 'keep-alive');
-
-    // Monitor client connection throughout the process
-    res.on('close', () => {
-      console.log('📡 Client disconnected during merge');
-      clientDisconnected = true;
-      hasError = true;
-      this.cleanup(videoResponse?.data, audioResponse?.data, ffmpegProcess);
-    });
-
-    // Fetch streams with timeout and better error handling
-    console.log("📥 Fetching video stream...");
-    try {
-      videoResponse = await axios({
-        method: 'get',
-        url: videoUrl,
-        responseType: 'stream',
-        timeout: 120000,
-        maxContentLength: Infinity,
-        maxBodyLength: Infinity,
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-          'Accept': '*/*',
-          'Accept-Encoding': 'gzip, deflate, br',
-          'Connection': 'keep-alive'
-        },
-        validateStatus: (status) => status === 200 || status === 206
-      });
-    } catch (error) {
-      console.error('❌ Video stream fetch failed:', error.message);
-      throw new Error(`Failed to fetch video stream: ${error.message}`);
-    }
-
-    // Check if client still connected
-    if (clientDisconnected || res.destroyed) {
-      throw new Error('Client disconnected while fetching video');
-    }
-
-    console.log("📥 Fetching audio stream...");
-    try {
-      audioResponse = await axios({
-        method: 'get',
-        url: audioUrl,
-        responseType: 'stream',
-        timeout: 120000,
-        maxContentLength: Infinity,
-        maxBodyLength: Infinity,
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-          'Accept': '*/*',
-          'Accept-Encoding': 'gzip, deflate, br',
-          'Connection': 'keep-alive'
-        },
-        validateStatus: (status) => status === 200 || status === 206
-      });
-    } catch (error) {
-      console.error('❌ Audio stream fetch failed:', error.message);
-      throw new Error(`Failed to fetch audio stream: ${error.message}`);
-    }
-
-    // Final check before starting FFmpeg
-    if (clientDisconnected || res.destroyed) {
-      throw new Error('Client disconnected while fetching audio');
-    }
-
-    const videoStream = videoResponse.data;
-    const audioStream = audioResponse.data;
-
-    console.log("🔧 Spawning FFmpeg process...");
-    
-    // Optimized FFmpeg command for streaming and merging
-    const ffmpegArgs = [
-      '-i', 'pipe:3',                   // Video from pipe:3 (fd 3)
-      '-i', 'pipe:4',                   // Audio from pipe:4 (fd 4)
-      '-c:v', 'copy',                   // Copy video (no re-encode)
-      '-c:a', 'aac',                    // Encode audio as AAC
-      '-b:a', '192k',                   // Audio bitrate
-      '-ar', '44100',                   // Sample rate
-      '-ac', '2',                       // Stereo
-      '-map', '0:v:0',                  // Map video from first input
-      '-map', '1:a:0',                  // Map audio from second input
-      '-movflags', 'frag_keyframe+empty_moov+faststart',
-      '-fflags', '+genpts',
-      '-avoid_negative_ts', 'make_zero',
-      '-max_muxing_queue_size', '9999',
-      '-threads', '0',                  // Use all CPU cores
-      '-preset', 'ultrafast',           // Fastest preset
-      '-f', 'mp4',
-      '-loglevel', 'warning',           // Reduce log noise
-      'pipe:1'                          // Output to stdout
-    ];
-
-    ffmpegProcess = spawn('ffmpeg', ffmpegArgs, {
-      stdio: ['ignore', 'pipe', 'pipe', 'pipe', 'pipe'],
-      windowsHide: true
-    });
-
-    // Enhanced error logging
-    let errorBuffer = '';
-    let lastProgressTime = Date.now();
-    
-    ffmpegProcess.stderr.on('data', (data) => {
-      const message = data.toString();
-      errorBuffer += message;
-      
-      // Only log important messages
-      if (message.toLowerCase().includes('error') || 
-          message.toLowerCase().includes('failed')) {
-        console.error('FFmpeg ERROR:', message.substring(0, 200));
-      }
-    });
-
-    // Handle FFmpeg errors
-    ffmpegProcess.on('error', (error) => {
-      if (!hasError) {
-        hasError = true;
-        console.error('❌ FFmpeg process error:', error.message);
-        this.cleanup(videoStream, audioStream, ffmpegProcess);
-        if (!res.headersSent && !clientDisconnected) {
-          res.status(500).json({ 
-            error: 'FFmpeg process failed', 
-            details: error.message
-          });
+        if (!videoUrl || !audioUrl) {
+            throw new Error("Missing video or audio URL");
         }
-      }
-    });
 
-    // Handle FFmpeg exit
-    ffmpegProcess.on('exit', (code, signal) => {
-      console.log(`FFmpeg exited with code ${code}, signal: ${signal}`);
-      
-      if (code === 0) {
-        console.log('✅ Audio merge completed successfully');
-      } else if (!hasError && code !== null && !clientDisconnected) {
-        hasError = true;
-        console.error(`❌ FFmpeg failed with code ${code}`);
-        console.error('FFmpeg error output:', errorBuffer.substring(0, 500));
-        if (!res.headersSent) {
-          res.status(500).json({ 
-            error: 'Merge failed', 
-            code: code,
-            details: errorBuffer.substring(0, 500)
-          });
+        if (!res) {
+            throw new Error("Response object is required");
         }
-      }
-      this.cleanup(videoStream, audioStream, null);
-    });
 
-    // Setup stream error handlers with disconnect awareness
-    const handleStreamError = (streamName) => (error) => {
-      if (!hasError && !clientDisconnected) {
-        hasError = true;
-        console.error(`❌ ${streamName} stream error:`, error.message);
-        this.cleanup(videoStream, audioStream, ffmpegProcess);
-        if (!res.headersSent) {
-          res.status(500).json({ 
-            error: `${streamName} stream failed`, 
-            details: error.message 
-          });
+        let ffmpegProcess = null;
+        let videoResponse = null;
+        let audioResponse = null;
+        let clientDisconnected = false;
+        let hasError = false;
+
+        // Client disconnect handler
+        const onClientDisconnect = () => {
+            if (!clientDisconnected) {
+                clientDisconnected = true;
+                console.log('📡 Client disconnected during merge');
+                this.cleanup(videoResponse?.data, audioResponse?.data, ffmpegProcess);
+            }
+        };
+
+        // Monitor client connection
+        res.on('close', onClientDisconnect);
+        res.on('error', onClientDisconnect);
+
+        try {
+            // Check if client is still connected
+            if (res.destroyed || res.writableEnded) {
+                throw new Error('Client disconnected before merge started');
+            }
+
+            // Clean title for filename
+            const safeTitle = title
+                .replace(/[^a-z0-9\s\-_]/gi, '')
+                .replace(/\s+/g, '_')
+                .substring(0, 50) || 'video';
+            const filename = `${safeTitle}.mp4`;
+            
+            console.log(`📝 Output filename: ${filename}`);
+
+            // Set response headers
+            res.setHeader('Content-Type', 'video/mp4');
+            res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+            res.setHeader('Transfer-Encoding', 'chunked');
+            res.setHeader('Cache-Control', 'no-cache');
+
+            // Fetch video stream
+            console.log("📥 Fetching video stream...");
+            videoResponse = await axios({
+                method: 'get',
+                url: videoUrl,
+                responseType: 'stream',
+                timeout: 30000,
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                    'Accept': '*/*'
+                }
+            });
+
+            if (clientDisconnected) throw new Error('Client disconnected');
+
+            // Fetch audio stream
+            console.log("📥 Fetching audio stream...");
+            audioResponse = await axios({
+                method: 'get',
+                url: audioUrl,
+                responseType: 'stream',
+                timeout: 30000,
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                    'Accept': '*/*'
+                }
+            });
+
+            if (clientDisconnected) throw new Error('Client disconnected');
+
+            const videoStream = videoResponse.data;
+            const audioStream = audioResponse.data;
+
+            console.log("🔧 Spawning FFmpeg process...");
+            
+            // Optimized FFmpeg command
+            const ffmpegArgs = [
+                '-i', 'pipe:3',
+                '-i', 'pipe:4',
+                '-c:v', 'copy',
+                '-c:a', 'aac',
+                '-b:a', '192k',
+                '-movflags', 'frag_keyframe+empty_moov+faststart',
+                '-f', 'mp4',
+                '-loglevel', 'error',
+                'pipe:1'
+            ];
+
+            ffmpegProcess = spawn('ffmpeg', ffmpegArgs, {
+                stdio: ['ignore', 'pipe', 'pipe', 'pipe', 'pipe']
+            });
+
+            // Handle FFmpeg errors
+            ffmpegProcess.on('error', (error) => {
+                if (!hasError && !clientDisconnected) {
+                    hasError = true;
+                    console.error('❌ FFmpeg process error:', error.message);
+                    if (!res.headersSent) {
+                        res.status(500).json({ error: 'FFmpeg process failed' });
+                    }
+                }
+            });
+
+            ffmpegProcess.on('exit', (code) => {
+                if (code !== 0 && !hasError && !clientDisconnected) {
+                    hasError = true;
+                    console.error(`❌ FFmpeg exited with code ${code}`);
+                }
+            });
+
+            // Pipe streams to FFmpeg
+            videoStream.pipe(ffmpegProcess.stdio[3]);
+            audioStream.pipe(ffmpegProcess.stdio[4]);
+
+            // Pipe FFmpeg output to response
+            ffmpegProcess.stdout.pipe(res);
+
+            // Handle stream completion
+            ffmpegProcess.stdout.once('data', () => {
+                console.log('✅ Started sending merged video data to client');
+            });
+
+            // Wait for completion
+            await new Promise((resolve, reject) => {
+                ffmpegProcess.on('exit', (code) => {
+                    if (code === 0) {
+                        resolve();
+                    } else if (!clientDisconnected) {
+                        reject(new Error(`FFmpeg exited with code ${code}`));
+                    }
+                });
+
+                ffmpegProcess.on('error', reject);
+                res.on('close', () => reject(new Error('Client disconnected')));
+            });
+
+        } catch (error) {
+            if (!clientDisconnected && !hasError) {
+                console.error('❌ Merge failed:', error.message);
+                if (!res.headersSent) {
+                    res.status(500).json({ 
+                        error: 'Audio merge failed', 
+                        details: error.message 
+                    });
+                }
+            }
+            throw error;
+        } finally {
+            // Remove listeners to prevent memory leaks
+            res.removeListener('close', onClientDisconnect);
+            res.removeListener('error', onClientDisconnect);
+            
+            if (!clientDisconnected) {
+                this.cleanup(videoResponse?.data, audioResponse?.data, ffmpegProcess);
+            }
         }
-      }
-    };
-
-    videoStream.on('error', handleStreamError('Video'));
-    audioStream.on('error', handleStreamError('Audio'));
-
-    // Pipe video to FFmpeg pipe:3 (fd 3)
-    console.log("📤 Piping video stream to FFmpeg...");
-    videoStream.pipe(ffmpegProcess.stdio[3]);
-
-    // Pipe audio to FFmpeg pipe:4 (fd 4)
-    console.log("📤 Piping audio stream to FFmpeg...");
-    audioStream.pipe(ffmpegProcess.stdio[4]);
-
-    // Pipe FFmpeg output to response
-    console.log("📤 Piping FFmpeg output to response...");
-    ffmpegProcess.stdout.pipe(res);
-
-    // Handle response errors
-    res.on('error', (error) => {
-      if (!hasError && !clientDisconnected) {
-        hasError = true;
-        console.error('❌ Response stream error:', error.message);
-        this.cleanup(videoStream, audioStream, ffmpegProcess);
-      }
-    });
-
-    // Monitor first data chunk
-    let dataReceived = false;
-    ffmpegProcess.stdout.once('data', () => {
-      dataReceived = true;
-      console.log('✅ Started sending merged video data to client');
-    });
-
-    // Timeout check for first data
-    setTimeout(() => {
-      if (!dataReceived && !hasError && !clientDisconnected) {
-        console.warn('⚠️ No data received from FFmpeg after 30 seconds');
-      }
-    }, 30000);
-
-  } catch (error) {
-    console.error('❌ Merge setup failed:', error.message);
-    
-    this.cleanup(
-      videoResponse?.data, 
-      audioResponse?.data, 
-      ffmpegProcess
-    );
-    
-    if (!res.headersSent && !clientDisconnected) {
-      res.status(500).json({ 
-        error: 'Audio merge failed', 
-        details: error.message
-      });
     }
-    
-    throw error;
-  }
-}
 
     /**
-     * Cleanup resources
+     * Improved cleanup method
      */
     cleanup(videoStream, audioStream, ffmpegProcess) {
         console.log('🧹 Cleaning up resources...');
         
-        try {
-            if (videoStream && typeof videoStream.destroy === 'function') {
-                videoStream.destroy();
-            }
-        } catch (e) {
-            console.warn('Failed to destroy video stream:', e.message);
-        }
+        const streams = [videoStream, audioStream];
         
-        try {
-            if (audioStream && typeof audioStream.destroy === 'function') {
-                audioStream.destroy();
+        streams.forEach(stream => {
+            if (stream && typeof stream.destroy === 'function') {
+                try {
+                    stream.destroy();
+                } catch (e) {
+                    // Ignore cleanup errors
+                }
             }
-        } catch (e) {
-            console.warn('Failed to destroy audio stream:', e.message);
-        }
-        
-        try {
-            if (ffmpegProcess && !ffmpegProcess.killed) {
-                ffmpegProcess.kill('SIGTERM');
-                
-                // Force kill after 2 seconds
-                setTimeout(() => {
-                    if (ffmpegProcess && !ffmpegProcess.killed) {
-                        console.warn('Force killing FFmpeg process');
-                        ffmpegProcess.kill('SIGKILL');
-                    }
-                }, 2000);
+        });
+
+        if (ffmpegProcess) {
+            try {
+                if (!ffmpegProcess.killed) {
+                    ffmpegProcess.kill('SIGTERM');
+                    
+                    setTimeout(() => {
+                        if (ffmpegProcess && !ffmpegProcess.killed) {
+                            ffmpegProcess.kill('SIGKILL');
+                        }
+                    }, 1000);
+                }
+            } catch (e) {
+                // Ignore cleanup errors
             }
-        } catch (e) {
-            console.warn('Failed to kill FFmpeg process:', e.message);
         }
     }
 }
