@@ -216,57 +216,58 @@ const platformDownloaders = {
     }
   },
 
-  async youtube(url, req) {
-    console.log('YouTube: Processing URL:', url);
+async youtube(url, req) {
+  console.log('YouTube: Processing URL:', url);
 
-    try {
-      const timeout = url.includes('/shorts/') ? 30000 : 60000;
-      const dataPromise = fetchYouTubeData(url);
-      const timeoutPromise = new Promise((_, reject) => 
-        setTimeout(() => reject(new Error('Download timeout')), timeout)
-      );
-      
-      const data = await Promise.race([dataPromise, timeoutPromise]);
+  try {
+    const timeout = url.includes('/shorts/') ? 30000 : 60000;
+    const dataPromise = fetchYouTubeData(url);
+    const timeoutPromise = new Promise((_, reject) => 
+      setTimeout(() => reject(new Error('Download timeout')), timeout)
+    );
+    
+    const data = await Promise.race([dataPromise, timeoutPromise]);
 
-      if (!data || !data.title) {
-        throw new Error('YouTube service returned invalid data');
-      }
-
-      console.log('YouTube: Successfully fetched data');
-      
-      const serverBaseUrl = getServerBaseUrl(req);
-      
-      if (data.formats) {
-        data.formats = convertMergeUrls(data.formats, serverBaseUrl);
-      }
-      if (data.allFormats) {
-        data.allFormats = convertMergeUrls(data.allFormats, serverBaseUrl);
-      }
-      if (data.url) {
-        data.url = decodeMergeUrl(data.url, serverBaseUrl);
-      }
-      if (data.selectedQuality && data.selectedQuality.url) {
-        data.selectedQuality.url = decodeMergeUrl(data.selectedQuality.url, serverBaseUrl);
-      }
-
-      return data;
-    } catch (error) {
-      if (error.message.includes('Status code: 410')) {
-        throw new Error('YouTube video not available (removed or private)');
-      }
-      if (error.message.includes('Status code: 403')) {
-        throw new Error('YouTube video access forbidden (age-restricted or region-locked)');
-      }
-      if (error.message.includes('Status code: 404')) {
-        throw new Error('YouTube video not found (invalid URL or removed)');
-      }
-      if (error.message.includes('timeout')) {
-        throw new Error('YouTube download timed out - video processing may be slow, please try again');
-      }
-
-      throw new Error(`YouTube download failed: ${error.message}`);
+    if (!data || !data.title) {
+      throw new Error('YouTube service returned invalid data');
     }
-  },
+
+    console.log('YouTube: Successfully fetched data');
+    
+    const serverBaseUrl = getServerBaseUrl(req);
+    const videoTitle = data.title || 'video';
+    
+    if (data.formats) {
+      data.formats = convertMergeUrls(data.formats, serverBaseUrl, videoTitle);
+    }
+    if (data.allFormats) {
+      data.allFormats = convertMergeUrls(data.allFormats, serverBaseUrl, videoTitle);
+    }
+    if (data.url) {
+      data.url = decodeMergeUrl(data.url, serverBaseUrl, videoTitle);
+    }
+    if (data.selectedQuality && data.selectedQuality.url) {
+      data.selectedQuality.url = decodeMergeUrl(data.selectedQuality.url, serverBaseUrl, videoTitle);
+    }
+
+    return data;
+  } catch (error) {
+    if (error.message.includes('Status code: 410')) {
+      throw new Error('YouTube video not available (removed or private)');
+    }
+    if (error.message.includes('Status code: 403')) {
+      throw new Error('YouTube video access forbidden (age-restricted or region-locked)');
+    }
+    if (error.message.includes('Status code: 404')) {
+      throw new Error('YouTube video not found (invalid URL or removed)');
+    }
+    if (error.message.includes('timeout')) {
+      throw new Error('YouTube download timed out - video processing may be slow, please try again');
+    }
+
+    throw new Error(`YouTube download failed: ${error.message}`);
+  }
+},
 
   async pinterest(url) {
     try {
