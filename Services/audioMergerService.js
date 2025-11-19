@@ -43,33 +43,40 @@ class AudioMergerService {
     /**
      * Merge video + audio URLs using FFmpeg with improved error handling
      */
-    async merge(videoUrl, audioUrl, res) {
-        console.log("🎬 Starting audio merge process");
-        console.log(`📹 Video URL length: ${videoUrl?.length || 0}`);
-        console.log(`🎵 Audio URL length: ${audioUrl?.length || 0}`);
+async merge(videoUrl, audioUrl, res, title = 'video') {
+  console.log("🎬 Starting audio merge process");
+  console.log(`📹 Video URL length: ${videoUrl?.length || 0}`);
+  console.log(`🎵 Audio URL length: ${audioUrl?.length || 0}`);
 
-        // Validate inputs
-        if (!videoUrl || !audioUrl) {
-            throw new Error("Missing video or audio URL");
-        }
+  if (!videoUrl || !audioUrl) {
+    throw new Error("Missing video or audio URL");
+  }
 
-        if (!res) {
-            throw new Error("Response object is required");
-        }
+  if (!res) {
+    throw new Error("Response object is required");
+  }
 
-        let ffmpegProcess = null;
-        let hasError = false;
-        let videoResponse = null;
-        let audioResponse = null;
+  let ffmpegProcess = null;
+  let hasError = false;
+  let videoResponse = null;
+  let audioResponse = null;
 
-        try {
-            // Set response headers BEFORE starting any streams
-            res.setHeader('Content-Type', 'video/mp4');
-            res.setHeader('Content-Disposition', 'attachment; filename="merged_video.mp4"');
-            res.setHeader('Transfer-Encoding', 'chunked');
-            res.setHeader('Cache-Control', 'no-cache');
-            res.setHeader('Connection', 'keep-alive');
+  try {
+    // Clean title for filename
+    const safeTitle = title
+      .replace(/[^a-z0-9\s\-_]/gi, '')
+      .replace(/\s+/g, '_')
+      .substring(0, 50) || 'video';
+    const filename = `${safeTitle}.mp4`;
+    
+    console.log(`📝 Output filename: ${filename}`);
 
+    // Set response headers BEFORE starting any streams
+    res.setHeader('Content-Type', 'video/mp4');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.setHeader('Transfer-Encoding', 'chunked');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
             console.log("📥 Fetching video stream...");
             videoResponse = await axios({
                 method: 'get',
