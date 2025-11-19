@@ -117,36 +117,33 @@ function processYouTubeData(data, url) {
   
   console.log(`✅ Found ${availableFormats.length} total formats with URLs`);
   
-// Detect audio presence - FIXED
+// Detect audio presence - CHECK ACTUAL CODECS
 const formatWithAudioInfo = availableFormats.map(item => {
   const label = (item.label || '').toLowerCase();
   const type = (item.type || '').toLowerCase();
-  const hasAcodec = item.acodec && item.acodec !== 'none';
-  const hasVcodec = item.vcodec && item.vcodec !== 'none';
   
-  // Audio only: has audio codec but no video codec OR labeled as audio
-  const isAudioOnly = (!hasVcodec && hasAcodec) ||
-                     label.includes('audio only') || 
+  // Check actual codec information from API
+  const acodec = (item.acodec || '').toLowerCase();
+  const vcodec = (item.vcodec || '').toLowerCase();
+  
+  // Audio only: has audio codec but video is "none"
+  const isAudioOnly = (acodec && acodec !== 'none' && (!vcodec || vcodec === 'none')) ||
                      type.includes('audio/') ||
-                     label.match(/^\d+kb\/s/) ||  // "128kb/s" format
-                     label.includes('opus') ||
-                     label.includes('m4a');
+                     label.match(/^\d+kb\/s/) ||
+                     label.includes('m4a') ||
+                     label.includes('opus');
   
-  // Video only: has video codec but no audio codec
-  const isVideoOnly = (hasVcodec && !hasAcodec) ||
-                     label.includes('video only') ||
-                     label.includes('without audio');
+  // Video only: has video codec but audio is "none"  
+  const isVideoOnly = (vcodec && vcodec !== 'none' && (!acodec || acodec === 'none')) ||
+                     label.includes('video only');
   
-  // Has audio if not video-only and not audio-only
-  const hasAudio = !isVideoOnly && !isAudioOnly;
-    
-    return {
-      ...item,
-      hasAudio: !isVideoOnly && !isAudioOnly,
-      isVideoOnly: isVideoOnly,
-      isAudioOnly: isAudioOnly
-    };
-  });
+  return {
+    ...item,
+    hasAudio: !isVideoOnly && !isAudioOnly,
+    isVideoOnly: isVideoOnly,
+    isAudioOnly: isAudioOnly
+  };
+});
   
   availableFormats = formatWithAudioInfo;
   
