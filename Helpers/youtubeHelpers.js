@@ -1,4 +1,4 @@
-function decodeMergeUrl(mergeUrl, serverBaseUrl) {
+function decodeMergeUrl(mergeUrl, serverBaseUrl, title = '') {
   if (!mergeUrl || !mergeUrl.startsWith('MERGE_V2|')) return mergeUrl;
   
   const parts = mergeUrl.split('|');
@@ -6,7 +6,8 @@ function decodeMergeUrl(mergeUrl, serverBaseUrl) {
     try {
       const videoUrl = Buffer.from(parts[1], 'base64').toString('utf-8');
       const audioUrl = Buffer.from(parts[2], 'base64').toString('utf-8');
-      return `${serverBaseUrl}/api/merge-audio?videoUrl=${encodeURIComponent(videoUrl)}&audioUrl=${encodeURIComponent(audioUrl)}`;
+      const titleParam = title ? `&title=${encodeURIComponent(title)}` : '';
+      return `${serverBaseUrl}/api/merge-audio?videoUrl=${encodeURIComponent(videoUrl)}&audioUrl=${encodeURIComponent(audioUrl)}${titleParam}`;
     } catch (error) {
       console.error('❌ Failed to decode MERGE_V2 URL:', error.message);
       return mergeUrl;
@@ -16,12 +17,12 @@ function decodeMergeUrl(mergeUrl, serverBaseUrl) {
   return mergeUrl;
 }
 
-function convertMergeUrls(formats, serverBaseUrl) {
+function convertMergeUrls(formats, serverBaseUrl, title = '') {
   if (!formats || !Array.isArray(formats)) return formats;
   
   return formats.map(format => {
     if (format.url && format.url.startsWith('MERGE_V2')) {
-      const convertedUrl = decodeMergeUrl(format.url, serverBaseUrl);
+      const convertedUrl = decodeMergeUrl(format.url, serverBaseUrl, title);
       console.log(`🔄 Converted merge URL for ${format.quality}`);
       return { ...format, url: convertedUrl };
     }
