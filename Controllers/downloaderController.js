@@ -444,17 +444,33 @@ const dataFormatters = {
     };
   },
 
-  youtube(data, req) {
+youtube(data, req) {
   console.log('🎬 Formatting YouTube data...');
   
   if (!data || !data.title) {
     throw new Error('Invalid YouTube data received');
   }
 
+  // CRITICAL: Skip conversion if already done
+  if (data._urlsConverted) {
+    console.log('✅ URLs already converted, skipping duplicate conversion');
+  } else {
+    // Only convert if not already done
+    console.log('⚠️ Converting URLs in formatter (should have been done in downloader)');
+    const serverBaseUrl = getServerBaseUrl(req);
+    const videoTitle = data.title || 'video';
+    
+    if (data.formats) {
+      data.formats = convertMergeUrls(data.formats, serverBaseUrl, videoTitle);
+    }
+    if (data.allFormats) {
+      data.allFormats = convertMergeUrls(data.allFormats, serverBaseUrl, videoTitle);
+    }
+  }
+
   const hasFormats = data.formats && data.formats.length > 0;
   console.log(`📊 YouTube data: hasFormats=${hasFormats}`);
   
-  // Data already converted in downloader - just return it
   const qualityOptions = data.formats || [];
   const selectedQuality = data.selectedQuality || qualityOptions[0];
 
