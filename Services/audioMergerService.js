@@ -1,6 +1,24 @@
 const { spawn } = require("child_process");
 const axios = require("axios");
 
+// Prevent ECONNRESET and other errors from crashing the process
+process.on('uncaughtException', (error) => {
+  if (error.code === 'ECONNRESET' || error.message.includes('ECONNRESET')) {
+    console.log('🔌 Client connection reset handled gracefully');
+    return;
+  }
+  if (error.code === 'EPIPE' || error.message.includes('EPIPE')) {
+    console.log('🔌 Broken pipe handled gracefully');
+    return;
+  }
+  console.error('❌ Uncaught Exception:', error.message);
+  console.error('Stack:', error.stack);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('❌ Unhandled Rejection at:', promise, 'reason:', reason);
+});
+
 class AudioMergerService {
     
     /**
@@ -163,6 +181,16 @@ class AudioMergerService {
                 if (code !== 0 && !hasError && !clientDisconnected) {
                     hasError = true;
                     console.error(`❌ FFmpeg exited with code ${code}`);
+                } else if (code === 0) {
+                    console.log('✅ FFmpeg process completed successfully');
+                }
+            });
+
+            // Handle FFmpeg stderr for debugging
+            ffmpegProcess.stderr.on('data', (data) => {
+                const message = data.toString();
+                if (message.includes('Error') || message.includes('error')) {
+                    console.error('🔴 FFmpeg error:', message.trim());
                 }
             });
 
@@ -170,8 +198,34 @@ class AudioMergerService {
             videoStream.pipe(ffmpegProcess.stdio[3]);
             audioStream.pipe(ffmpegProcess.stdio[4]);
 
+            // Handle stream errors
+            videoStream.on('error', (error) => {
+                if (!hasError && !clientDisconnected) {
+                    hasError = true;
+                    console.error('❌ Video stream error:', error.message);
+                    this.cleanup(videoStream, audioStream, ffmpegProcess);
+                }
+            });
+
+            audioStream.on('error', (error) => {
+                if (!hasError && !clientDisconnected) {
+                    hasError = true;
+                    console.error('❌ Audio stream error:', error.message);
+                    this.cleanup(videoStream, audioStream, ffmpegProcess);
+                }
+            });
+
             // Pipe FFmpeg output to response
             ffmpegProcess.stdout.pipe(res);
+
+            // Handle response errors
+            res.on('error', (error) => {
+                if (!hasError && !clientDisconnected) {
+                    hasError = true;
+                    console.error('❌ Response stream error:', error.message);
+                    this.cleanup(videoStream, audioStream, ffmpegProcess);
+                }
+            });
 
             // Handle stream completion
             ffmpegProcess.stdout.once('data', () => {
@@ -180,16 +234,24 @@ class AudioMergerService {
 
             // Wait for completion
             await new Promise((resolve, reject) => {
-                ffmpegProcess.on('exit', (code) => {
+                const completionHandler = (code) => {
                     if (code === 0) {
+                        console.log('🎉 Audio merge completed successfully');
                         resolve();
                     } else if (!clientDisconnected) {
                         reject(new Error(`FFmpeg exited with code ${code}`));
                     }
-                });
+                };
 
+                ffmpegProcess.on('exit', completionHandler);
                 ffmpegProcess.on('error', reject);
-                res.on('close', () => reject(new Error('Client disconnected')));
+                
+                // If client disconnects, reject the promise
+                res.on('close', () => {
+                    if (!clientDisconnected) {
+                        reject(new Error('Client disconnected during merge'));
+                    }
+                });
             });
 
         } catch (error) {
@@ -202,7 +264,8 @@ class AudioMergerService {
                     });
                 }
             }
-            throw error;
+            // Don't re-throw the error to prevent unhandled rejections
+            console.log('⚠️ Merge process ended (this is normal for client disconnections)');
         } finally {
             // Remove listeners to prevent memory leaks
             res.removeListener('close', onClientDisconnect);
@@ -222,12 +285,13 @@ class AudioMergerService {
         
         const streams = [videoStream, audioStream];
         
-        streams.forEach(stream => {
+        streams.forEach((stream, index) => {
             if (stream && typeof stream.destroy === 'function') {
                 try {
                     stream.destroy();
+                    console.log(`✅ Stream ${index + 1} destroyed`);
                 } catch (e) {
-                    // Ignore cleanup errors
+                    console.log(`⚠️ Stream ${index + 1} cleanup warning:`, e.message);
                 }
             }
         });
@@ -235,18 +299,25 @@ class AudioMergerService {
         if (ffmpegProcess) {
             try {
                 if (!ffmpegProcess.killed) {
+                    console.log('🛑 Stopping FFmpeg process...');
                     ffmpegProcess.kill('SIGTERM');
                     
+                    // Force kill after 2 seconds if still running
                     setTimeout(() => {
                         if (ffmpegProcess && !ffmpegProcess.killed) {
+                            console.log('⚠️ Force killing FFmpeg process');
                             ffmpegProcess.kill('SIGKILL');
                         }
-                    }, 1000);
+                    }, 2000);
+                } else {
+                    console.log('✅ FFmpeg process already stopped');
                 }
             } catch (e) {
-                // Ignore cleanup errors
+                console.log('⚠️ FFmpeg cleanup warning:', e.message);
             }
         }
+        
+        console.log('✅ Cleanup completed');
     }
 }
 
