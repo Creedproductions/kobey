@@ -216,46 +216,86 @@ const platformDownloaders = {
     }
   },
 
-youtube(data, req) {
-  console.log('🎬 Formatting YouTube data...');
-  
-  if (!data || !data.title) {
-    throw new Error('Invalid YouTube data received');
-  }
+  // FIXED: Proper YouTube downloader implementation
+  async youtube(url, req) {
+    console.log('YouTube: Processing URL:', url);
 
-  // REMOVED: URL conversion logic - this should only happen in the downloader
-  // The downloader already handles URL conversion and marks data._urlsConverted = true
-  console.log('✅ Using pre-converted URLs from downloader');
+    try {
+      const timeout = url.includes('/shorts/') ? 30000 : 60000;
+      console.log('⏱️ Setting timeout:', timeout, 'ms');
+      
+      const dataPromise = fetchYouTubeData(url);
+      const timeoutPromise = new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('Download timeout')), timeout)
+      );
+      
+      const data = await Promise.race([dataPromise, timeoutPromise]);
 
-  const hasFormats = data.formats && data.formats.length > 0;
-  console.log(`📊 YouTube data: hasFormats=${hasFormats}`);
-  
-  const qualityOptions = data.formats || [];
-  const selectedQuality = data.selectedQuality || qualityOptions[0];
+      console.log('📊 YouTube data received:', {
+        hasData: !!data,
+        hasTitle: !!data?.title,
+        formatsCount: data?.formats?.length || 0,
+        allFormatsCount: data?.allFormats?.length || 0
+      });
 
-  // Log merge format info for debugging
-  if (qualityOptions.length > 0) {
-    const mergeFormats = qualityOptions.filter(f => f.url && f.url.includes('/api/merge-audio'));
-    console.log(`🎵 Merge formats available: ${mergeFormats.length}`);
-    
-    // Log first few formats for verification
-    qualityOptions.slice(0, 3).forEach((format, index) => {
-      console.log(`   ${index + 1}. ${format.quality}: ${format.url ? format.url.substring(0, 80) + '...' : 'No URL'}`);
-    });
-  }
+      if (!data || !data.title) {
+        console.error('❌ YouTube data validation failed:', {
+          data: data ? 'exists' : 'null',
+          title: data?.title || 'missing',
+          formats: data?.formats?.length || 0
+        });
+        throw new Error('YouTube service returned invalid data');
+      }
 
-  return {
-    title: data.title,
-    url: data.url, // Already converted in downloader
-    thumbnail: data.thumbnail || PLACEHOLDER_THUMBNAIL,
-    sizes: qualityOptions.map(f => f.quality),
-    duration: data.duration || 'unknown',
-    source: 'youtube',
-    formats: qualityOptions, // Already converted in downloader
-    allFormats: qualityOptions, // Already converted in downloader
-    selectedQuality: selectedQuality // Already converted in downloader
-  };
-},
+      console.log('YouTube: Successfully fetched data');
+      
+      // CONVERT MERGE URLs HERE - ONCE
+      const serverBaseUrl = getServerBaseUrl(req);
+      const videoTitle = data.title || 'video';
+      
+      console.log('🔄 Converting merge URLs...');
+      if (data.formats) {
+        console.log(`   Converting ${data.formats.length} format URLs`);
+        data.formats = convertMergeUrls(data.formats, serverBaseUrl, videoTitle);
+      }
+      if (data.allFormats) {
+        console.log(`   Converting ${data.allFormats.length} allFormat URLs`);
+        data.allFormats = convertMergeUrls(data.allFormats, serverBaseUrl, videoTitle);
+      }
+      if (data.url) {
+        console.log(`   Converting main URL (${data.url.length} chars)`);
+        data.url = decodeMergeUrl(data.url, serverBaseUrl, videoTitle);
+      }
+      if (data.selectedQuality && data.selectedQuality.url) {
+        console.log(`   Converting selected quality URL`);
+        data.selectedQuality.url = decodeMergeUrl(data.selectedQuality.url, serverBaseUrl, videoTitle);
+      }
+
+      // Mark as already converted
+      data._urlsConverted = true;
+      console.log('✅ YouTube URL conversion completed');
+
+      return data;
+    } catch (error) {
+      console.error('❌ YouTube download error:', error.message);
+      
+      if (error.message.includes('Status code: 410')) {
+        throw new Error('YouTube video not available (removed or private)');
+      }
+      if (error.message.includes('Status code: 403')) {
+        throw new Error('YouTube video access forbidden (age-restricted or region-locked)');
+      }
+      if (error.message.includes('Status code: 404')) {
+        throw new Error('YouTube video not found (invalid URL or removed)');
+      }
+      if (error.message.includes('timeout')) {
+        throw new Error('YouTube download timed out - video processing may be slow, please try again');
+      }
+
+      throw new Error(`YouTube download failed: ${error.message}`);
+    }
+  },
+
   async pinterest(url) {
     try {
       const data = await downloadWithTimeout(() => pindl(url));
@@ -425,43 +465,68 @@ const dataFormatters = {
     };
   },
 
-youtube(data, req) {
-  console.log('🎬 Formatting YouTube data...');
-  
-  if (!data || !data.title) {
-    throw new Error('Invalid YouTube data received');
-  }
-  console.log('✅ Using pre-converted URLs from downloader');
-
-  const hasFormats = data.formats && data.formats.length > 0;
-  console.log(`📊 YouTube data: hasFormats=${hasFormats}`);
-  
-  const qualityOptions = data.formats || [];
-  const selectedQuality = data.selectedQuality || qualityOptions[0];
-
-  // Log merge format info for debugging
-  if (qualityOptions.length > 0) {
-    const mergeFormats = qualityOptions.filter(f => f.url && f.url.includes('/api/merge-audio'));
-    console.log(`🎵 Merge formats available: ${mergeFormats.length}`);
+  // FIXED: YouTube formatter with proper error handling
+  youtube(data, req) {
+    console.log('🎬 Formatting YouTube data...');
     
-    // Log first few formats for verification
-    qualityOptions.slice(0, 3).forEach((format, index) => {
-      console.log(`   ${index + 1}. ${format.quality}: ${format.url ? format.url.substring(0, 80) + '...' : 'No URL'}`);
-    });
-  }
+    // Enhanced validation with better error messages
+    if (!data) {
+      console.error('❌ YouTube formatter: data is null or undefined');
+      throw new Error('Invalid YouTube data received - no data provided');
+    }
+    
+    if (!data.title) {
+      console.error('❌ YouTube formatter: missing title in data:', {
+        hasData: !!data,
+        dataKeys: data ? Object.keys(data) : 'no data',
+        formatsCount: data.formats?.length || 0
+      });
+      throw new Error('Invalid YouTube data received - missing title');
+    }
 
-  return {
-    title: data.title,
-    url: data.url, // Already converted in downloader
-    thumbnail: data.thumbnail || PLACEHOLDER_THUMBNAIL,
-    sizes: qualityOptions.map(f => f.quality),
-    duration: data.duration || 'unknown',
-    source: 'youtube',
-    formats: qualityOptions, // Already converted in downloader
-    allFormats: qualityOptions, // Already converted in downloader
-    selectedQuality: selectedQuality // Already converted in downloader
-  };
-},
+    console.log('✅ YouTube data validation passed');
+    
+    // URLs are already converted in the downloader - just use them as-is
+    console.log('✅ Using pre-converted URLs from downloader');
+    
+    const hasFormats = data.formats && data.formats.length > 0;
+    console.log(`📊 YouTube data: hasFormats=${hasFormats}, formatsCount=${data.formats?.length || 0}`);
+    
+    const qualityOptions = data.formats || [];
+    const selectedQuality = data.selectedQuality || qualityOptions[0];
+
+    // Debug logging to verify URLs
+    if (qualityOptions.length > 0) {
+      const mergeFormats = qualityOptions.filter(f => f.url && f.url.includes('/api/merge-audio'));
+      console.log(`🎵 Merge formats available: ${mergeFormats.length}`);
+      
+      // Log format details for debugging
+      qualityOptions.slice(0, 3).forEach((format, index) => {
+        const urlType = format.url ? 
+          (format.url.includes('/api/merge-audio') ? 'MERGE_URL' : 'DIRECT_URL') : 
+          'NO_URL';
+        console.log(`   ${index + 1}. ${format.quality}: ${urlType} (${format.url?.length || 0} chars)`);
+      });
+    } else {
+      console.warn('⚠️ No quality options available in YouTube data');
+    }
+
+    const result = {
+      title: data.title,
+      url: data.url,
+      thumbnail: data.thumbnail || PLACEHOLDER_THUMBNAIL,
+      sizes: qualityOptions.map(f => f.quality),
+      duration: data.duration || 'unknown',
+      source: 'youtube',
+      formats: qualityOptions,
+      allFormats: qualityOptions,
+      selectedQuality: selectedQuality
+    };
+
+    console.log('✅ YouTube formatting completed successfully');
+    return result;
+  },
+
   threads(data) {
     console.log("Processing advanced Threads data...");
     return {
@@ -552,9 +617,21 @@ const downloadMedia = async (req, res) => {
       throw new Error(`No downloader available for platform: ${platform}`);
     }
 
-    const data = platform === 'youtube' 
-      ? await downloader(processedUrl, req)
-      : await downloader(processedUrl);
+    let data;
+    try {
+      console.log(`🚀 Starting download for ${platform}`);
+      data = platform === 'youtube' 
+        ? await downloader(processedUrl, req)
+        : await downloader(processedUrl);
+      
+      console.log(`✅ Download completed for ${platform}`, {
+        hasData: !!data,
+        hasTitle: !!data?.title
+      });
+    } catch (downloadError) {
+      console.error(`❌ Download failed for ${platform}:`, downloadError.message);
+      throw downloadError;
+    }
 
     if (!data) {
       console.error("Download Media: No data returned for the platform.");
@@ -653,6 +730,10 @@ const getErrorSuggestions = (errorMessage, platform) => {
     if (errorMessage.includes('timeout')) {
       suggestions.push('YouTube videos may take longer to process - the API is working but needs time');
       suggestions.push('Check your frontend code to ensure it waits for the full response');
+    }
+    if (errorMessage.includes('invalid data')) {
+      suggestions.push('The YouTube video might be restricted or unavailable in your region');
+      suggestions.push('Try a different YouTube video to test the service');
     }
   }
 
