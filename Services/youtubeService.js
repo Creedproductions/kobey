@@ -117,29 +117,30 @@ function processYouTubeData(data, url) {
   
   console.log(`✅ Found ${availableFormats.length} total formats with URLs`);
   
-// Detect audio presence - CHECK ACTUAL CODECS
+// Detect audio presence - STRICT DETECTION
 const formatWithAudioInfo = availableFormats.map(item => {
   const label = (item.label || '').toLowerCase();
   const type = (item.type || '').toLowerCase();
   
-  // Check actual codec information from API
-  const acodec = (item.acodec || '').toLowerCase();
-  const vcodec = (item.vcodec || '').toLowerCase();
-  
-  // Audio only: has audio codec but video is "none"
-  const isAudioOnly = (acodec && acodec !== 'none' && (!vcodec || vcodec === 'none')) ||
-                     type.includes('audio/') ||
+  // Audio only formats
+  const isAudioOnly = type.includes('audio/') ||
                      label.match(/^\d+kb\/s/) ||
-                     label.includes('m4a') ||
-                     label.includes('opus');
+                     label.includes('m4a (') ||
+                     label.includes('opus (');
   
-  // Video only: has video codec but audio is "none"  
-  const isVideoOnly = (vcodec && vcodec !== 'none' && (!acodec || acodec === 'none')) ||
-                     label.includes('video only');
+  // Video formats are video-only UNLESS explicitly marked as having audio
+  const isVideoFormat = type.includes('video/') || 
+                       label.includes('p)') ||  // "720p)", "480p)"
+                       label.includes('webm');
+  
+  // Only mark as having audio if it's explicitly a merged format from API
+  // Otherwise assume video-only (needs merging)
+  const hasAudio = !isAudioOnly && !isVideoFormat;
+  const isVideoOnly = isVideoFormat && !hasAudio;
   
   return {
     ...item,
-    hasAudio: !isVideoOnly && !isAudioOnly,
+    hasAudio: hasAudio,
     isVideoOnly: isVideoOnly,
     isAudioOnly: isAudioOnly
   };
