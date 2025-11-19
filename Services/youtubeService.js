@@ -92,10 +92,9 @@ function processYouTubeData(data, url) {
   let availableFormats = data.items.filter(item => item.url && item.url.length > 0);
   console.log(`✅ Found ${availableFormats.length} formats with URLs`);
   
-  // Separate by type
-  const videoFormats = [];
-  const audioFormats = [];
-  const seenQualities = new Set(); // Track seen qualities to avoid duplicates
+  // Separate by type AND deduplicate in one pass
+  const videoFormatsMap = new Map(); // Use Map for automatic deduplication
+  const audioFormatsMap = new Map();
   
   availableFormats.forEach(item => {
     const label = (item.label || '').toLowerCase();
@@ -103,38 +102,51 @@ function processYouTubeData(data, url) {
     
     // Audio formats
     if (type.includes('audio/') || label.match(/^\d+kb\/s/) || label.includes('m4a') || label.includes('opus')) {
-      audioFormats.push(item);
+      const key = `${item.label}-${item.type}`;
+      if (!audioFormatsMap.has(key)) {
+        audioFormatsMap.set(key, item);
+      }
     } 
-    // Video formats - DEDUPLICATE HERE
+    // Video formats - deduplicate by quality+type combination
     else if (type.includes('video/') || label.match(/\d+p/)) {
-      const qualityKey = `${item.label}-${item.type}`;
-      if (!seenQualities.has(qualityKey)) {
-        seenQualities.add(qualityKey);
-        videoFormats.push(item);
+      const key = `${item.label}-${item.type}`;
+      if (!videoFormatsMap.has(key)) {
+        videoFormatsMap.set(key, item);
       } else {
-        console.log(`⏩ Skipping duplicate: ${item.label}`);
+        console.log(`⏩ Skipping duplicate: ${item.label} (${item.type})`);
       }
     }
   });
   
+  // Convert Maps back to arrays
+  const videoFormats = Array.from(videoFormatsMap.values());
+  const audioFormats = Array.from(audioFormatsMap.values());
+  
   console.log(`📹 Video formats: ${videoFormats.length} (deduplicated)`);
   console.log(`🎵 Audio formats: ${audioFormats.length}`);
   
-  // Build quality options
-  const qualityOptions = [];
+  // Build quality options with COMPLETE deduplication
+  const qualityOptionsMap = new Map(); // Prevent duplicates in final output
   const bestAudio = audioFormats.length > 0 ? audioFormats[audioFormats.length - 1] : null;
   
   // Add video formats with merge URLs
   videoFormats.forEach(video => {
     const quality = video.label || 'unknown';
     const qualityNum = extractQualityNumber(quality);
+    const uniqueKey = `${qualityNum}-${video.type}`;
+    
+    // Skip if we already have this quality
+    if (qualityOptionsMap.has(uniqueKey)) {
+      console.log(`⏩ Skipping duplicate quality option: ${quality}`);
+      return;
+    }
     
     if (bestAudio) {
       // Create MERGE URL with base64 encoding
       const videoB64 = Buffer.from(video.url).toString('base64');
       const audioB64 = Buffer.from(bestAudio.url).toString('base64');
       
-      qualityOptions.push({
+      qualityOptionsMap.set(uniqueKey, {
         quality: quality,
         qualityNum: qualityNum,
         url: `MERGE_V2|${videoB64}|${audioB64}`,
@@ -146,7 +158,7 @@ function processYouTubeData(data, url) {
       });
     } else {
       // No audio available - use video only
-      qualityOptions.push({
+      qualityOptionsMap.set(uniqueKey, {
         quality: quality,
         qualityNum: qualityNum,
         url: video.url,
@@ -158,13 +170,14 @@ function processYouTubeData(data, url) {
     }
   });
   
-  // Sort by quality number
+  // Convert Map to array and sort by quality number
+  const qualityOptions = Array.from(qualityOptionsMap.values());
   qualityOptions.sort((a, b) => a.qualityNum - b.qualityNum);
   
   // Select default (360p or first)
   const selectedFormat = qualityOptions.find(opt => opt.qualityNum === 360) || qualityOptions[0];
   
-  console.log(`✅ Created ${qualityOptions.length} quality options (no duplicates)`);
+  console.log(`✅ Created ${qualityOptions.length} unique quality options (fully deduplicated)`);
   console.log(`🎵 Formats with merge: ${qualityOptions.filter(f => f.isMergedFormat).length}`);
   
   return {
