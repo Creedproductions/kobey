@@ -18,6 +18,7 @@ async function fetchYouTubeData(url) {
       
       if (attempts < maxAttempts) {
         const backoffMs = Math.min(1000 * Math.pow(2, attempts - 1), 8000);
+        console.log(`⏱️ Retrying in ${backoffMs/1000} seconds...`);
         await new Promise(resolve => setTimeout(resolve, backoffMs));
       }
     }
@@ -75,6 +76,11 @@ async function fetchWithVidFlyApi(url, attemptNum) {
     return processYouTubeData(data, url);
   } catch (err) {
     console.error(`❌ YouTube API error on attempt ${attemptNum}:`, err.message);
+    
+    if (err.response) {
+      console.error(`📡 Response status: ${err.response.status}`);
+    }
+    
     throw new Error(`YouTube downloader API request failed: ${err.message}`);
   }
 }
@@ -89,6 +95,7 @@ function processYouTubeData(data, url) {
   // Separate by type
   const videoFormats = [];
   const audioFormats = [];
+  const seenQualities = new Set(); // Track seen qualities to avoid duplicates
   
   availableFormats.forEach(item => {
     const label = (item.label || '').toLowerCase();
@@ -98,28 +105,32 @@ function processYouTubeData(data, url) {
     if (type.includes('audio/') || label.match(/^\d+kb\/s/) || label.includes('m4a') || label.includes('opus')) {
       audioFormats.push(item);
     } 
-    // Video formats
+    // Video formats - DEDUPLICATE HERE
     else if (type.includes('video/') || label.match(/\d+p/)) {
-      videoFormats.push(item);
+      const qualityKey = `${item.label}-${item.type}`;
+      if (!seenQualities.has(qualityKey)) {
+        seenQualities.add(qualityKey);
+        videoFormats.push(item);
+      } else {
+        console.log(`⏩ Skipping duplicate: ${item.label}`);
+      }
     }
   });
   
-  console.log(`📹 Video formats: ${videoFormats.length}`);
+  console.log(`📹 Video formats: ${videoFormats.length} (deduplicated)`);
   console.log(`🎵 Audio formats: ${audioFormats.length}`);
   
-  // Build quality options - NO DUPLICATION
+  // Build quality options
   const qualityOptions = [];
-  
-  // Get best audio for merging
   const bestAudio = audioFormats.length > 0 ? audioFormats[audioFormats.length - 1] : null;
   
-  // Add video formats with merge URLs (NO AUDIO FORMATS ADDED HERE)
+  // Add video formats with merge URLs
   videoFormats.forEach(video => {
     const quality = video.label || 'unknown';
     const qualityNum = extractQualityNumber(quality);
     
     if (bestAudio) {
-      // Create MERGE URL
+      // Create MERGE URL with base64 encoding
       const videoB64 = Buffer.from(video.url).toString('base64');
       const audioB64 = Buffer.from(bestAudio.url).toString('base64');
       
@@ -191,6 +202,8 @@ function getRandomUserAgent() {
   const userAgents = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.110 Safari/537.36',
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.1 Safari/605.1.15',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:94.0) Gecko/20100101 Firefox/94.0',
+    'Mozilla/5.0 (iPhone; CPU iPhone OS 15_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.1 Mobile/15E148 Safari/604.1'
   ];
   
   return userAgents[Math.floor(Math.random() * userAgents.length)];
