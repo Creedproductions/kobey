@@ -11,7 +11,7 @@ router.post('/download', downloadMedia);
 // GET route to fetch mock data
 router.get('/mock-videos', mockController.getMockVideos);
 
-// Audio merging endpoint for YouTube videos
+// Audio merging endpoint - FIXED
 router.get('/merge-audio', async (req, res) => {
   try {
     const { videoUrl, audioUrl } = req.query;
@@ -27,13 +27,15 @@ router.get('/merge-audio', async (req, res) => {
     console.log(`📹 Video URL: ${videoUrl.substring(0, 100)}...`);
     console.log(`🎵 Audio URL: ${audioUrl.substring(0, 100)}...`);
 
-    // Use the updated merge method from the fixed audioMergerService
-    await audioMergerService.merge(videoUrl, audioUrl, res);
+    // Decode URLs if they're encoded
+    const decodedVideoUrl = decodeURIComponent(videoUrl);
+    const decodedAudioUrl = decodeURIComponent(audioUrl);
+
+    await audioMergerService.merge(decodedVideoUrl, decodedAudioUrl, res);
 
   } catch (error) {
     console.error('❌ Audio merge failed:', error);
     
-    // Only send error response if headers haven't been sent yet
     if (!res.headersSent) {
       res.status(500).json({
         error: 'Audio merging failed',
@@ -44,12 +46,58 @@ router.get('/merge-audio', async (req, res) => {
   }
 });
 
-// FFmpeg status check endpoint - VERIFY INSTALLATION
+// Diagnostics endpoint - NEW
+router.get('/diagnostics', async (req, res) => {
+  const os = require('os');
+  
+  const results = {
+    timestamp: new Date().toISOString(),
+    checks: {}
+  };
+
+  // Check FFmpeg
+  results.checks.ffmpeg = await new Promise((resolve) => {
+    const ffmpeg = spawn('ffmpeg', ['-version']);
+    let output = '';
+    
+    ffmpeg.stdout.on('data', (data) => { output += data.toString(); });
+    ffmpeg.on('close', (code) => {
+      resolve({
+        installed: code === 0,
+        version: output.match(/ffmpeg version ([^\s]+)/)?.[1] || 'Unknown',
+        status: code === 0 ? '✅ Working' : '❌ Failed'
+      });
+    });
+    ffmpeg.on('error', () => {
+      resolve({ installed: false, status: '❌ Not found' });
+    });
+  });
+
+  // System info
+  results.checks.system = {
+    platform: os.platform(),
+    cpus: os.cpus().length,
+    freeMemory: `${(os.freemem() / 1024 / 1024 / 1024).toFixed(2)} GB`,
+    status: '✅ OK'
+  };
+
+  // Environment
+  results.checks.environment = {
+    nodeVersion: process.version,
+    serverBaseUrl: process.env.SERVER_BASE_URL || 'not configured',
+    status: process.env.SERVER_BASE_URL ? '✅ Configured' : '⚠️ Missing'
+  };
+
+  results.healthy = results.checks.ffmpeg.installed;
+
+  res.json(results);
+});
+
+// FFmpeg status check endpoint
 router.get('/ffmpeg-status', (req, res) => {
   console.log('🔍 Checking FFmpeg installation...');
   
   try {
-    // Try to get FFmpeg location
     let ffmpegPath = 'Not found';
     try {
       ffmpegPath = execSync('which ffmpeg').toString().trim();
@@ -57,7 +105,6 @@ router.get('/ffmpeg-status', (req, res) => {
       console.warn('Could not locate FFmpeg with "which" command');
     }
 
-    // Spawn FFmpeg process to get version
     const ffmpeg = spawn('ffmpeg', ['-version']);
     let output = '';
     let errorOutput = '';
@@ -110,7 +157,7 @@ router.get('/ffmpeg-status', (req, res) => {
   }
 });
 
-// System information endpoint - DEBUGGING HELPER
+// System information endpoint
 router.get('/system-info', (req, res) => {
   try {
     const os = require('os');
@@ -140,7 +187,7 @@ router.get('/system-info', (req, res) => {
   }
 });
 
-// Test merge with sample URLs - TESTING ENDPOINT
+// Test merge with sample URLs
 router.get('/test-merge', async (req, res) => {
   const testVideoUrl = req.query.videoUrl;
   const testAudioUrl = req.query.audioUrl;
@@ -194,6 +241,7 @@ router.get('/test', (req, res) => {
     endpoints: {
       download: 'POST /api/download',
       mergeAudio: 'GET /api/merge-audio?videoUrl=&audioUrl=',
+      diagnostics: 'GET /api/diagnostics',
       ffmpegStatus: 'GET /api/ffmpeg-status',
       systemInfo: 'GET /api/system-info',
       testMerge: 'GET /api/test-merge?videoUrl=&audioUrl=',
@@ -202,7 +250,7 @@ router.get('/test', (req, res) => {
   });
 });
 
-// Health check endpoint for monitoring
+// Health check endpoint
 router.get('/health', (req, res) => {
   res.status(200).json({
     status: 'healthy',
