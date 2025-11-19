@@ -1,324 +1,362 @@
-const { spawn } = require("child_process");
 const axios = require("axios");
+const audioMergerService = require("./audioMergerService");
 
-// Prevent ECONNRESET and other errors from crashing the process
-process.on('uncaughtException', (error) => {
-  if (error.code === 'ECONNRESET' || error.message.includes('ECONNRESET')) {
-    console.log('🔌 Client connection reset handled gracefully');
-    return;
+/**
+ * Fetches YouTube video data with automatic audio merging
+ */
+async function fetchYouTubeData(url) {
+  const normalizedUrl = normalizeYouTubeUrl(url);
+  console.log(`🔍 Fetching YouTube data for: ${normalizedUrl}`);
+  
+  let attempts = 0;
+  const maxAttempts = 3;
+  let lastError = null;
+  
+  while (attempts < maxAttempts) {
+    attempts++;
+    try {
+      return await fetchWithVidFlyApi(normalizedUrl, attempts);
+    } catch (err) {
+      lastError = err;
+      console.error(`❌ Attempt ${attempts}/${maxAttempts} failed: ${err.message}`);
+      
+      if (attempts < maxAttempts) {
+        const backoffMs = Math.min(1000 * Math.pow(2, attempts - 1), 8000);
+        console.log(`⏱️ Retrying in ${backoffMs/1000} seconds...`);
+        await new Promise(resolve => setTimeout(resolve, backoffMs));
+      }
+    }
   }
-  if (error.code === 'EPIPE' || error.message.includes('EPIPE')) {
-    console.log('🔌 Broken pipe handled gracefully');
-    return;
-  }
-  console.error('❌ Uncaught Exception:', error.message);
-  console.error('Stack:', error.stack);
-});
-
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('❌ Unhandled Rejection at:', promise, 'reason:', reason);
-});
-
-class AudioMergerService {
-    
-    /**
-     * Find compatible audio stream based on quality and format
-     */
-    findCompatibleAudio(videoFormat, audioFormats) {
-        if (!audioFormats || audioFormats.length === 0) {
-            console.warn("⚠️ No audio formats available");
-            return null;
-        }
-
-        console.log(`🔍 Finding audio for video quality: ${videoFormat.label || videoFormat.quality}`);
-        
-        // Sort by quality/bitrate (highest first)
-        const sortedAudio = [...audioFormats].sort((a, b) => {
-            const aQuality = this.extractAudioQuality(a);
-            const bQuality = this.extractAudioQuality(b);
-            return bQuality - aQuality;
-        });
-
-        const selected = sortedAudio[0];
-        console.log(`✅ Selected audio: ${selected.label || 'best available'}`);
-        
-        return selected;
-    }
-
-    /**
-     * Extract audio quality ranking
-     */
-    extractAudioQuality(audioFormat) {
-        const label = (audioFormat.label || '').toLowerCase();
-        
-        if (label.includes('high') || label.includes('best') || label.includes('320')) return 3;
-        if (label.includes('medium') || label.includes('192')) return 2;
-        if (label.includes('low') || label.includes('128')) return 1;
-        
-        return 2;
-    }
-
-    /**
-     * Merge video + audio URLs using FFmpeg with improved error handling
-     */
-    async merge(videoUrl, audioUrl, res, title = 'video') {
-        console.log("🎬 Starting audio merge process");
-        console.log(`📹 Video URL length: ${videoUrl?.length || 0}`);
-        console.log(`🎵 Audio URL length: ${audioUrl?.length || 0}`);
-
-        if (!videoUrl || !audioUrl) {
-            throw new Error("Missing video or audio URL");
-        }
-
-        if (!res) {
-            throw new Error("Response object is required");
-        }
-
-        let ffmpegProcess = null;
-        let videoResponse = null;
-        let audioResponse = null;
-        let clientDisconnected = false;
-        let hasError = false;
-
-        // Client disconnect handler
-        const onClientDisconnect = () => {
-            if (!clientDisconnected) {
-                clientDisconnected = true;
-                console.log('📡 Client disconnected during merge');
-                this.cleanup(videoResponse?.data, audioResponse?.data, ffmpegProcess);
-            }
-        };
-
-        // Monitor client connection
-        res.on('close', onClientDisconnect);
-        res.on('error', onClientDisconnect);
-
-        try {
-            // Check if client is still connected
-            if (res.destroyed || res.writableEnded) {
-                throw new Error('Client disconnected before merge started');
-            }
-
-            // Clean title for filename
-            const safeTitle = title
-                .replace(/[^a-z0-9\s\-_]/gi, '')
-                .replace(/\s+/g, '_')
-                .substring(0, 50) || 'video';
-            const filename = `${safeTitle}.mp4`;
-            
-            console.log(`📝 Output filename: ${filename}`);
-
-            // Set response headers
-            res.setHeader('Content-Type', 'video/mp4');
-            res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-            res.setHeader('Transfer-Encoding', 'chunked');
-            res.setHeader('Cache-Control', 'no-cache');
-
-            // Fetch video stream
-            console.log("📥 Fetching video stream...");
-            videoResponse = await axios({
-                method: 'get',
-                url: videoUrl,
-                responseType: 'stream',
-                timeout: 30000,
-                headers: {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                    'Accept': '*/*'
-                }
-            });
-
-            if (clientDisconnected) throw new Error('Client disconnected');
-
-            // Fetch audio stream
-            console.log("📥 Fetching audio stream...");
-            audioResponse = await axios({
-                method: 'get',
-                url: audioUrl,
-                responseType: 'stream',
-                timeout: 30000,
-                headers: {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                    'Accept': '*/*'
-                }
-            });
-
-            if (clientDisconnected) throw new Error('Client disconnected');
-
-            const videoStream = videoResponse.data;
-            const audioStream = audioResponse.data;
-
-            console.log("🔧 Spawning FFmpeg process...");
-            
-            // Optimized FFmpeg command
-            const ffmpegArgs = [
-                '-i', 'pipe:3',
-                '-i', 'pipe:4',
-                '-c:v', 'copy',
-                '-c:a', 'aac',
-                '-b:a', '192k',
-                '-movflags', 'frag_keyframe+empty_moov+faststart',
-                '-f', 'mp4',
-                '-loglevel', 'error',
-                'pipe:1'
-            ];
-
-            ffmpegProcess = spawn('ffmpeg', ffmpegArgs, {
-                stdio: ['ignore', 'pipe', 'pipe', 'pipe', 'pipe']
-            });
-
-            // Handle FFmpeg errors
-            ffmpegProcess.on('error', (error) => {
-                if (!hasError && !clientDisconnected) {
-                    hasError = true;
-                    console.error('❌ FFmpeg process error:', error.message);
-                    if (!res.headersSent) {
-                        res.status(500).json({ error: 'FFmpeg process failed' });
-                    }
-                }
-            });
-
-            ffmpegProcess.on('exit', (code) => {
-                if (code !== 0 && !hasError && !clientDisconnected) {
-                    hasError = true;
-                    console.error(`❌ FFmpeg exited with code ${code}`);
-                } else if (code === 0) {
-                    console.log('✅ FFmpeg process completed successfully');
-                }
-            });
-
-            // Handle FFmpeg stderr for debugging
-            ffmpegProcess.stderr.on('data', (data) => {
-                const message = data.toString();
-                if (message.includes('Error') || message.includes('error')) {
-                    console.error('🔴 FFmpeg error:', message.trim());
-                }
-            });
-
-            // Pipe streams to FFmpeg
-            videoStream.pipe(ffmpegProcess.stdio[3]);
-            audioStream.pipe(ffmpegProcess.stdio[4]);
-
-            // Handle stream errors
-            videoStream.on('error', (error) => {
-                if (!hasError && !clientDisconnected) {
-                    hasError = true;
-                    console.error('❌ Video stream error:', error.message);
-                    this.cleanup(videoStream, audioStream, ffmpegProcess);
-                }
-            });
-
-            audioStream.on('error', (error) => {
-                if (!hasError && !clientDisconnected) {
-                    hasError = true;
-                    console.error('❌ Audio stream error:', error.message);
-                    this.cleanup(videoStream, audioStream, ffmpegProcess);
-                }
-            });
-
-            // Pipe FFmpeg output to response
-            ffmpegProcess.stdout.pipe(res);
-
-            // Handle response errors
-            res.on('error', (error) => {
-                if (!hasError && !clientDisconnected) {
-                    hasError = true;
-                    console.error('❌ Response stream error:', error.message);
-                    this.cleanup(videoStream, audioStream, ffmpegProcess);
-                }
-            });
-
-            // Handle stream completion
-            ffmpegProcess.stdout.once('data', () => {
-                console.log('✅ Started sending merged video data to client');
-            });
-
-            // Wait for completion
-            await new Promise((resolve, reject) => {
-                const completionHandler = (code) => {
-                    if (code === 0) {
-                        console.log('🎉 Audio merge completed successfully');
-                        resolve();
-                    } else if (!clientDisconnected) {
-                        reject(new Error(`FFmpeg exited with code ${code}`));
-                    }
-                };
-
-                ffmpegProcess.on('exit', completionHandler);
-                ffmpegProcess.on('error', reject);
-                
-                // If client disconnects, reject the promise
-                res.on('close', () => {
-                    if (!clientDisconnected) {
-                        reject(new Error('Client disconnected during merge'));
-                    }
-                });
-            });
-
-        } catch (error) {
-            if (!clientDisconnected && !hasError) {
-                console.error('❌ Merge failed:', error.message);
-                if (!res.headersSent) {
-                    res.status(500).json({ 
-                        error: 'Audio merge failed', 
-                        details: error.message 
-                    });
-                }
-            }
-            // Don't re-throw the error to prevent unhandled rejections
-            console.log('⚠️ Merge process ended (this is normal for client disconnections)');
-        } finally {
-            // Remove listeners to prevent memory leaks
-            res.removeListener('close', onClientDisconnect);
-            res.removeListener('error', onClientDisconnect);
-            
-            if (!clientDisconnected) {
-                this.cleanup(videoResponse?.data, audioResponse?.data, ffmpegProcess);
-            }
-        }
-    }
-
-    /**
-     * Improved cleanup method
-     */
-    cleanup(videoStream, audioStream, ffmpegProcess) {
-        console.log('🧹 Cleaning up resources...');
-        
-        const streams = [videoStream, audioStream];
-        
-        streams.forEach((stream, index) => {
-            if (stream && typeof stream.destroy === 'function') {
-                try {
-                    stream.destroy();
-                    console.log(`✅ Stream ${index + 1} destroyed`);
-                } catch (e) {
-                    console.log(`⚠️ Stream ${index + 1} cleanup warning:`, e.message);
-                }
-            }
-        });
-
-        if (ffmpegProcess) {
-            try {
-                if (!ffmpegProcess.killed) {
-                    console.log('🛑 Stopping FFmpeg process...');
-                    ffmpegProcess.kill('SIGTERM');
-                    
-                    // Force kill after 2 seconds if still running
-                    setTimeout(() => {
-                        if (ffmpegProcess && !ffmpegProcess.killed) {
-                            console.log('⚠️ Force killing FFmpeg process');
-                            ffmpegProcess.kill('SIGKILL');
-                        }
-                    }, 2000);
-                } else {
-                    console.log('✅ FFmpeg process already stopped');
-                }
-            } catch (e) {
-                console.log('⚠️ FFmpeg cleanup warning:', e.message);
-            }
-        }
-        
-        console.log('✅ Cleanup completed');
-    }
+  
+  throw new Error(`YouTube download failed after ${maxAttempts} attempts: ${lastError.message}`);
 }
 
-module.exports = new AudioMergerService();
+/**
+ * Normalizes various YouTube URL formats
+ */
+function normalizeYouTubeUrl(url) {
+  if (url.includes('youtu.be/')) {
+    const videoId = url.split('youtu.be/')[1].split('?')[0].split('&')[0];
+    return `https://www.youtube.com/watch?v=${videoId}`;
+  }
+  
+  if (url.includes('m.youtube.com')) {
+    return url.replace('m.youtube.com', 'www.youtube.com');
+  }
+  
+  if (url.includes('/shorts/')) {
+    return url;
+  }
+  
+  if (url.includes('youtube.com/watch') && !url.includes('www.youtube.com')) {
+    return url.replace('youtube.com', 'www.youtube.com');
+  }
+  
+  return url;
+}
+
+/**
+ * Primary API implementation using vidfly.ai
+ */
+async function fetchWithVidFlyApi(url, attemptNum) {
+  try {
+    const timeout = 30000 + ((attemptNum - 1) * 10000);
+    
+    const res = await axios.get(
+      "https://api.vidfly.ai/api/media/youtube/download",
+      {
+        params: { url },
+        headers: {
+          accept: "*/*",
+          "content-type": "application/json",
+          "x-app-name": "vidfly-web",
+          "x-app-version": "1.0.0",
+          Referer: "https://vidfly.ai/",
+          "User-Agent": getRandomUserAgent(),
+        },
+        timeout: timeout,
+      }
+    );
+    
+    const data = res.data?.data;
+    if (!data || !data.items || !data.title) {
+      throw new Error("Invalid or empty response from YouTube downloader API");
+    }
+    
+    return processYouTubeData(data, url);
+  } catch (err) {
+    console.error(`❌ YouTube API error on attempt ${attemptNum}:`, err.message);
+    
+    if (err.response) {
+      console.error(`📡 Response status: ${err.response.status}`);
+      if (err.response.data) {
+        console.error(`📡 Response data:`, 
+          typeof err.response.data === 'object' 
+            ? JSON.stringify(err.response.data).substring(0, 200) + '...' 
+            : String(err.response.data).substring(0, 200) + '...'
+        );
+      }
+    }
+    
+    throw new Error(`YouTube downloader API request failed: ${err.message}`);
+  }
+}
+
+/**
+ * Process YouTube data with automatic audio merging
+ */
+function processYouTubeData(data, url) {
+  const isShorts = url.includes('/shorts/');
+  console.log(`📊 YouTube: Found ${data.items.length} total formats (${isShorts ? 'SHORTS' : 'REGULAR'})`);
+  
+  // Get ALL formats that have a valid URL
+  let availableFormats = data.items.filter(item => {
+    return item.url && item.url.length > 0;
+  });
+  
+  console.log(`✅ Found ${availableFormats.length} total formats with URLs`);
+  
+  // Detect audio presence for metadata
+  const formatWithAudioInfo = availableFormats.map(item => {
+    const label = (item.label || '').toLowerCase();
+    const type = (item.type || '').toLowerCase();
+    
+    const isVideoOnly = label.includes('video only') || 
+                       label.includes('vid only') ||
+                       label.includes('without audio') ||
+                       type.includes('video only');
+    
+    const isAudioOnly = label.includes('audio only') || 
+                       type.includes('audio only') ||
+                       label.includes('audio') && !label.includes('video');
+    
+    return {
+      ...item,
+      hasAudio: !isVideoOnly && !isAudioOnly,
+      isVideoOnly: isVideoOnly,
+      isAudioOnly: isAudioOnly
+    };
+  });
+  
+  availableFormats = formatWithAudioInfo;
+  
+  // ========================================
+  // DEDUPLICATE FORMATS + PREPARE FOR MERGING
+  // ========================================
+  
+  const seenVideoQualities = new Map();
+  const deduplicatedFormats = [];
+  const audioFormats = [];
+
+  // First pass: separate audio formats and deduplicate video formats
+  availableFormats.forEach(format => {
+    if (format.isAudioOnly) {
+      audioFormats.push(format);
+      deduplicatedFormats.push(format);
+    } else {
+      const qualityNum = extractQualityNumber(format.label || '');
+      if (qualityNum === 0) {
+        deduplicatedFormats.push(format);
+        return;
+      }
+      
+      if (!seenVideoQualities.has(qualityNum)) {
+        seenVideoQualities.set(qualityNum, format);
+        deduplicatedFormats.push(format);
+      } else {
+        const existingFormat = seenVideoQualities.get(qualityNum);
+        if (!existingFormat.hasAudio && format.hasAudio) {
+          const index = deduplicatedFormats.findIndex(f => 
+            !f.isAudioOnly && extractQualityNumber(f.label || '') === qualityNum
+          );
+          if (index !== -1) {
+            deduplicatedFormats[index] = format;
+            seenVideoQualities.set(qualityNum, format);
+          }
+        }
+      }
+    }
+  });
+
+  availableFormats = deduplicatedFormats;
+  
+  console.log(`🔄 After deduplication: ${availableFormats.length} formats (${audioFormats.length} audio-only)`);
+  
+  // ========================================
+  // AUTOMATIC AUDIO MERGING FOR VIDEO-ONLY FORMATS
+  // ========================================
+  
+  const mergedFormats = [];
+  
+  availableFormats.forEach(format => {
+    if (format.isVideoOnly && audioFormats.length > 0) {
+      // Find compatible audio for this video format
+      const compatibleAudio = audioMergerService.findCompatibleAudio(format, audioFormats);
+      
+      if (compatibleAudio) {
+        console.log(`🎵 Found audio for ${format.label}: ${compatibleAudio.label}`);
+        
+        // Create merged format entry
+        const mergedFormat = {
+          ...format,
+          // Create special URL that triggers audio merging
+          url: `MERGE:${format.url}:${compatibleAudio.url}`,
+          hasAudio: true, // Mark as having audio now
+          isVideoOnly: false, // No longer video-only
+          isMergedFormat: true, // Flag as merged format
+          originalVideoUrl: format.url,
+          audioUrl: compatibleAudio.url,
+          audioQuality: compatibleAudio.label
+        };
+        
+        mergedFormats.push(mergedFormat);
+        console.log(`✅ Created merged format: ${format.label} + ${compatibleAudio.label}`);
+      } else {
+        // Keep original video-only format if no audio found
+        mergedFormats.push(format);
+      }
+    } else {
+      // Keep original format (already has audio or is audio-only)
+      mergedFormats.push(format);
+    }
+  });
+  
+  availableFormats = mergedFormats;
+  
+  console.log(`🎬 After audio merging: ${availableFormats.length} total formats`);
+  
+  // Log final formats
+  console.log('🎬 Final available formats:');
+  availableFormats.forEach((format, index) => {
+    const audioStatus = format.isAudioOnly ? '🎵 Audio Only' : 
+                       format.isVideoOnly ? '📹 Video Only' : 
+                       format.isMergedFormat ? '🎬 Merged Video+Audio' :
+                       format.hasAudio ? '🎬 Video+Audio' : '❓ Unknown';
+    console.log(`  ${index + 1}. ${format.label} - ${audioStatus}`);
+  });
+  
+  // ========================================
+  // CREATE QUALITY OPTIONS WITH PREMIUM FLAGS
+  // ========================================
+  
+  const qualityOptions = availableFormats.map(format => {
+    const quality = format.label || 'unknown';
+    const qualityNum = extractQualityNumber(quality);
+    
+    // Mark as premium: 360p and below are free, above 360p requires premium
+    // Audio-only formats are always free
+    const isPremium = !format.isAudioOnly && qualityNum > 360;
+    
+    return {
+      quality: quality,
+      qualityNum: qualityNum,
+      url: format.url, // This may be a MERGE: URL for merged formats
+      type: format.type || 'video/mp4',
+      extension: format.ext || format.extension || getExtensionFromType(format.type),
+      filesize: format.filesize || 'unknown',
+      isPremium: isPremium,
+      hasAudio: format.hasAudio,
+      isVideoOnly: format.isVideoOnly,
+      isAudioOnly: format.isAudioOnly,
+      // Additional fields for merged formats
+      isMergedFormat: format.isMergedFormat || false,
+      originalVideoUrl: format.originalVideoUrl,
+      audioUrl: format.audioUrl
+    };
+  });
+  
+  // Sort by quality number (ascending), but keep audio-only formats at the end
+  qualityOptions.sort((a, b) => {
+    if (a.isAudioOnly && !b.isAudioOnly) return 1;
+    if (!a.isAudioOnly && b.isAudioOnly) return -1;
+    return a.qualityNum - b.qualityNum;
+  });
+  
+  // Select default format (360p for free users, or highest available if premium)
+  let selectedFormat = qualityOptions.find(opt => !opt.isAudioOnly && opt.qualityNum === 360) || 
+                      qualityOptions.find(opt => !opt.isAudioOnly) || 
+                      qualityOptions[0];
+  
+  // Build result with all quality options
+  const result = {
+    title: data.title,
+    thumbnail: data.cover,
+    duration: data.duration,
+    isShorts: isShorts,
+    formats: qualityOptions,
+    allFormats: qualityOptions,
+    url: selectedFormat.url,
+    selectedQuality: selectedFormat,
+    audioGuaranteed: selectedFormat.hasAudio
+  };
+  
+  console.log(`✅ YouTube service completed with ${qualityOptions.length} quality options`);
+  console.log(`📋 Sending formats:`, qualityOptions.map(f => {
+    const type = f.isAudioOnly ? '🎵 Audio' : 
+                 f.isMergedFormat ? '🎬 Merged' :
+                 f.isVideoOnly ? '📹 Video' : '🎬 Video+Audio';
+    return `${f.quality} (${type}, premium: ${f.isPremium})`;
+  }));
+  
+  return result;
+}
+
+/**
+ * Extract quality number from quality label
+ */
+function extractQualityNumber(qualityLabel) {
+  if (!qualityLabel) return 0;
+  
+  const match = qualityLabel.match(/(\d+)p/);
+  if (match) return parseInt(match[1]);
+  
+  if (qualityLabel.includes('1440') || qualityLabel.includes('2k')) return 1440;
+  if (qualityLabel.includes('2160') || qualityLabel.includes('4k')) return 2160;
+  if (qualityLabel.includes('1080')) return 1080;
+  if (qualityLabel.includes('720')) return 720;
+  if (qualityLabel.includes('480')) return 480;
+  if (qualityLabel.includes('360')) return 360;
+  if (qualityLabel.includes('240')) return 240;
+  if (qualityLabel.includes('144')) return 144;
+  
+  return 0;
+}
+
+/**
+ * Helper to get file extension from MIME type
+ */
+function getExtensionFromType(mimeType) {
+  if (!mimeType) return 'mp4';
+  
+  const typeMap = {
+    'video/mp4': 'mp4',
+    'video/webm': 'webm',
+    'video/x-flv': 'flv',
+    'audio/mp4': 'm4a',
+    'audio/mpeg': 'mp3',
+    'audio/webm': 'webm',
+    'audio/ogg': 'ogg'
+  };
+  
+  for (const [type, ext] of Object.entries(typeMap)) {
+    if (mimeType.includes(type)) return ext;
+  }
+  
+  return 'mp4';
+}
+
+/**
+ * Get a random user agent to avoid rate limiting
+ */
+function getRandomUserAgent() {
+  const userAgents = [
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.110 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.1 Safari/605.1.15',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:94.0) Gecko/20100101 Firefox/94.0',
+    'Mozilla/5.0 (iPhone; CPU iPhone OS 15_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.1 Mobile/15E148 Safari/604.1'
+  ];
+  
+  return userAgents[Math.floor(Math.random() * userAgents.length)];
+}
+
+module.exports = { fetchYouTubeData };
