@@ -117,19 +117,28 @@ function processYouTubeData(data, url) {
   
   console.log(`✅ Found ${availableFormats.length} total formats with URLs`);
   
-  // Detect audio presence for metadata
-  const formatWithAudioInfo = availableFormats.map(item => {
-    const label = (item.label || '').toLowerCase();
-    const type = (item.type || '').toLowerCase();
-    
-    const isVideoOnly = label.includes('video only') || 
-                       label.includes('vid only') ||
-                       label.includes('without audio') ||
-                       type.includes('video only');
-    
-    const isAudioOnly = label.includes('audio only') || 
-                       type.includes('audio only') ||
-                       label.includes('audio') && !label.includes('video');
+// Detect audio presence - FIXED
+const formatWithAudioInfo = availableFormats.map(item => {
+  const label = (item.label || '').toLowerCase();
+  const type = (item.type || '').toLowerCase();
+  const hasAcodec = item.acodec && item.acodec !== 'none';
+  const hasVcodec = item.vcodec && item.vcodec !== 'none';
+  
+  // Audio only: has audio codec but no video codec OR labeled as audio
+  const isAudioOnly = (!hasVcodec && hasAcodec) ||
+                     label.includes('audio only') || 
+                     type.includes('audio/') ||
+                     label.match(/^\d+kb\/s/) ||  // "128kb/s" format
+                     label.includes('opus') ||
+                     label.includes('m4a');
+  
+  // Video only: has video codec but no audio codec
+  const isVideoOnly = (hasVcodec && !hasAcodec) ||
+                     label.includes('video only') ||
+                     label.includes('without audio');
+  
+  // Has audio if not video-only and not audio-only
+  const hasAudio = !isVideoOnly && !isAudioOnly;
     
     return {
       ...item,
