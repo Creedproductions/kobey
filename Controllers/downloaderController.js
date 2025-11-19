@@ -216,64 +216,45 @@ const platformDownloaders = {
     }
   },
 
-// In downloaderController.js, find the youtube downloader function (around line 240)
-// Replace it with this:
-
-async youtube(url, req) {
-  console.log('YouTube: Processing URL:', url);
-
-  try {
-    const timeout = url.includes('/shorts/') ? 30000 : 60000;
-    const dataPromise = fetchYouTubeData(url);
-    const timeoutPromise = new Promise((_, reject) => 
-      setTimeout(() => reject(new Error('Download timeout')), timeout)
-    );
-    
-    const data = await Promise.race([dataPromise, timeoutPromise]);
-
-    if (!data || !data.title) {
-      throw new Error('YouTube service returned invalid data');
-    }
-
-    console.log('YouTube: Successfully fetched data');
-    
-    // CONVERT MERGE URLs HERE - ONCE
-    const serverBaseUrl = getServerBaseUrl(req);
-    const videoTitle = data.title || 'video';
-    
-    if (data.formats) {
-      data.formats = convertMergeUrls(data.formats, serverBaseUrl, videoTitle);
-    }
-    if (data.allFormats) {
-      data.allFormats = convertMergeUrls(data.allFormats, serverBaseUrl, videoTitle);
-    }
-    if (data.url) {
-      data.url = decodeMergeUrl(data.url, serverBaseUrl, videoTitle);
-    }
-    if (data.selectedQuality && data.selectedQuality.url) {
-      data.selectedQuality.url = decodeMergeUrl(data.selectedQuality.url, serverBaseUrl, videoTitle);
-    }
-
-    // Mark as already converted
-    data._urlsConverted = true;
-
-    return data;
-  } catch (error) {
-    if (error.message.includes('Status code: 410')) {
-      throw new Error('YouTube video not available (removed or private)');
-    }
-    if (error.message.includes('Status code: 403')) {
-      throw new Error('YouTube video access forbidden (age-restricted or region-locked)');
-    }
-    if (error.message.includes('Status code: 404')) {
-      throw new Error('YouTube video not found (invalid URL or removed)');
-    }
-    if (error.message.includes('timeout')) {
-      throw new Error('YouTube download timed out - video processing may be slow, please try again');
-    }
-
-    throw new Error(`YouTube download failed: ${error.message}`);
+youtube(data, req) {
+  console.log('🎬 Formatting YouTube data...');
+  
+  if (!data || !data.title) {
+    throw new Error('Invalid YouTube data received');
   }
+
+  // REMOVED: URL conversion logic - this should only happen in the downloader
+  // The downloader already handles URL conversion and marks data._urlsConverted = true
+  console.log('✅ Using pre-converted URLs from downloader');
+
+  const hasFormats = data.formats && data.formats.length > 0;
+  console.log(`📊 YouTube data: hasFormats=${hasFormats}`);
+  
+  const qualityOptions = data.formats || [];
+  const selectedQuality = data.selectedQuality || qualityOptions[0];
+
+  // Log merge format info for debugging
+  if (qualityOptions.length > 0) {
+    const mergeFormats = qualityOptions.filter(f => f.url && f.url.includes('/api/merge-audio'));
+    console.log(`🎵 Merge formats available: ${mergeFormats.length}`);
+    
+    // Log first few formats for verification
+    qualityOptions.slice(0, 3).forEach((format, index) => {
+      console.log(`   ${index + 1}. ${format.quality}: ${format.url ? format.url.substring(0, 80) + '...' : 'No URL'}`);
+    });
+  }
+
+  return {
+    title: data.title,
+    url: data.url, // Already converted in downloader
+    thumbnail: data.thumbnail || PLACEHOLDER_THUMBNAIL,
+    sizes: qualityOptions.map(f => f.quality),
+    duration: data.duration || 'unknown',
+    source: 'youtube',
+    formats: qualityOptions, // Already converted in downloader
+    allFormats: qualityOptions, // Already converted in downloader
+    selectedQuality: selectedQuality // Already converted in downloader
+  };
 },
   async pinterest(url) {
     try {
@@ -450,23 +431,7 @@ youtube(data, req) {
   if (!data || !data.title) {
     throw new Error('Invalid YouTube data received');
   }
-
-  // CRITICAL: Skip conversion if already done
-  if (data._urlsConverted) {
-    console.log('✅ URLs already converted, skipping duplicate conversion');
-  } else {
-    // Only convert if not already done
-    console.log('⚠️ Converting URLs in formatter (should have been done in downloader)');
-    const serverBaseUrl = getServerBaseUrl(req);
-    const videoTitle = data.title || 'video';
-    
-    if (data.formats) {
-      data.formats = convertMergeUrls(data.formats, serverBaseUrl, videoTitle);
-    }
-    if (data.allFormats) {
-      data.allFormats = convertMergeUrls(data.allFormats, serverBaseUrl, videoTitle);
-    }
-  }
+  console.log('✅ Using pre-converted URLs from downloader');
 
   const hasFormats = data.formats && data.formats.length > 0;
   console.log(`📊 YouTube data: hasFormats=${hasFormats}`);
@@ -474,19 +439,29 @@ youtube(data, req) {
   const qualityOptions = data.formats || [];
   const selectedQuality = data.selectedQuality || qualityOptions[0];
 
+  // Log merge format info for debugging
+  if (qualityOptions.length > 0) {
+    const mergeFormats = qualityOptions.filter(f => f.url && f.url.includes('/api/merge-audio'));
+    console.log(`🎵 Merge formats available: ${mergeFormats.length}`);
+    
+    // Log first few formats for verification
+    qualityOptions.slice(0, 3).forEach((format, index) => {
+      console.log(`   ${index + 1}. ${format.quality}: ${format.url ? format.url.substring(0, 80) + '...' : 'No URL'}`);
+    });
+  }
+
   return {
     title: data.title,
-    url: data.url,
+    url: data.url, // Already converted in downloader
     thumbnail: data.thumbnail || PLACEHOLDER_THUMBNAIL,
     sizes: qualityOptions.map(f => f.quality),
     duration: data.duration || 'unknown',
     source: 'youtube',
-    formats: qualityOptions,
-    allFormats: qualityOptions,
-    selectedQuality: selectedQuality
+    formats: qualityOptions, // Already converted in downloader
+    allFormats: qualityOptions, // Already converted in downloader
+    selectedQuality: selectedQuality // Already converted in downloader
   };
 },
-
   threads(data) {
     console.log("Processing advanced Threads data...");
     return {
