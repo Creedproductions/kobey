@@ -1,5 +1,9 @@
 const axios = require("axios");
+const audioMergerService = require("./audioMergerService");
 
+/**
+ * Fetches YouTube video data with automatic audio merging
+ */
 async function fetchYouTubeData(url) {
   const normalizedUrl = normalizeYouTubeUrl(url);
   console.log(`🔍 Fetching YouTube data for: ${normalizedUrl}`);
@@ -27,6 +31,9 @@ async function fetchYouTubeData(url) {
   throw new Error(`YouTube download failed after ${maxAttempts} attempts: ${lastError.message}`);
 }
 
+/**
+ * Normalizes various YouTube URL formats
+ */
 function normalizeYouTubeUrl(url) {
   if (url.includes('youtu.be/')) {
     const videoId = url.split('youtu.be/')[1].split('?')[0].split('&')[0];
@@ -48,6 +55,9 @@ function normalizeYouTubeUrl(url) {
   return url;
 }
 
+/**
+ * Primary API implementation using vidfly.ai
+ */
 async function fetchWithVidFlyApi(url, attemptNum) {
   try {
     const timeout = 30000 + ((attemptNum - 1) * 10000);
@@ -79,108 +89,196 @@ async function fetchWithVidFlyApi(url, attemptNum) {
     
     if (err.response) {
       console.error(`📡 Response status: ${err.response.status}`);
+      if (err.response.data) {
+        console.error(`📡 Response data:`, 
+          typeof err.response.data === 'object' 
+            ? JSON.stringify(err.response.data).substring(0, 200) + '...' 
+            : String(err.response.data).substring(0, 200) + '...'
+        );
+      }
     }
     
     throw new Error(`YouTube downloader API request failed: ${err.message}`);
   }
 }
 
+/**
+ * Process YouTube data with automatic audio merging
+ */
 function processYouTubeData(data, url) {
   const isShorts = url.includes('/shorts/');
-  console.log(`📊 YouTube: Found ${data.items.length} total formats`);
+  console.log(`📊 YouTube: Found ${data.items.length} total formats (${isShorts ? 'SHORTS' : 'REGULAR'})`);
   
-  let availableFormats = data.items.filter(item => item.url && item.url.length > 0);
-  console.log(`✅ Found ${availableFormats.length} formats with URLs`);
+  // Get ALL formats that have a valid URL
+  let availableFormats = data.items.filter(item => {
+    return item.url && item.url.length > 0;
+  });
   
-  // Separate by type AND deduplicate in one pass
-  const videoFormatsMap = new Map(); // Use Map for automatic deduplication
-  const audioFormatsMap = new Map();
+  console.log(`✅ Found ${availableFormats.length} total formats with URLs`);
   
-  availableFormats.forEach(item => {
+  // Detect audio presence for metadata
+  const formatWithAudioInfo = availableFormats.map(item => {
     const label = (item.label || '').toLowerCase();
     const type = (item.type || '').toLowerCase();
     
-    // Audio formats
-    if (type.includes('audio/') || label.match(/^\d+kb\/s/) || label.includes('m4a') || label.includes('opus')) {
-      const key = `${item.label}-${item.type}`;
-      if (!audioFormatsMap.has(key)) {
-        audioFormatsMap.set(key, item);
-      }
-    } 
-    // Video formats - deduplicate by quality+type combination
-    else if (type.includes('video/') || label.match(/\d+p/)) {
-      const key = `${item.label}-${item.type}`;
-      if (!videoFormatsMap.has(key)) {
-        videoFormatsMap.set(key, item);
-      } else {
-        console.log(`⏩ Skipping duplicate: ${item.label} (${item.type})`);
-      }
-    }
+    const isVideoOnly = label.includes('video only') || 
+                       label.includes('vid only') ||
+                       label.includes('without audio') ||
+                       type.includes('video only');
+    
+    const isAudioOnly = label.includes('audio only') || 
+                       type.includes('audio only') ||
+                       label.includes('audio') && !label.includes('video');
+    
+    return {
+      ...item,
+      hasAudio: !isVideoOnly && !isAudioOnly,
+      isVideoOnly: isVideoOnly,
+      isAudioOnly: isAudioOnly
+    };
   });
   
-  // Convert Maps back to arrays
-  const videoFormats = Array.from(videoFormatsMap.values());
-  const audioFormats = Array.from(audioFormatsMap.values());
+  availableFormats = formatWithAudioInfo;
   
-  console.log(`📹 Video formats: ${videoFormats.length} (deduplicated)`);
-  console.log(`🎵 Audio formats: ${audioFormats.length}`);
+  // ========================================
+  // DEDUPLICATE FORMATS + PREPARE FOR MERGING
+  // ========================================
   
-  // Build quality options with COMPLETE deduplication
-  const qualityOptionsMap = new Map(); // Prevent duplicates in final output
-  const bestAudio = audioFormats.length > 0 ? audioFormats[audioFormats.length - 1] : null;
-  
-  // Add video formats with merge URLs
-  videoFormats.forEach(video => {
-    const quality = video.label || 'unknown';
-    const qualityNum = extractQualityNumber(quality);
-    const uniqueKey = `${qualityNum}-${video.type}`;
-    
-    // Skip if we already have this quality
-    if (qualityOptionsMap.has(uniqueKey)) {
-      console.log(`⏩ Skipping duplicate quality option: ${quality}`);
-      return;
-    }
-    
-    if (bestAudio) {
-      // Create MERGE URL with base64 encoding
-      const videoB64 = Buffer.from(video.url).toString('base64');
-      const audioB64 = Buffer.from(bestAudio.url).toString('base64');
-      
-      qualityOptionsMap.set(uniqueKey, {
-        quality: quality,
-        qualityNum: qualityNum,
-        url: `MERGE_V2|${videoB64}|${audioB64}`,
-        type: video.type || 'video/mp4',
-        extension: video.ext || 'mp4',
-        isPremium: qualityNum > 360,
-        hasAudio: true,
-        isMergedFormat: true
-      });
+  const seenVideoQualities = new Map();
+  const deduplicatedFormats = [];
+  const audioFormats = [];
+
+  // First pass: separate audio formats and deduplicate video formats
+  availableFormats.forEach(format => {
+    if (format.isAudioOnly) {
+      audioFormats.push(format);
+      deduplicatedFormats.push(format);
     } else {
-      // No audio available - use video only
-      qualityOptionsMap.set(uniqueKey, {
-        quality: quality,
-        qualityNum: qualityNum,
-        url: video.url,
-        type: video.type || 'video/mp4',
-        extension: video.ext || 'mp4',
-        isPremium: qualityNum > 360,
-        hasAudio: false
-      });
+      const qualityNum = extractQualityNumber(format.label || '');
+      if (qualityNum === 0) {
+        deduplicatedFormats.push(format);
+        return;
+      }
+      
+      if (!seenVideoQualities.has(qualityNum)) {
+        seenVideoQualities.set(qualityNum, format);
+        deduplicatedFormats.push(format);
+      } else {
+        const existingFormat = seenVideoQualities.get(qualityNum);
+        if (!existingFormat.hasAudio && format.hasAudio) {
+          const index = deduplicatedFormats.findIndex(f => 
+            !f.isAudioOnly && extractQualityNumber(f.label || '') === qualityNum
+          );
+          if (index !== -1) {
+            deduplicatedFormats[index] = format;
+            seenVideoQualities.set(qualityNum, format);
+          }
+        }
+      }
+    }
+  });
+
+  availableFormats = deduplicatedFormats;
+  
+  console.log(`🔄 After deduplication: ${availableFormats.length} formats (${audioFormats.length} audio-only)`);
+  
+  // ========================================
+  // AUTOMATIC AUDIO MERGING FOR VIDEO-ONLY FORMATS
+  // ========================================
+  
+  const mergedFormats = [];
+  
+  availableFormats.forEach(format => {
+    if (format.isVideoOnly && audioFormats.length > 0) {
+      // Find compatible audio for this video format
+      const compatibleAudio = audioMergerService.findCompatibleAudio(format, audioFormats);
+      
+      if (compatibleAudio) {
+        console.log(`🎵 Found audio for ${format.label}: ${compatibleAudio.label}`);
+        
+        // Create merged format entry
+        const mergedFormat = {
+          ...format,
+          // Create special URL that triggers audio merging
+          url: `MERGE:${format.url}:${compatibleAudio.url}`,
+          hasAudio: true, // Mark as having audio now
+          isVideoOnly: false, // No longer video-only
+          isMergedFormat: true, // Flag as merged format
+          originalVideoUrl: format.url,
+          audioUrl: compatibleAudio.url,
+          audioQuality: compatibleAudio.label
+        };
+        
+        mergedFormats.push(mergedFormat);
+        console.log(`✅ Created merged format: ${format.label} + ${compatibleAudio.label}`);
+      } else {
+        // Keep original video-only format if no audio found
+        mergedFormats.push(format);
+      }
+    } else {
+      // Keep original format (already has audio or is audio-only)
+      mergedFormats.push(format);
     }
   });
   
-  // Convert Map to array and sort by quality number
-  const qualityOptions = Array.from(qualityOptionsMap.values());
-  qualityOptions.sort((a, b) => a.qualityNum - b.qualityNum);
+  availableFormats = mergedFormats;
   
-  // Select default (360p or first)
-  const selectedFormat = qualityOptions.find(opt => opt.qualityNum === 360) || qualityOptions[0];
+  console.log(`🎬 After audio merging: ${availableFormats.length} total formats`);
   
-  console.log(`✅ Created ${qualityOptions.length} unique quality options (fully deduplicated)`);
-  console.log(`🎵 Formats with merge: ${qualityOptions.filter(f => f.isMergedFormat).length}`);
+  // Log final formats
+  console.log('🎬 Final available formats:');
+  availableFormats.forEach((format, index) => {
+    const audioStatus = format.isAudioOnly ? '🎵 Audio Only' : 
+                       format.isVideoOnly ? '📹 Video Only' : 
+                       format.isMergedFormat ? '🎬 Merged Video+Audio' :
+                       format.hasAudio ? '🎬 Video+Audio' : '❓ Unknown';
+    console.log(`  ${index + 1}. ${format.label} - ${audioStatus}`);
+  });
   
-  return {
+  // ========================================
+  // CREATE QUALITY OPTIONS WITH PREMIUM FLAGS
+  // ========================================
+  
+  const qualityOptions = availableFormats.map(format => {
+    const quality = format.label || 'unknown';
+    const qualityNum = extractQualityNumber(quality);
+    
+    // Mark as premium: 360p and below are free, above 360p requires premium
+    // Audio-only formats are always free
+    const isPremium = !format.isAudioOnly && qualityNum > 360;
+    
+    return {
+      quality: quality,
+      qualityNum: qualityNum,
+      url: format.url, // This may be a MERGE: URL for merged formats
+      type: format.type || 'video/mp4',
+      extension: format.ext || format.extension || getExtensionFromType(format.type),
+      filesize: format.filesize || 'unknown',
+      isPremium: isPremium,
+      hasAudio: format.hasAudio,
+      isVideoOnly: format.isVideoOnly,
+      isAudioOnly: format.isAudioOnly,
+      // Additional fields for merged formats
+      isMergedFormat: format.isMergedFormat || false,
+      originalVideoUrl: format.originalVideoUrl,
+      audioUrl: format.audioUrl
+    };
+  });
+  
+  // Sort by quality number (ascending), but keep audio-only formats at the end
+  qualityOptions.sort((a, b) => {
+    if (a.isAudioOnly && !b.isAudioOnly) return 1;
+    if (!a.isAudioOnly && b.isAudioOnly) return -1;
+    return a.qualityNum - b.qualityNum;
+  });
+  
+  // Select default format (360p for free users, or highest available if premium)
+  let selectedFormat = qualityOptions.find(opt => !opt.isAudioOnly && opt.qualityNum === 360) || 
+                      qualityOptions.find(opt => !opt.isAudioOnly) || 
+                      qualityOptions[0];
+  
+  // Build result with all quality options
+  const result = {
     title: data.title,
     thumbnail: data.cover,
     duration: data.duration,
@@ -189,10 +287,23 @@ function processYouTubeData(data, url) {
     allFormats: qualityOptions,
     url: selectedFormat.url,
     selectedQuality: selectedFormat,
-    audioGuaranteed: true
+    audioGuaranteed: selectedFormat.hasAudio
   };
+  
+  console.log(`✅ YouTube service completed with ${qualityOptions.length} quality options`);
+  console.log(`📋 Sending formats:`, qualityOptions.map(f => {
+    const type = f.isAudioOnly ? '🎵 Audio' : 
+                 f.isMergedFormat ? '🎬 Merged' :
+                 f.isVideoOnly ? '📹 Video' : '🎬 Video+Audio';
+    return `${f.quality} (${type}, premium: ${f.isPremium})`;
+  }));
+  
+  return result;
 }
 
+/**
+ * Extract quality number from quality label
+ */
 function extractQualityNumber(qualityLabel) {
   if (!qualityLabel) return 0;
   
@@ -211,6 +322,32 @@ function extractQualityNumber(qualityLabel) {
   return 0;
 }
 
+/**
+ * Helper to get file extension from MIME type
+ */
+function getExtensionFromType(mimeType) {
+  if (!mimeType) return 'mp4';
+  
+  const typeMap = {
+    'video/mp4': 'mp4',
+    'video/webm': 'webm',
+    'video/x-flv': 'flv',
+    'audio/mp4': 'm4a',
+    'audio/mpeg': 'mp3',
+    'audio/webm': 'webm',
+    'audio/ogg': 'ogg'
+  };
+  
+  for (const [type, ext] of Object.entries(typeMap)) {
+    if (mimeType.includes(type)) return ext;
+  }
+  
+  return 'mp4';
+}
+
+/**
+ * Get a random user agent to avoid rate limiting
+ */
 function getRandomUserAgent() {
   const userAgents = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.110 Safari/537.36',
