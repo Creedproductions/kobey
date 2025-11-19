@@ -11,10 +11,9 @@ router.post('/download', downloadMedia);
 // GET route to fetch mock data
 router.get('/mock-videos', mockController.getMockVideos);
 
-// Audio merging endpoint - FIXED
 router.get('/merge-audio', async (req, res) => {
   try {
-    const { videoUrl, audioUrl } = req.query;
+    const { videoUrl, audioUrl, title } = req.query;
     
     if (!videoUrl || !audioUrl) {
       return res.status(400).json({
@@ -26,12 +25,14 @@ router.get('/merge-audio', async (req, res) => {
     console.log(`🎬 Starting audio merge request`);
     console.log(`📹 Video URL: ${videoUrl.substring(0, 100)}...`);
     console.log(`🎵 Audio URL: ${audioUrl.substring(0, 100)}...`);
+    console.log(`📝 Title: ${title || 'untitled'}`);
 
-    // Decode URLs if they're encoded
+    // Decode URLs and title
     const decodedVideoUrl = decodeURIComponent(videoUrl);
     const decodedAudioUrl = decodeURIComponent(audioUrl);
+    const decodedTitle = title ? decodeURIComponent(title) : 'video';
 
-    await audioMergerService.merge(decodedVideoUrl, decodedAudioUrl, res);
+    await audioMergerService.merge(decodedVideoUrl, decodedAudioUrl, res, decodedTitle);
 
   } catch (error) {
     console.error('❌ Audio merge failed:', error);
