@@ -1,7 +1,5 @@
 const { spawn } = require("child_process");
 const axios = require("axios");
-const stream = require("stream");
-const { PassThrough } = require("stream");
 
 class AudioMergerService {
     
@@ -39,12 +37,11 @@ class AudioMergerService {
         if (label.includes('medium') || label.includes('192')) return 2;
         if (label.includes('low') || label.includes('128')) return 1;
         
-        // Default to medium
         return 2;
     }
 
     /**
-     * Merge video + audio URLs using FFmpeg with proper streaming
+     * Merge video + audio URLs using FFmpeg with improved error handling
      */
     async merge(videoUrl, audioUrl, res) {
         console.log("🎬 Starting audio merge process");
@@ -78,15 +75,15 @@ class AudioMergerService {
                 method: 'get',
                 url: videoUrl,
                 responseType: 'stream',
-                timeout: 120000,  // 2 minute timeout
+                timeout: 120000,
                 maxContentLength: Infinity,
                 maxBodyLength: Infinity,
                 headers: {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
                     'Accept': '*/*',
                     'Accept-Encoding': 'gzip, deflate, br',
                     'Connection': 'keep-alive',
-                    'Range': 'bytes=0-'  // Support range requests
+                    'Range': 'bytes=0-'
                 }
             });
 
@@ -95,15 +92,15 @@ class AudioMergerService {
                 method: 'get',
                 url: audioUrl,
                 responseType: 'stream',
-                timeout: 120000,  // 2 minute timeout
+                timeout: 120000,
                 maxContentLength: Infinity,
                 maxBodyLength: Infinity,
                 headers: {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
                     'Accept': '*/*',
                     'Accept-Encoding': 'gzip, deflate, br',
                     'Connection': 'keep-alive',
-                    'Range': 'bytes=0-'  // Support range requests
+                    'Range': 'bytes=0-'
                 }
             });
 
@@ -112,40 +109,51 @@ class AudioMergerService {
 
             console.log("🔧 Spawning FFmpeg process...");
             
-            // FFmpeg command with optimized settings for streaming
+            // Optimized FFmpeg command for streaming and merging
             const ffmpegArgs = [
-                '-i', 'pipe:0',                   // Video input from stdin
-                '-i', 'pipe:1',                   // Audio input from pipe:1
-                '-c:v', 'copy',                   // Copy video codec (no re-encoding)
-                '-c:a', 'aac',                    // Audio codec AAC
+                '-i', 'pipe:3',                   // Video from pipe:3 (fd 3)
+                '-i', 'pipe:4',                   // Audio from pipe:4 (fd 4)
+                '-c:v', 'copy',                   // Copy video (no re-encode)
+                '-c:a', 'aac',                    // Encode audio as AAC
                 '-b:a', '192k',                   // Audio bitrate
-                '-ar', '44100',                   // Audio sample rate
-                '-ac', '2',                       // Audio channels (stereo)
+                '-ar', '44100',                   // Sample rate
+                '-ac', '2',                       // Stereo
                 '-map', '0:v:0',                  // Map video from first input
                 '-map', '1:a:0',                  // Map audio from second input
-                '-movflags', 'frag_keyframe+empty_moov+default_base_moof+faststart', // Optimize for streaming
-                '-fflags', '+genpts',            // Generate presentation timestamps
-                '-avoid_negative_ts', 'make_zero', // Handle timestamp issues
-                '-max_muxing_queue_size', '9999', // Increase muxing queue size
-                '-f', 'mp4',                      // Output format
-                '-loglevel', 'warning',           // Log level
-                'pipe:2'                          // Output to pipe:2 (stdout)
+                '-movflags', 'frag_keyframe+empty_moov+faststart',
+                '-fflags', '+genpts',
+                '-avoid_negative_ts', 'make_zero',
+                '-max_muxing_queue_size', '9999',
+                '-threads', '0',                  // Use all CPU cores
+                '-preset', 'ultrafast',           // Fastest preset
+                '-f', 'mp4',
+                '-loglevel', 'info',              // More detailed logging
+                'pipe:1'                          // Output to stdout
             ];
 
             ffmpegProcess = spawn('ffmpeg', ffmpegArgs, {
-                stdio: ['pipe', 'pipe', 'pipe', 'pipe', 'pipe'], // stdin, stdout, stderr, pipe:3, pipe:4
+                stdio: ['ignore', 'pipe', 'pipe', 'pipe', 'pipe'],
                 windowsHide: true
             });
 
-            // Handle FFmpeg stderr (logs)
+            // Enhanced error logging
             let errorBuffer = '';
+            let lastProgressTime = Date.now();
+            
             ffmpegProcess.stderr.on('data', (data) => {
                 const message = data.toString();
                 errorBuffer += message;
-                if (message.toLowerCase().includes('error')) {
-                    console.error('FFmpeg Error:', message);
-                } else {
-                    console.log('FFmpeg Log:', message.substring(0, 200));
+                
+                // Log progress indicators
+                if (message.includes('frame=') || message.includes('time=')) {
+                    const now = Date.now();
+                    if (now - lastProgressTime > 5000) { // Log every 5 seconds
+                        console.log('FFmpeg progress:', message.substring(0, 100));
+                        lastProgressTime = now;
+                    }
+                } else if (message.toLowerCase().includes('error') || 
+                          message.toLowerCase().includes('warning')) {
+                    console.error('FFmpeg:', message.substring(0, 200));
                 }
             });
 
@@ -154,11 +162,13 @@ class AudioMergerService {
                 if (!hasError) {
                     hasError = true;
                     console.error('❌ FFmpeg process error:', error.message);
+                    console.error('FFmpeg error buffer:', errorBuffer.substring(0, 500));
                     this.cleanup(videoStream, audioStream, ffmpegProcess);
                     if (!res.headersSent) {
                         res.status(500).json({ 
                             error: 'FFmpeg process failed', 
-                            details: error.message 
+                            details: error.message,
+                            ffmpegOutput: errorBuffer.substring(0, 500)
                         });
                     }
                 }
@@ -166,17 +176,19 @@ class AudioMergerService {
 
             // Handle FFmpeg exit
             ffmpegProcess.on('exit', (code, signal) => {
+                console.log(`FFmpeg exited with code ${code}, signal: ${signal}`);
+                
                 if (code === 0) {
                     console.log('✅ Audio merge completed successfully');
                 } else if (!hasError && code !== null) {
                     hasError = true;
-                    console.error(`❌ FFmpeg exited with code ${code}, signal: ${signal}`);
+                    console.error(`❌ FFmpeg failed with code ${code}`);
                     console.error('FFmpeg error output:', errorBuffer);
                     if (!res.headersSent) {
                         res.status(500).json({ 
                             error: 'Merge failed', 
                             code: code,
-                            details: errorBuffer
+                            details: errorBuffer.substring(0, 500)
                         });
                     }
                 }
@@ -201,30 +213,17 @@ class AudioMergerService {
             videoStream.on('error', handleStreamError('Video'));
             audioStream.on('error', handleStreamError('Audio'));
 
-            // Handle stdin close
-            ffmpegProcess.stdin.on('error', (error) => {
-                if (!hasError && !error.message.includes('EPIPE')) {
-                    console.error('FFmpeg stdin error:', error.message);
-                }
-            });
-
-            ffmpegProcess.stdio[1].on('error', (error) => {
-                if (!hasError && !error.message.includes('EPIPE')) {
-                    console.error('FFmpeg audio pipe error:', error.message);
-                }
-            });
-
-            // Pipe video to FFmpeg stdin
+            // Pipe video to FFmpeg pipe:3 (fd 3)
             console.log("📤 Piping video stream to FFmpeg...");
-            videoStream.pipe(ffmpegProcess.stdin);
+            videoStream.pipe(ffmpegProcess.stdio[3]);
 
-            // Pipe audio to FFmpeg pipe:1
+            // Pipe audio to FFmpeg pipe:4 (fd 4)
             console.log("📤 Piping audio stream to FFmpeg...");
-            audioStream.pipe(ffmpegProcess.stdio[1]);
+            audioStream.pipe(ffmpegProcess.stdio[4]);
 
             // Pipe FFmpeg output to response
             console.log("📤 Piping FFmpeg output to response...");
-            ffmpegProcess.stdio[2].pipe(res);
+            ffmpegProcess.stdout.pipe(res);
 
             // Handle response errors
             res.on('error', (error) => {
@@ -241,17 +240,25 @@ class AudioMergerService {
                 this.cleanup(videoStream, audioStream, ffmpegProcess);
             });
 
-            // Monitor progress
+            // Monitor first data chunk
             let dataReceived = false;
-            ffmpegProcess.stdio[2].on('data', () => {
-                if (!dataReceived) {
-                    dataReceived = true;
-                    console.log('✅ Started sending merged video data to client');
-                }
+            ffmpegProcess.stdout.once('data', () => {
+                dataReceived = true;
+                console.log('✅ Started sending merged video data to client');
             });
+
+            // Timeout check for first data
+            setTimeout(() => {
+                if (!dataReceived && !hasError) {
+                    console.warn('⚠️ No data received from FFmpeg after 30 seconds');
+                    console.warn('FFmpeg output:', errorBuffer.substring(0, 500));
+                }
+            }, 30000);
 
         } catch (error) {
             console.error('❌ Merge setup failed:', error.message);
+            console.error('Error stack:', error.stack);
+            
             this.cleanup(
                 videoResponse?.data, 
                 audioResponse?.data, 
@@ -261,7 +268,8 @@ class AudioMergerService {
             if (!res.headersSent) {
                 res.status(500).json({ 
                     error: 'Audio merge failed', 
-                    details: error.message 
+                    details: error.message,
+                    stack: error.stack
                 });
             }
             
@@ -295,9 +303,10 @@ class AudioMergerService {
             if (ffmpegProcess && !ffmpegProcess.killed) {
                 ffmpegProcess.kill('SIGTERM');
                 
-                // Force kill after 2 seconds if still running
+                // Force kill after 2 seconds
                 setTimeout(() => {
                     if (ffmpegProcess && !ffmpegProcess.killed) {
+                        console.warn('Force killing FFmpeg process');
                         ffmpegProcess.kill('SIGKILL');
                     }
                 }, 2000);
