@@ -276,39 +276,23 @@ const platformDownloaders = {
     return await universalDownload(url);
   },
 
-  // Add this to your platformDownloaders object
+  // In platformDownloaders object:
 async douyin(url) {
   try {
-    console.log('🎵 Douyin: Processing URL...');
+    console.log('🎵 Douyin: Using universal downloader...');
     
-    // Method 1: Use TikTok service (most reliable)
-    const { ttdl } = require('btch-downloader');
-    const data = await downloadWithTimeout(() => ttdl(url));
+    // Directly use universal downloader with timeout
+    const data = await downloadWithTimeout(() => universalDownload(url));
     
-    if (!data || !data.video) {
-      throw new Error('TikTok service returned invalid data for Douyin');
+    if (!data || !data.url) {
+      throw new Error('No download URL received');
     }
     
-    return {
-      title: data.title || 'Douyin Video',
-      video: data.video[0] || data.video,
-      thumbnail: data.thumbnail || '',
-      audio: data.audio ? data.audio[0] : null,
-      duration: data.duration || 0
-    };
+    return data;
     
   } catch (error) {
-    console.error(`❌ Douyin primary method failed: ${error.message}`);
-    
-    // Method 2: Fallback to universal downloader
-    try {
-      console.log('🔄 Trying universal downloader for Douyin...');
-      const fallbackData = await downloadWithTimeout(() => universalDownload(url));
-      return fallbackData;
-    } catch (fallbackError) {
-      console.error(`❌ Douyin fallback also failed: ${fallbackError.message}`);
-      throw new Error(`Douyin download failed: ${error.message}`);
-    }
+    console.error(`❌ Douyin download failed: ${error.message}`);
+    throw new Error(`Douyin: ${error.message}`);
   }
 },
 
