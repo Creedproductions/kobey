@@ -276,9 +276,41 @@ const platformDownloaders = {
     return await universalDownload(url);
   },
 
-  async douyin(url) {
-    return await universalDownload(url);
-  },
+  // Add this to your platformDownloaders object
+async douyin(url) {
+  try {
+    console.log('🎵 Douyin: Processing URL...');
+    
+    // Method 1: Use TikTok service (most reliable)
+    const { ttdl } = require('btch-downloader');
+    const data = await downloadWithTimeout(() => ttdl(url));
+    
+    if (!data || !data.video) {
+      throw new Error('TikTok service returned invalid data for Douyin');
+    }
+    
+    return {
+      title: data.title || 'Douyin Video',
+      video: data.video[0] || data.video,
+      thumbnail: data.thumbnail || '',
+      audio: data.audio ? data.audio[0] : null,
+      duration: data.duration || 0
+    };
+    
+  } catch (error) {
+    console.error(`❌ Douyin primary method failed: ${error.message}`);
+    
+    // Method 2: Fallback to universal downloader
+    try {
+      console.log('🔄 Trying universal downloader for Douyin...');
+      const fallbackData = await downloadWithTimeout(() => universalDownload(url));
+      return fallbackData;
+    } catch (fallbackError) {
+      console.error(`❌ Douyin fallback also failed: ${fallbackError.message}`);
+      throw new Error(`Douyin download failed: ${error.message}`);
+    }
+  }
+},
 
   async twitch(url) {
     return await universalDownload(url);
@@ -480,7 +512,28 @@ const dataFormatters = {
   vimeo(data) { return dataFormatters.universal(data); },
   dailymotion(data) { return dataFormatters.universal(data); },
   streamable(data) { return dataFormatters.universal(data); },
-  douyin(data) { return dataFormatters.universal(data); },
+  douyin(data) {
+  // Handle data from TikTok service
+  if (data.video) {
+    return {
+      title: data.title || 'Douyin Video',
+      url: Array.isArray(data.video) ? data.video[0] : data.video,
+      thumbnail: data.thumbnail || PLACEHOLDER_THUMBNAIL,
+      sizes: ['Original Quality'],
+      source: 'douyin',
+      audio: data.audio ? (Array.isArray(data.audio) ? data.audio[0] : data.audio) : null
+    };
+  }
+  
+  // Handle data from universal downloader
+  return {
+    title: data.title || 'Douyin Video',
+    url: data.url,
+    thumbnail: data.thumbnail || PLACEHOLDER_THUMBNAIL,
+    sizes: data.sizes || ['Original Quality'],
+    source: 'douyin'
+  };
+},
   twitch(data) { return dataFormatters.universal(data); }
 };
 
