@@ -180,14 +180,118 @@ async function downloadStreamable(url) {
   }
 }
 
-// Douyin (use existing TikTok service as fallback)
+// Douyin downloader using TikTok service
 async function downloadDouyin(url) {
   try {
-    // Douyin shares similar structure with TikTok
-    // For now, return error - user should use TikTok downloader
-    throw new Error('Douyin requires TikTok service - please use TikTok downloader');
+    console.log('🎵 Processing Douyin URL...');
+    
+    // Since Douyin is Chinese TikTok, use the same service
+    const { ttdl } = require('btch-downloader');
+    
+    // Convert Douyin URL to standard format if needed
+    let processedUrl = url;
+    if (url.includes('v.douyin.com')) {
+      // Follow the redirect to get the actual video URL
+      try {
+        const response = await axios.get(url, {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X) AppleWebKit/605.1.15',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+          },
+          maxRedirects: 5,
+          timeout: 10000
+        });
+        processedUrl = response.request.res.responseUrl || url;
+      } catch (redirectError) {
+        console.log('⚠️ Could not resolve Douyin redirect, using original URL');
+      }
+    }
+    
+    console.log('🔄 Using TikTok service for Douyin download...');
+    const data = await ttdl(processedUrl);
+    
+    if (!data || !data.video) {
+      throw new Error('No video data found');
+    }
+    
+    return {
+      title: data.title || 'Douyin Video',
+      url: data.video[0] || data.video,
+      thumbnail: data.thumbnail || '',
+      sizes: ['Original Quality'],
+      source: 'douyin',
+      audio: data.audio ? data.audio[0] : null
+    };
+    
   } catch (error) {
-    throw new Error(`Douyin: ${error.message}`);
+    console.error(`❌ Douyin download failed: ${error.message}`);
+    
+    // Alternative method: Try to extract video directly
+    try {
+      console.log('🔄 Trying alternative Douyin download method...');
+      const alternativeData = await downloadDouyinAlternative(url);
+      if (alternativeData) {
+        return alternativeData;
+      }
+    } catch (altError) {
+      console.log(`⚠️ Alternative method also failed: ${altError.message}`);
+    }
+    
+    throw new Error(`Douyin download failed: ${error.message}`);
+  }
+}
+
+// Alternative Douyin download method
+async function downloadDouyinAlternative(url) {
+  try {
+    // Use axios to get the page and extract video URL
+    const response = await axios.get(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X) AppleWebKit/605.1.15',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'zh-CN,zh;q=0.9',
+        'Referer': 'https://www.douyin.com/'
+      },
+      timeout: 15000
+    });
+    
+    const html = response.data;
+    
+    // Try to find video URL in the HTML
+    const videoUrlMatch = html.match(/"playAddr":\s*"([^"]+)"/) || 
+                         html.match(/src="([^"]+\.mp4[^"]*)"/) ||
+                         html.match(/video_url[^=]*=\s*"([^"]+)"/);
+    
+    if (videoUrlMatch && videoUrlMatch[1]) {
+      let videoUrl = videoUrlMatch[1].replace(/\\u002F/g, '/');
+      
+      // Ensure URL is absolute
+      if (videoUrl.startsWith('//')) {
+        videoUrl = 'https:' + videoUrl;
+      } else if (videoUrl.startsWith('/')) {
+        videoUrl = 'https://www.douyin.com' + videoUrl;
+      }
+      
+      // Try to find title
+      const titleMatch = html.match(/desc[^>]*>([^<]+)</) || 
+                        html.match(/title[^>]*>([^<]+)</) ||
+                        html.match(/"desc":\s*"([^"]+)"/);
+      
+      const title = titleMatch ? titleMatch[1].substring(0, 100) : 'Douyin Video';
+      
+      return {
+        title: title,
+        url: videoUrl,
+        thumbnail: '',
+        sizes: ['Original Quality'],
+        source: 'douyin'
+      };
+    }
+    
+    throw new Error('Could not extract video URL from page');
+    
+  } catch (error) {
+    throw new Error(`Alternative method: ${error.message}`);
   }
 }
 
