@@ -2,6 +2,10 @@
   "name": "downloader-api",
   "version": "1.0.0",
   "main": "App.js",
+  "engines": {
+    "node": "20.x",
+    "npm": "10.x"
+  },
   "scripts": {
     "start": "node App.js",
     "dev": "nodemon App.js",
