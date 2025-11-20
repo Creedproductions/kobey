@@ -1,62 +1,72 @@
-const ytdl = require('@distube/ytdl-core');
+const youtubedl = require('youtube-dl-exec');
+const axios = require('axios');
 
 async function fetchYouTubeData(url) {
-  console.log('🎬 YouTube: Starting download with @distube/ytdl-core');
+  console.log('🎬 YouTube: Processing with youtube-dl-exec');
   
   try {
-    const info = await ytdl.getInfo(url);
-    
-    // Get ALL formats with both video and audio
-    const videoAndAudioFormats = ytdl.filterFormats(info.formats, 'videoandaudio');
-    
-    if (videoAndAudioFormats.length === 0) {
-      throw new Error('No formats with audio available');
+    // Get video info with formats
+    const info = await youtubedl(url, {
+      dumpSingleJson: true,
+      noCheckCertificates: true,
+      noWarnings: true,
+      preferFreeFormats: true,
+      addHeader: ['referer:youtube.com', 'user-agent:googlebot']
+    });
+
+    if (!info || !info.title) {
+      throw new Error('Could not fetch video info');
     }
 
-    // Process and sort formats
-    const processedFormats = videoAndAudioFormats
-      .filter(f => f.hasVideo && f.hasAudio)
+    // Filter formats with both video and audio
+    const videoFormats = (info.formats || [])
+      .filter(f => {
+        const hasVideo = f.vcodec && f.vcodec !== 'none';
+        const hasAudio = f.acodec && f.acodec !== 'none';
+        const hasUrl = f.url && f.url.length > 0;
+        return hasVideo && hasAudio && hasUrl;
+      })
       .map(format => {
-        const quality = format.qualityLabel || format.quality || 'unknown';
-        const qualityNum = parseInt(quality.replace('p', '')) || 0;
+        const height = format.height || 0;
+        const quality = height > 0 ? `${height}p` : (format.format_note || 'unknown');
         
         return {
           quality: `mp4 (${quality})`,
-          qualityNum: qualityNum,
+          qualityNum: height,
           url: format.url,
-          type: format.mimeType?.split(';')[0] || 'video/mp4',
-          extension: format.container || 'mp4',
-          isPremium: qualityNum > 360,
+          type: format.ext === 'mp4' ? 'video/mp4' : 'video/webm',
+          extension: format.ext || 'mp4',
+          isPremium: height > 360,
           hasAudio: true,
-          filesize: format.contentLength || 'unknown',
-          bitrate: format.bitrate || 0
+          filesize: format.filesize || 'unknown'
         };
       })
+      .filter(f => f.qualityNum > 0)
       .sort((a, b) => a.qualityNum - b.qualityNum);
 
-    if (processedFormats.length === 0) {
-      throw new Error('No valid video formats found');
+    if (videoFormats.length === 0) {
+      throw new Error('No suitable video formats found');
     }
 
-    // Select default quality (360p or first available)
-    const defaultFormat = processedFormats.find(f => f.qualityNum === 360) || 
-                         processedFormats.find(f => f.qualityNum <= 480) ||
-                         processedFormats[0];
+    // Select default format (360p or closest)
+    const defaultFormat = videoFormats.find(f => f.qualityNum === 360) ||
+                         videoFormats.find(f => f.qualityNum >= 240 && f.qualityNum <= 480) ||
+                         videoFormats[0];
 
     const result = {
-      title: info.videoDetails.title,
-      thumbnail: info.videoDetails.thumbnails[info.videoDetails.thumbnails.length - 1]?.url || '',
-      duration: info.videoDetails.lengthSeconds,
-      formats: processedFormats,
-      allFormats: processedFormats,
+      title: info.title,
+      thumbnail: info.thumbnail || '',
+      duration: info.duration || 0,
+      formats: videoFormats,
+      allFormats: videoFormats,
       url: defaultFormat.url,
       selectedQuality: defaultFormat,
       audioGuaranteed: true
     };
 
-    console.log(`✅ YouTube: Found ${processedFormats.length} formats with audio`);
+    console.log(`✅ YouTube: Found ${videoFormats.length} formats with audio`);
     return result;
-    
+
   } catch (error) {
     console.error('❌ YouTube error:', error.message);
     throw new Error(`YouTube download failed: ${error.message}`);
