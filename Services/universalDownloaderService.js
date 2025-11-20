@@ -1,16 +1,13 @@
 const axios = require('axios');
 const { Downloader } = require('@tobyg74/tiktok-api-dl');
-const savefrom = require('savefrom-api');
 
 async function universalDownload(url) {
   const platform = identifyPlatform(url);
   console.log(`🌐 Universal downloader: ${platform}`);
   
   try {
-    // Try multiple downloaders in sequence
     let result = null;
     
-    // Method 1: Specific platform handlers
     if (platform === 'douyin') {
       result = await downloadDouyin(url);
     } else if (platform === 'reddit') {
@@ -24,8 +21,7 @@ async function universalDownload(url) {
     } else if (platform === 'twitch') {
       result = await downloadTwitch(url);
     } else {
-      // Method 2: Universal API fallback
-      result = await downloadWithSavefrom(url);
+      result = await downloadGenericVideo(url);
     }
     
     if (result && result.url) {
@@ -40,12 +36,10 @@ async function universalDownload(url) {
   }
 }
 
-// Douyin (Chinese TikTok) downloader
+// Douyin (Chinese TikTok)
 async function downloadDouyin(url) {
   try {
-    const result = await Downloader(url, {
-      version: "v1"
-    });
+    const result = await Downloader(url, { version: "v1" });
     
     if (result.status === 'success' && result.result) {
       return {
@@ -62,34 +56,16 @@ async function downloadDouyin(url) {
   }
 }
 
-// Reddit video downloader
+// Reddit
 async function downloadReddit(url) {
   try {
-    const response = await axios.get(`https://www.reddit.com/oembed?url=${encodeURIComponent(url)}`);
-    
-    if (response.data && response.data.thumbnail_url) {
-      // Extract video ID and construct download URL
-      const videoMatch = url.match(/comments\/([a-z0-9]+)/i);
-      if (videoMatch) {
-        const videoId = videoMatch[1];
-        const videoUrl = `https://v.redd.it/${videoId}/DASH_720.mp4`;
-        
-        return {
-          title: response.data.title || 'Reddit Video',
-          url: videoUrl,
-          thumbnail: response.data.thumbnail_url,
-          sizes: ['720p', '480p', '360p'],
-          source: 'reddit'
-        };
-      }
-    }
-    
-    // Fallback: try direct API
     const apiUrl = url.replace('www.reddit.com', 'www.reddit.com') + '.json';
-    const apiResponse = await axios.get(apiUrl);
+    const response = await axios.get(apiUrl, {
+      headers: { 'User-Agent': 'Mozilla/5.0' }
+    });
     
-    if (apiResponse.data && apiResponse.data[0]?.data?.children?.[0]?.data) {
-      const postData = apiResponse.data[0].data.children[0].data;
+    if (response.data && response.data[0]?.data?.children?.[0]?.data) {
+      const postData = response.data[0].data.children[0].data;
       const videoData = postData.secure_media?.reddit_video || postData.media?.reddit_video;
       
       if (videoData?.fallback_url) {
@@ -109,23 +85,25 @@ async function downloadReddit(url) {
   }
 }
 
-// Vimeo downloader
+// Vimeo
 async function downloadVimeo(url) {
   try {
     const videoId = url.match(/vimeo\.com\/(\d+)/)?.[1];
     if (!videoId) throw new Error('Invalid Vimeo URL');
     
-    const response = await axios.get(`https://player.vimeo.com/video/${videoId}/config`);
+    const response = await axios.get(`https://player.vimeo.com/video/${videoId}/config`, {
+      headers: { 'User-Agent': 'Mozilla/5.0' }
+    });
     
     if (response.data?.request?.files?.progressive) {
       const files = response.data.request.files.progressive;
-      const bestQuality = files.sort((a, b) => b.width - a.width)[0];
+      const bestQuality = files.sort((a, b) => (b.width || 0) - (a.width || 0))[0];
       
       return {
         title: response.data.video?.title || 'Vimeo Video',
         url: bestQuality.url,
         thumbnail: response.data.video?.thumbs?.base || '',
-        sizes: files.map(f => `${f.quality}`),
+        sizes: files.map(f => `${f.quality || f.width}p`),
         source: 'vimeo'
       };
     }
@@ -136,13 +114,15 @@ async function downloadVimeo(url) {
   }
 }
 
-// Dailymotion downloader
+// Dailymotion
 async function downloadDailymotion(url) {
   try {
     const videoId = url.match(/video\/([a-z0-9]+)/i)?.[1];
     if (!videoId) throw new Error('Invalid Dailymotion URL');
     
-    const response = await axios.get(`https://api.dailymotion.com/video/${videoId}?fields=title,thumbnail_url,stream_h264_hd_url,stream_h264_url`);
+    const response = await axios.get(`https://api.dailymotion.com/video/${videoId}?fields=title,thumbnail_url,stream_h264_hd_url,stream_h264_url`, {
+      headers: { 'User-Agent': 'Mozilla/5.0' }
+    });
     
     if (response.data) {
       return {
@@ -160,13 +140,15 @@ async function downloadDailymotion(url) {
   }
 }
 
-// Streamable downloader
+// Streamable
 async function downloadStreamable(url) {
   try {
     const videoId = url.match(/streamable\.com\/([a-z0-9]+)/i)?.[1];
     if (!videoId) throw new Error('Invalid Streamable URL');
     
-    const response = await axios.get(`https://api.streamable.com/videos/${videoId}`);
+    const response = await axios.get(`https://api.streamable.com/videos/${videoId}`, {
+      headers: { 'User-Agent': 'Mozilla/5.0' }
+    });
     
     if (response.data?.files) {
       const mp4 = response.data.files.mp4 || response.data.files.mp4_mobile;
@@ -186,60 +168,95 @@ async function downloadStreamable(url) {
   }
 }
 
-// Twitch clips downloader
+// Twitch Clips
 async function downloadTwitch(url) {
   try {
     if (!url.includes('clips.twitch.tv') && !url.includes('/clip/')) {
       throw new Error('Only Twitch clips are supported');
     }
     
-    const clipId = url.match(/clips\.twitch\.tv\/([a-zA-Z0-9_-]+)|clip\/([a-zA-Z0-9_-]+)/)?.[1] || 
-                    url.match(/clips\.twitch\.tv\/([a-zA-Z0-9_-]+)|clip\/([a-zA-Z0-9_-]+)/)?.[2];
+    const clipSlug = url.match(/clips\.twitch\.tv\/([a-zA-Z0-9_-]+)|clip\/([a-zA-Z0-9_-]+)/)?.[1] || 
+                      url.match(/clips\.twitch\.tv\/([a-zA-Z0-9_-]+)|clip\/([a-zA-Z0-9_-]+)/)?.[2];
     
-    if (!clipId) throw new Error('Invalid Twitch clip URL');
+    if (!clipSlug) throw new Error('Invalid Twitch clip URL');
     
-    // Use Twitch embed URL to get video data
-    const embedUrl = `https://clips.twitch.tv/embed?clip=${clipId}`;
-    const response = await axios.get(embedUrl);
+    // Use Twitch GQL API
+    const response = await axios.post('https://gql.twitch.tv/gql', {
+      query: `{
+        clip(slug: "${clipSlug}") {
+          title
+          thumbnailURL
+          videoQualities {
+            quality
+            sourceURL
+          }
+        }
+      }`
+    }, {
+      headers: {
+        'Client-ID': 'kimne78kx3ncx6brgo4mv6wki5h1ko',
+        'User-Agent': 'Mozilla/5.0'
+      }
+    });
     
-    // Extract video URL from embed page
-    const videoMatch = response.data.match(/"clipURL":"([^"]+)"/);
-    if (videoMatch) {
+    if (response.data?.data?.clip) {
+      const clip = response.data.data.clip;
+      const qualities = clip.videoQualities || [];
+      const bestQuality = qualities[0];
+      
       return {
-        title: 'Twitch Clip',
-        url: videoMatch[1].replace(/\\u002F/g, '/'),
-        thumbnail: '',
-        sizes: ['Original Quality'],
+        title: clip.title || 'Twitch Clip',
+        url: bestQuality?.sourceURL || '',
+        thumbnail: clip.thumbnailURL || '',
+        sizes: qualities.map(q => q.quality),
         source: 'twitch'
       };
     }
     
-    throw new Error('Could not extract video URL');
+    throw new Error('Could not fetch clip data');
   } catch (error) {
     throw new Error(`Twitch: ${error.message}`);
   }
 }
 
-// Universal fallback using savefrom-api
-async function downloadWithSavefrom(url) {
+// Generic video extractor (fallback)
+async function downloadGenericVideo(url) {
   try {
-    const result = await savefrom.download(url);
+    // Try to find video tags in HTML
+    const response = await axios.get(url, {
+      headers: { 'User-Agent': 'Mozilla/5.0' },
+      timeout: 10000
+    });
     
-    if (result && result.data && result.data.length > 0) {
-      const bestQuality = result.data.sort((a, b) => (b.quality || 0) - (a.quality || 0))[0];
-      
+    const html = response.data;
+    
+    // Look for Open Graph video
+    const ogVideoMatch = html.match(/<meta[^>]*property=["']og:video["'][^>]*content=["']([^"']+)["']/i);
+    if (ogVideoMatch) {
       return {
-        title: result.title || 'Universal Download',
-        url: bestQuality.url,
-        thumbnail: result.thumbnail || '',
-        sizes: result.data.map(d => d.quality || 'Original'),
-        source: identifyPlatform(url)
+        title: 'Video Download',
+        url: ogVideoMatch[1],
+        thumbnail: '',
+        sizes: ['Original Quality'],
+        source: 'universal'
       };
     }
     
-    throw new Error('Savefrom API returned no data');
+    // Look for video tags
+    const videoMatch = html.match(/<video[^>]*src=["']([^"']+)["']/i);
+    if (videoMatch) {
+      return {
+        title: 'Video Download',
+        url: videoMatch[1],
+        thumbnail: '',
+        sizes: ['Original Quality'],
+        source: 'universal'
+      };
+    }
+    
+    throw new Error('No video found on page');
   } catch (error) {
-    throw new Error(`Savefrom: ${error.message}`);
+    throw new Error(`Generic: ${error.message}`);
   }
 }
 
