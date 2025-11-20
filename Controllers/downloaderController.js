@@ -10,14 +10,16 @@ const { advancedThreadsDownloader } = require('../Services/advancedThreadsServic
 const fetchLinkedinData = require('../Services/linkedinService');
 const facebookInsta = require('../Services/facebookInstaService');
 const { downloadTwmateData } = require('../Services/twitterService');
-const { fetchYouTubeData } = require('../Services/youtubeServiceNew');
+const { fetchYouTubeData } = require('../Services/youtubeService');
 const { universalDownload } = require('../Services/universalDownloaderService');
 
 const bitly = new BitlyClient(config.BITLY_ACCESS_TOKEN);
 
 const SUPPORTED_PLATFORMS = [
-  'instagram', 'tiktok', 'facebook', 'twitter', 'youtube', 'pinterest', 'threads', 'linkedin',
-  'douyin', 'reddit', 'vimeo', 'dailymotion', 'streamable', 'twitch', 'pornhub', 'xvideos',
+  'instagram', 'tiktok', 'facebook', 'twitter',
+  'youtube', 'pinterest', 'threads', 'linkedin',
+  'reddit', 'vimeo', 'dailymotion', 'streamable',
+  'douyin', 'twitch', 'pornhub', 'xvideos',
   'likee', 'kwai', 'snapchat', '9gag', 'imgur', 'tumblr', 'universal'
 ];
 
@@ -48,12 +50,12 @@ const identifyPlatform = (url) => {
     'threads.net': 'threads',
     'threads.com': 'threads',
     'linkedin.com': 'linkedin',
-    'douyin.com': 'douyin',
     'reddit.com': 'reddit',
     'redd.it': 'reddit',
     'vimeo.com': 'vimeo',
     'dailymotion.com': 'dailymotion',
     'streamable.com': 'streamable',
+    'douyin.com': 'douyin',
     'twitch.tv': 'twitch',
     'pornhub.com': 'universal',
     'xvideos.com': 'universal',
@@ -61,7 +63,8 @@ const identifyPlatform = (url) => {
     'kwai.com': 'universal',
     '9gag.com': 'universal',
     'imgur.com': 'universal',
-    'tumblr.com': 'universal'
+    'tumblr.com': 'universal',
+    'snapchat.com': 'universal'
   };
 
   for (const [domain, platform] of Object.entries(platformMap)) {
@@ -198,10 +201,6 @@ const platformDownloaders = {
     return data;
   },
 
-  async douyin(url) {
-    return await universalDownload(url);
-  },
-
   async reddit(url) {
     return await universalDownload(url);
   },
@@ -215,6 +214,10 @@ const platformDownloaders = {
   },
 
   async streamable(url) {
+    return await universalDownload(url);
+  },
+
+  async douyin(url) {
     return await universalDownload(url);
   },
 
@@ -389,7 +392,7 @@ const dataFormatters = {
 
   universal(data) {
     return {
-      title: data.title || 'Universal Download',
+      title: data.title || 'Video Download',
       url: data.url,
       thumbnail: data.thumbnail || PLACEHOLDER_THUMBNAIL,
       sizes: data.sizes || ['Original Quality'],
@@ -397,11 +400,11 @@ const dataFormatters = {
     };
   },
 
-  douyin(data) { return dataFormatters.universal(data); },
   reddit(data) { return dataFormatters.universal(data); },
   vimeo(data) { return dataFormatters.universal(data); },
   dailymotion(data) { return dataFormatters.universal(data); },
   streamable(data) { return dataFormatters.universal(data); },
+  douyin(data) { return dataFormatters.universal(data); },
   twitch(data) { return dataFormatters.universal(data); }
 };
 
