@@ -1,89 +1,39 @@
-// ===== DEPENDENCIES =====
 const { ttdl, twitter } = require('btch-downloader');
 const { igdl } = require('btch-downloader');
 const { pinterest } = require('ironman-api');
 const { BitlyClient } = require('bitly');
 const axios = require('axios');
-const { ytdl, pindl } = require('jer-api');
-const fetch = require('node-fetch');
+const { pindl } = require('jer-api');
 
-// Local services
 const config = require('../Config/config');
 const { advancedThreadsDownloader } = require('../Services/advancedThreadsService');
 const fetchLinkedinData = require('../Services/linkedinService');
 const facebookInsta = require('../Services/facebookInstaService');
 const { downloadTwmateData } = require('../Services/twitterService');
-const { fetchYouTubeData } = require('../Services/youtubeService');
+const { fetchYouTubeData } = require('../Services/youtubeServiceNew');
+const { universalDownload } = require('../Services/universalDownloaderService');
 
-// Initialize external services
 const bitly = new BitlyClient(config.BITLY_ACCESS_TOKEN);
 
-// ===== CONSTANTS =====
 const SUPPORTED_PLATFORMS = [
-  'instagram', 'tiktok', 'facebook', 'twitter',
-  'youtube', 'pinterest', 'threads', 'linkedin'
+  'instagram', 'tiktok', 'facebook', 'twitter', 'youtube', 'pinterest', 'threads', 'linkedin',
+  'douyin', 'reddit', 'vimeo', 'dailymotion', 'streamable', 'twitch', 'pornhub', 'xvideos',
+  'likee', 'kwai', 'snapchat', '9gag', 'imgur', 'tumblr', 'universal'
 ];
 
 const PLACEHOLDER_THUMBNAIL = 'https://via.placeholder.com/300x150';
 const DOWNLOAD_TIMEOUT = 45000;
 
-// ===== UTILITY FUNCTIONS =====
-
-const shortenUrl = async (url) => {
-  if (!url || url.length < 200) {
-    return url;
-  }
-
-  try {
-    const tinyResponse = await axios.post('https://tinyurl.com/api-create.php', null, {
-      params: { url },
-      timeout: 5000
-    });
-
-    if (tinyResponse.data && tinyResponse.data.startsWith('https://tinyurl.com/')) {
-      console.log('URL shortened with TinyURL');
-      return tinyResponse.data;
-    }
-  } catch (error) {
-    console.warn('TinyURL shortening failed:', error.message);
-  }
-
-  try {
-    const isgdResponse = await axios.get('https://is.gd/create.php', {
-      params: {
-        format: 'simple',
-        url: url
-      },
-      timeout: 5000
-    });
-
-    if (isgdResponse.data && isgdResponse.data.startsWith('https://is.gd/')) {
-      console.log('URL shortened with is.gd');
-      return isgdResponse.data;
-    }
-  } catch (error) {
-    console.warn('is.gd shortening failed:', error.message);
-  }
-
-  if (config.BITLY_ACCESS_TOKEN) {
-    try {
-      const bitlyResponse = await bitly.shorten(url);
-      if (bitlyResponse && bitlyResponse.link) {
-        console.log('URL shortened with Bitly');
-        return bitlyResponse.link;
-      }
-    } catch (error) {
-      console.warn('Bitly shortening failed:', error.message);
-    }
-  }
-
-  console.log('URL shortening failed, using original URL');
-  return url;
+const downloadWithTimeout = (downloadFunction, timeout = DOWNLOAD_TIMEOUT) => {
+  return Promise.race([
+    downloadFunction(),
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error('Download timeout - operation took too long')), timeout)
+    )
+  ]);
 };
 
 const identifyPlatform = (url) => {
-  console.info("Platform Identification: Determining the platform for the given URL.");
-
   const platformMap = {
     'instagram.com': 'instagram',
     'tiktok.com': 'tiktok',
@@ -97,7 +47,21 @@ const identifyPlatform = (url) => {
     'pin.it': 'pinterest',
     'threads.net': 'threads',
     'threads.com': 'threads',
-    'linkedin.com': 'linkedin'
+    'linkedin.com': 'linkedin',
+    'douyin.com': 'douyin',
+    'reddit.com': 'reddit',
+    'redd.it': 'reddit',
+    'vimeo.com': 'vimeo',
+    'dailymotion.com': 'dailymotion',
+    'streamable.com': 'streamable',
+    'twitch.tv': 'twitch',
+    'pornhub.com': 'universal',
+    'xvideos.com': 'universal',
+    'likee.video': 'universal',
+    'kwai.com': 'universal',
+    '9gag.com': 'universal',
+    'imgur.com': 'universal',
+    'tumblr.com': 'universal'
   };
 
   for (const [domain, platform] of Object.entries(platformMap)) {
@@ -106,66 +70,35 @@ const identifyPlatform = (url) => {
     }
   }
 
-  console.warn("Platform Identification: Unable to identify the platform.");
-  return null;
+  return 'universal';
 };
 
 const normalizeYouTubeUrl = (url) => {
   let cleanUrl = url.split('#')[0];
-
   const shortsRegex = /youtube\.com\/shorts\/([a-zA-Z0-9_-]+)/;
   const shortsMatch = cleanUrl.match(shortsRegex);
   if (shortsMatch) {
     return `https://www.youtube.com/shorts/${shortsMatch[1]}`;
   }
-
   const shortRegex = /youtu\.be\/([a-zA-Z0-9_-]+)/;
   const shortMatch = cleanUrl.match(shortRegex);
   if (shortMatch) {
     return `https://www.youtube.com/watch?v=${shortMatch[1]}`;
   }
-
   return cleanUrl;
 };
 
 const validateUrl = (url) => {
-  if (!url) {
-    return { isValid: false, error: 'No URL provided' };
-  }
-
-  if (typeof url !== 'string' || url.trim().length === 0) {
+  if (!url || typeof url !== 'string' || url.trim().length === 0) {
     return { isValid: false, error: 'Invalid URL format' };
   }
-
-  const cleanedUrl = url.trim();
-
   try {
-    new URL(cleanedUrl);
+    new URL(url.trim());
+    return { isValid: true, cleanedUrl: url.trim() };
   } catch (e) {
     return { isValid: false, error: 'Invalid URL format' };
   }
-
-  return { isValid: true, cleanedUrl };
 };
-
-const downloadWithTimeout = (downloadFunction, timeout = DOWNLOAD_TIMEOUT) => {
-  return Promise.race([
-    downloadFunction(),
-    new Promise((_, reject) =>
-      setTimeout(() => reject(new Error('Download timeout - operation took too long')), timeout)
-    )
-  ]);
-};
-
-// Helper function to get server base URL
-function getServerBaseUrl(req) {
-  // Use the request host or environment variable
-  const host = req.get('host');
-  const protocol = req.secure ? 'https' : 'http';
-  return process.env.SERVER_BASE_URL || `${protocol}://${host}`;
-}
-
-// ===== PLATFORM-SPECIFIC DOWNLOADERS =====
 
 const platformDownloaders = {
   async instagram(url) {
@@ -176,10 +109,9 @@ const platformDownloaders = {
       }
       return data;
     } catch (error) {
-      console.warn('Instagram primary downloader failed, trying fallback...', error.message);
       const fallbackData = await downloadWithTimeout(() => facebookInsta(url));
       if (!fallbackData || !fallbackData.media) {
-        throw new Error('Instagram download failed - both primary and fallback methods failed');
+        throw new Error('Instagram download failed');
       }
       return fallbackData;
     }
@@ -205,82 +137,31 @@ const platformDownloaders = {
     try {
       const data = await downloadWithTimeout(() => twitter(url));
       const hasValidData = data.data && (data.data.HD || data.data.SD);
-      const hasValidUrls = Array.isArray(data.url) &&
-        data.url.some(item => item && Object.keys(item).length > 0 && item.url);
-
+      const hasValidUrls = Array.isArray(data.url) && data.url.some(item => item && item.url);
       if (!hasValidData && !hasValidUrls) {
         throw new Error("Twitter primary service returned unusable data");
       }
       return data;
     } catch (error) {
-      console.warn("Twitter: Primary service failed, trying custom service...", error.message);
       const fallbackData = await downloadWithTimeout(() => downloadTwmateData(url));
-
       if (!fallbackData || (!Array.isArray(fallbackData) && !fallbackData.data)) {
-        throw new Error('Twitter download failed - both primary and fallback methods failed');
+        throw new Error('Twitter download failed');
       }
       return fallbackData;
     }
   },
 
-  // ========================================
-  // YOUTUBE - UPDATED FOR AUDIO MERGING
-  // ========================================
-  async youtube(url, req) {
+  async youtube(url) {
     console.log('YouTube: Processing URL:', url);
-
     try {
-      const timeout = url.includes('/shorts/') ? 30000 : 60000;
-      const data = await downloadWithTimeout(() => fetchYouTubeData(url), timeout);
-
+      const data = await downloadWithTimeout(() => fetchYouTubeData(url), 60000);
       if (!data || !data.title) {
         throw new Error('YouTube service returned invalid data');
       }
-
-      console.log('YouTube: Successfully fetched data, formats count:', data.formats?.length || 0);
-      
-      // Check for merged formats and convert their URLs
-      if (data.formats) {
-        const serverBaseUrl = getServerBaseUrl(req);
-        data.formats.forEach(format => {
-          if (format.url && format.url.startsWith('MERGE:')) {
-            // Convert MERGE: URL to actual merge endpoint URL
-            const parts = format.url.split(':');
-            if (parts.length >= 3) {
-              const videoUrl = parts[1];
-              const audioUrl = parts[2];
-              format.url = `${serverBaseUrl}/api/merge-audio?videoUrl=${encodeURIComponent(videoUrl)}&audioUrl=${encodeURIComponent(audioUrl)}`;
-              console.log(`🔄 Converted merge URL for: ${format.quality}`);
-            }
-          }
-        });
-        
-        // Also update the default URL if it's a merge URL
-        if (data.url && data.url.startsWith('MERGE:')) {
-          const parts = data.url.split(':');
-          if (parts.length >= 3) {
-            const videoUrl = parts[1];
-            const audioUrl = parts[2];
-            data.url = `${serverBaseUrl}/api/merge-audio?videoUrl=${encodeURIComponent(videoUrl)}&audioUrl=${encodeURIComponent(audioUrl)}`;
-          }
-        }
-      }
-
+      console.log(`✅ YouTube: ${data.formats?.length || 0} formats with audio`);
       return data;
     } catch (error) {
-      if (error.message.includes('Status code: 410')) {
-        throw new Error('YouTube video not available (removed or private)');
-      }
-      if (error.message.includes('Status code: 403')) {
-        throw new Error('YouTube video access forbidden (age-restricted or region-locked)');
-      }
-      if (error.message.includes('Status code: 404')) {
-        throw new Error('YouTube video not found (invalid URL or removed)');
-      }
-      if (error.message.includes('timeout')) {
-        throw new Error('YouTube download timed out - video processing may be slow, please try again');
-      }
-
+      console.error('❌ YouTube error:', error.message);
       throw new Error(`YouTube download failed: ${error.message}`);
     }
   },
@@ -289,34 +170,24 @@ const platformDownloaders = {
     try {
       const data = await downloadWithTimeout(() => pindl(url));
       if (!data || (!data.data && !data.result && !data.url)) {
-        throw new Error('Pinterest service returned invalid data');
+        throw new Error('Pinterest primary service returned invalid data');
       }
       return data;
     } catch (error) {
-      console.warn('Pinterest primary downloader failed, trying fallback...', error.message);
       const fallbackData = await downloadWithTimeout(() => pinterest(url));
       if (!fallbackData || (!fallbackData.data && !fallbackData.result)) {
-        throw new Error('Pinterest download failed - both primary and fallback methods failed');
+        throw new Error('Pinterest download failed');
       }
       return fallbackData;
     }
   },
 
   async threads(url) {
-    console.log("🧵 Threads: Starting download with advanced service");
-    try {
-      const data = await downloadWithTimeout(() => advancedThreadsDownloader(url), 60000);
-
-      if (!data || !data.download) {
-        throw new Error('Threads service returned invalid data');
-      }
-
-      console.log("✅ Threads: Successfully downloaded video");
-      return data;
-    } catch (error) {
-      console.error(`❌ Threads download failed: ${error.message}`);
-      throw new Error(`Threads download failed: ${error.message}`);
+    const data = await downloadWithTimeout(() => advancedThreadsDownloader(url), 60000);
+    if (!data || !data.download) {
+      throw new Error('Threads service returned invalid data');
     }
+    return data;
   },
 
   async linkedin(url) {
@@ -325,10 +196,36 @@ const platformDownloaders = {
       throw new Error('LinkedIn service returned invalid data');
     }
     return data;
+  },
+
+  async douyin(url) {
+    return await universalDownload(url);
+  },
+
+  async reddit(url) {
+    return await universalDownload(url);
+  },
+
+  async vimeo(url) {
+    return await universalDownload(url);
+  },
+
+  async dailymotion(url) {
+    return await universalDownload(url);
+  },
+
+  async streamable(url) {
+    return await universalDownload(url);
+  },
+
+  async twitch(url) {
+    return await universalDownload(url);
+  },
+
+  async universal(url) {
+    return await universalDownload(url);
   }
 };
-
-// ===== DATA FORMATTERS =====
 
 const dataFormatters = {
   instagram(data) {
@@ -342,7 +239,6 @@ const dataFormatters = {
         source: 'instagram',
       };
     }
-
     if (Array.isArray(data)) {
       const firstMedia = data[0];
       return {
@@ -353,7 +249,6 @@ const dataFormatters = {
         source: 'instagram',
       };
     }
-
     return {
       title: data.title || 'Instagram Post',
       url: data.url || '',
@@ -373,13 +268,11 @@ const dataFormatters = {
         source: 'twitter',
       };
     }
-
     if (data.url && Array.isArray(data.url)) {
       const videoArray = data.url.filter(item => item && item.url);
       const bestQuality = videoArray.find(item => item.quality && item.quality.includes('1280x720')) ||
                          videoArray.find(item => item.quality && item.quality.includes('640x360')) ||
                          videoArray[0];
-
       return {
         title: 'Twitter Video',
         url: bestQuality.url || '',
@@ -388,12 +281,10 @@ const dataFormatters = {
         source: 'twitter',
       };
     }
-
     if (Array.isArray(data) && data.length > 0) {
       const bestQuality = data.find(item => item.quality.includes('1280x720')) ||
                          data.find(item => item.quality.includes('640x360')) ||
                          data[0];
-
       return {
         title: 'Twitter Video',
         url: bestQuality.url || '',
@@ -402,7 +293,6 @@ const dataFormatters = {
         source: 'twitter',
       };
     }
-
     throw new Error("Twitter video data is incomplete or improperly formatted.");
   },
 
@@ -417,12 +307,10 @@ const dataFormatters = {
         source: 'facebook',
       };
     }
-
     const fbData = data.data || [];
     const hdVideo = fbData.find(video => video.resolution?.includes('720p'));
     const sdVideo = fbData.find(video => video.resolution?.includes('360p'));
     const selectedVideo = hdVideo || sdVideo;
-
     return {
       title: data.title || 'Facebook Video',
       url: selectedVideo?.url || '',
@@ -454,103 +342,28 @@ const dataFormatters = {
     };
   },
 
-// ========================================
-// YOUTUBE FORMATTER - FIXED TO PASS QUALITY DATA
-// ========================================
-youtube(data, req) {
-  console.log('🎬 Formatting YouTube data...');
-  
-  if (!data || !data.title) {
-    throw new Error('Invalid YouTube data received');
-  }
-
-  // Check if we have quality formats
-  const hasFormats = data.formats && data.formats.length > 0;
-  const hasAllFormats = data.allFormats && data.allFormats.length > 0;
-  
-  console.log(`📊 YouTube data: hasFormats=${hasFormats}, hasAllFormats=${hasAllFormats}`);
-  
-  let qualityOptions = [];
-  let selectedQuality = null;
-  let defaultUrl = data.url;
-
-  if (hasFormats || hasAllFormats) {
-    // Use formats if available, otherwise use allFormats
-    qualityOptions = data.formats || data.allFormats;
-    
-    // Find the default selected quality (360p or first available)
-    selectedQuality = qualityOptions.find(opt => 
-      opt.quality && opt.quality.includes('360p')
-    ) || qualityOptions[0];
-    
-    defaultUrl = selectedQuality?.url || data.url;
-    
-    console.log(`✅ YouTube: ${qualityOptions.length} quality options available`);
-    console.log(`🎯 Selected quality: ${selectedQuality?.quality}`);
-    
-    // CRITICAL FIX: Convert MERGE URLs in ALL formats
-    const serverBaseUrl = getServerBaseUrl(req);
-    qualityOptions.forEach(format => {
-      if (format.url && format.url.startsWith('MERGE:')) {
-        const parts = format.url.split(':');
-        if (parts.length >= 3) {
-          const videoUrl = parts[1];
-          const audioUrl = parts[2];
-          format.url = `${serverBaseUrl}/api/merge-audio?videoUrl=${encodeURIComponent(videoUrl)}&audioUrl=${encodeURIComponent(audioUrl)}`;
-          console.log(`🔄 Formatter: Converted merge URL for: ${format.quality}`);
-        }
-      }
-    });
-    
-    // Also update the selected quality URL if it's a merge URL
-    if (selectedQuality && selectedQuality.url && selectedQuality.url.startsWith('MERGE:')) {
-      const parts = selectedQuality.url.split(':');
-      if (parts.length >= 3) {
-        const videoUrl = parts[1];
-        const audioUrl = parts[2];
-        selectedQuality.url = `${serverBaseUrl}/api/merge-audio?videoUrl=${encodeURIComponent(videoUrl)}&audioUrl=${encodeURIComponent(audioUrl)}`;
-        defaultUrl = selectedQuality.url;
-      }
+  youtube(data) {
+    console.log('🎬 Formatting YouTube data...');
+    if (!data || !data.title) {
+      throw new Error('Invalid YouTube data received');
     }
-  } else {
-    console.log('⚠️ No quality formats found, creating fallback');
-    // Fallback: create basic quality option
-    qualityOptions = [
-      {
-        quality: '360p',
-        qualityNum: 360,
-        url: data.url,
-        type: 'video/mp4',
-        extension: 'mp4',
-        isPremium: false,
-        hasAudio: true
-      }
-    ];
-    selectedQuality = qualityOptions[0];
-  }
+    const qualityOptions = data.formats || data.allFormats || [];
+    const selectedQuality = data.selectedQuality || qualityOptions[0];
+    console.log(`📦 YouTube: ${qualityOptions.length} formats available`);
+    return {
+      title: data.title,
+      url: data.url,
+      thumbnail: data.thumbnail || PLACEHOLDER_THUMBNAIL,
+      sizes: qualityOptions.map(f => f.quality),
+      duration: data.duration || 'unknown',
+      source: 'youtube',
+      formats: qualityOptions,
+      allFormats: qualityOptions,
+      selectedQuality: selectedQuality
+    };
+  },
 
-  // Build the response object - THIS IS CRITICAL
-  const result = {
-    title: data.title,
-    url: defaultUrl,
-    thumbnail: data.thumbnail || PLACEHOLDER_THUMBNAIL,
-    sizes: qualityOptions.map(f => f.quality),
-    duration: data.duration || 'unknown',
-    source: 'youtube',
-    // Include both formats and allFormats for compatibility
-    formats: qualityOptions,
-    allFormats: qualityOptions,
-    selectedQuality: selectedQuality
-  };
-
-  console.log(`✅ YouTube formatting complete`);
-  console.log(`📦 Sending to client: ${qualityOptions.length} formats`);
-  console.log(`🔗 Default URL length: ${defaultUrl?.length || 0}`);
-  
-  return result;
-},
   threads(data) {
-    console.log("Processing advanced Threads data...");
     return {
       title: data.title || 'Threads Post',
       url: data.download,
@@ -565,7 +378,6 @@ youtube(data, req) {
     const videoUrl = Array.isArray(data?.data?.videos) && data.data.videos.length > 0
       ? data.data.videos[0]
       : '';
-
     return {
       title: 'LinkedIn Video',
       url: videoUrl,
@@ -573,15 +385,30 @@ youtube(data, req) {
       sizes: ['Original Quality'],
       source: 'linkedin',
     };
-  }
+  },
+
+  universal(data) {
+    return {
+      title: data.title || 'Universal Download',
+      url: data.url,
+      thumbnail: data.thumbnail || PLACEHOLDER_THUMBNAIL,
+      sizes: data.sizes || ['Original Quality'],
+      source: data.source || 'universal'
+    };
+  },
+
+  douyin(data) { return dataFormatters.universal(data); },
+  reddit(data) { return dataFormatters.universal(data); },
+  vimeo(data) { return dataFormatters.universal(data); },
+  dailymotion(data) { return dataFormatters.universal(data); },
+  streamable(data) { return dataFormatters.universal(data); },
+  twitch(data) { return dataFormatters.universal(data); }
 };
 
-const formatData = async (platform, data, req) => {
+const formatData = async (platform, data) => {
   console.info(`Data Formatting: Formatting data for platform '${platform}'.`);
-
   const formatter = dataFormatters[platform];
   if (!formatter) {
-    console.warn("Data Formatting: Generic formatting applied.");
     return {
       title: data.title || 'Untitled Media',
       url: data.url || '',
@@ -590,16 +417,8 @@ const formatData = async (platform, data, req) => {
       source: platform,
     };
   }
-
-  // Pass the request object to YouTube formatter for URL conversion
-  if (platform === 'youtube') {
-    return formatter(data, req);
-  }
-
   return formatter(data);
 };
-
-// ===== MAIN CONTROLLER =====
 
 const downloadMedia = async (req, res) => {
   const { url } = req.body;
@@ -608,7 +427,6 @@ const downloadMedia = async (req, res) => {
   try {
     const urlValidation = validateUrl(url);
     if (!urlValidation.isValid) {
-      console.warn(`Download Media: ${urlValidation.error}`);
       return res.status(400).json({
         error: urlValidation.error,
         success: false
@@ -619,7 +437,6 @@ const downloadMedia = async (req, res) => {
     const platform = identifyPlatform(cleanedUrl);
 
     if (!platform) {
-      console.warn("Download Media: Unsupported platform for the given URL.");
       return res.status(400).json({
         error: 'Unsupported platform',
         success: false,
@@ -640,13 +457,9 @@ const downloadMedia = async (req, res) => {
       throw new Error(`No downloader available for platform: ${platform}`);
     }
 
-    // Pass the request object to YouTube downloader for URL conversion
-    const data = platform === 'youtube' 
-      ? await downloader(processedUrl, req)
-      : await downloader(processedUrl);
+    const data = await downloader(processedUrl);
 
     if (!data) {
-      console.error("Download Media: No data returned for the platform.");
       return res.status(404).json({
         error: 'No data found for this URL',
         success: false,
@@ -656,7 +469,7 @@ const downloadMedia = async (req, res) => {
 
     let formattedData;
     try {
-      formattedData = await formatData(platform, data, req);
+      formattedData = await formatData(platform, data);
     } catch (formatError) {
       console.error(`Download Media: Data formatting failed - ${formatError.message}`);
       return res.status(500).json({
@@ -668,7 +481,6 @@ const downloadMedia = async (req, res) => {
     }
 
     if (!formattedData || !formattedData.url) {
-      console.error("Download Media: Formatted data is invalid or missing URL.");
       return res.status(500).json({
         error: 'Invalid media data - no download URL found',
         success: false,
@@ -678,38 +490,17 @@ const downloadMedia = async (req, res) => {
 
     console.log(`Final ${platform} URL length:`, formattedData.url.length);
     console.log(`Formats count: ${formattedData.formats?.length || 0}`);
-    console.log(`AllFormats count: ${formattedData.allFormats?.length || 0}`);
-    
-    // Log merge URLs for debugging
-    if (platform === 'youtube' && formattedData.formats) {
-      const mergeFormats = formattedData.formats.filter(f => f.url && f.url.includes('/api/merge-audio'));
-      console.log(`🎵 Merge formats available: ${mergeFormats.length}`);
-    }
-    
     console.info("Download Media: Media successfully downloaded and formatted.");
 
-    // ENSURE THE RESPONSE INCLUDES ALL DATA
     res.status(200).json({
       success: true,
-      data: formattedData, // This must include formats and allFormats
+      data: formattedData,
       platform: platform,
-      timestamp: new Date().toISOString(),
-      debug: {
-        originalUrl: url,
-        cleanedUrl: cleanedUrl,
-        processedUrl: processedUrl,
-        hasValidUrl: !!formattedData.url,
-        finalUrlLength: formattedData.url ? formattedData.url.length : 0,
-        hasFormats: !!formattedData.formats,
-        formatsCount: formattedData.formats?.length || 0,
-        hasAllFormats: !!formattedData.allFormats,
-        allFormatsCount: formattedData.allFormats?.length || 0
-      }
+      timestamp: new Date().toISOString()
     });
 
   } catch (error) {
     console.error(`Download Media: Error occurred - ${error.message}`);
-    console.error('Error stack:', error.stack);
 
     let statusCode = 500;
     if (error.message.includes('not available') || error.message.includes('not found')) {
@@ -725,31 +516,9 @@ const downloadMedia = async (req, res) => {
       success: false,
       details: error.message,
       platform: identifyPlatform(url) || 'unknown',
-      timestamp: new Date().toISOString(),
-      suggestions: getErrorSuggestions(error.message, identifyPlatform(url))
+      timestamp: new Date().toISOString()
     });
   }
 };
 
-const getErrorSuggestions = (errorMessage, platform) => {
-  const suggestions = [];
-
-  if (platform === 'threads') {
-    suggestions.push('Ensure the Threads post contains video content (not just images or text)');
-    suggestions.push('Check if the post is public and not deleted');
-    suggestions.push('Try using a different Threads video post to test');
-  }
-
-  if (platform === 'youtube') {
-    if (errorMessage.includes('timeout')) {
-      suggestions.push('YouTube videos may take longer to process - the API is working but needs time');
-      suggestions.push('Check your frontend code to ensure it waits for the full response');
-    }
-  }
-
-  return suggestions;
-};
-
-module.exports = {
-  downloadMedia
-};
+module.exports = { downloadMedia };
