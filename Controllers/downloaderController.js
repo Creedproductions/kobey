@@ -154,20 +154,18 @@ const platformDownloaders = {
     }
   },
 
-  async youtube(url) {
-    console.log('YouTube: Processing URL:', url);
-    try {
-      const data = await downloadWithTimeout(() => fetchYouTubeData(url), 60000);
-      if (!data || !data.title) {
-        throw new Error('YouTube service returned invalid data');
-      }
-      console.log(`✅ YouTube: ${data.formats?.length || 0} formats with audio`);
-      return data;
-    } catch (error) {
-      console.error('❌ YouTube error:', error.message);
-      throw new Error(`YouTube download failed: ${error.message}`);
-    }
-  },
+async youtube(url) {
+  console.log('YouTube: Processing URL:', url);
+  try {
+    // Use the simple method first for reliability
+    const data = await youtubeService.getSimpleFormat(url);
+    console.log(`✅ YouTube: Success with ${data.formats?.length || 0} formats`);
+    return data;
+  } catch (error) {
+    console.error('❌ YouTube download failed:', error.message);
+    throw new Error(`YouTube download failed: ${error.message}`);
+  }
+},
 
   async pinterest(url) {
     try {
