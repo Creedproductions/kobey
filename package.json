@@ -12,6 +12,8 @@
   "license": "ISC",
   "description": "",
   "dependencies": {
+    "@distube/ytdl-core": "^4.14.4",
+    "@tobyg74/tiktok-api-dl": "^1.0.9",
     "axios": "^1.7.7",
     "bcrypt": "^5.1.1",
     "bitly": "^7.1.2",
@@ -30,8 +32,8 @@
     "node-fetch": "^2.7.0",
     "nodemailer": "^6.9.16",
     "pg": "^8.13.1",
-    "tinyurl": "^1.1.7",
-    "ytdl-core": "^4.11.5"
+    "savefrom-api": "^1.0.2",
+    "tinyurl": "^1.1.7"
   },
   "devDependencies": {
     "nodemon": "^3.1.7"
