@@ -179,119 +179,45 @@ async function downloadStreamable(url) {
     throw new Error(`Streamable: ${error.message}`);
   }
 }
-
-// Douyin downloader using TikTok service
+// Simple Douyin downloader using TikTok fallback
 async function downloadDouyin(url) {
   try {
-    console.log('🎵 Processing Douyin URL...');
+    console.log('🎵 Processing Douyin with TikTok fallback...');
     
-    // Since Douyin is Chinese TikTok, use the same service
-    const { ttdl } = require('btch-downloader');
-    
-    // Convert Douyin URL to standard format if needed
-    let processedUrl = url;
-    if (url.includes('v.douyin.com')) {
-      // Follow the redirect to get the actual video URL
-      try {
-        const response = await axios.get(url, {
-          headers: {
-            'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X) AppleWebKit/605.1.15',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
-          },
-          maxRedirects: 5,
-          timeout: 10000
-        });
-        processedUrl = response.request.res.responseUrl || url;
-      } catch (redirectError) {
-        console.log('⚠️ Could not resolve Douyin redirect, using original URL');
-      }
-    }
-    
-    console.log('🔄 Using TikTok service for Douyin download...');
-    const data = await ttdl(processedUrl);
-    
-    if (!data || !data.video) {
-      throw new Error('No video data found');
-    }
-    
-    return {
-      title: data.title || 'Douyin Video',
-      url: data.video[0] || data.video,
-      thumbnail: data.thumbnail || '',
-      sizes: ['Original Quality'],
-      source: 'douyin',
-      audio: data.audio ? data.audio[0] : null
-    };
-    
-  } catch (error) {
-    console.error(`❌ Douyin download failed: ${error.message}`);
-    
-    // Alternative method: Try to extract video directly
+    // Since Douyin is Chinese TikTok, try to use TikTok service
     try {
-      console.log('🔄 Trying alternative Douyin download method...');
-      const alternativeData = await downloadDouyinAlternative(url);
-      if (alternativeData) {
-        return alternativeData;
+      const { ttdl } = require('btch-downloader');
+      
+      // Wrap in timeout and better error handling
+      const data = await new Promise((resolve, reject) => {
+        setTimeout(() => reject(new Error('Timeout')), 10000);
+        ttdl(url).then(resolve).catch(reject);
+      });
+      
+      // Validate data structure
+      if (data && typeof data === 'object') {
+        const videoUrl = data.video || data.videoUrl || data.download;
+        
+        if (videoUrl) {
+          return {
+            title: data.title || 'Douyin Video',
+            url: Array.isArray(videoUrl) ? videoUrl[0] : videoUrl,
+            thumbnail: data.thumbnail || data.cover || '',
+            sizes: ['Original Quality'],
+            source: 'douyin'
+          };
+        }
       }
-    } catch (altError) {
-      console.log(`⚠️ Alternative method also failed: ${altError.message}`);
+    } catch (tiktokError) {
+      console.log(`⚠️ TikTok service failed: ${tiktokError.message}`);
     }
     
-    throw new Error(`Douyin download failed: ${error.message}`);
-  }
-}
-
-// Alternative Douyin download method
-async function downloadDouyinAlternative(url) {
-  try {
-    // Use axios to get the page and extract video URL
-    const response = await axios.get(url, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X) AppleWebKit/605.1.15',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'zh-CN,zh;q=0.9',
-        'Referer': 'https://www.douyin.com/'
-      },
-      timeout: 15000
-    });
-    
-    const html = response.data;
-    
-    // Try to find video URL in the HTML
-    const videoUrlMatch = html.match(/"playAddr":\s*"([^"]+)"/) || 
-                         html.match(/src="([^"]+\.mp4[^"]*)"/) ||
-                         html.match(/video_url[^=]*=\s*"([^"]+)"/);
-    
-    if (videoUrlMatch && videoUrlMatch[1]) {
-      let videoUrl = videoUrlMatch[1].replace(/\\u002F/g, '/');
-      
-      // Ensure URL is absolute
-      if (videoUrl.startsWith('//')) {
-        videoUrl = 'https:' + videoUrl;
-      } else if (videoUrl.startsWith('/')) {
-        videoUrl = 'https://www.douyin.com' + videoUrl;
-      }
-      
-      // Try to find title
-      const titleMatch = html.match(/desc[^>]*>([^<]+)</) || 
-                        html.match(/title[^>]*>([^<]+)</) ||
-                        html.match(/"desc":\s*"([^"]+)"/);
-      
-      const title = titleMatch ? titleMatch[1].substring(0, 100) : 'Douyin Video';
-      
-      return {
-        title: title,
-        url: videoUrl,
-        thumbnail: '',
-        sizes: ['Original Quality'],
-        source: 'douyin'
-      };
-    }
-    
-    throw new Error('Could not extract video URL from page');
+    // If TikTok service fails, return a basic response
+    // You can implement other methods here later
+    throw new Error('TikTok service unavailable for Douyin');
     
   } catch (error) {
-    throw new Error(`Alternative method: ${error.message}`);
+    throw new Error(`Douyin: ${error.message}`);
   }
 }
 
