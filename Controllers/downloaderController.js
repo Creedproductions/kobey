@@ -6,8 +6,6 @@ const { BitlyClient } = require('bitly');
 const axios = require('axios');
 const { ytdl, pindl } = require('jer-api');
 const fetch = require('node-fetch');
-
-// Local services
 const config = require('../Config/config');
 const { advancedThreadsDownloader } = require('../Services/advancedThreadsService');
 const fetchLinkedinData = require('../Services/linkedinService');
