@@ -13,7 +13,6 @@ const facebookInsta = require('../Services/facebookInstaService');
 const { downloadTwmateData } = require('../Services/twitterService');
 const { fetchYouTubeData } = require('../Services/youtubeService');
 
-// Initialize external services
 const bitly = new BitlyClient(config.BITLY_ACCESS_TOKEN);
 
 // ===== CONSTANTS =====
