@@ -13,9 +13,8 @@ RUN apk add --no-cache \
 # Install yt-dlp
 RUN pip3 install --no-cache-dir -U yt-dlp --break-system-packages
 
-# Copy cookies file from root of repository (if exists)
-COPY cookies.txt /cookies.txt
-COPY cookies.txt /app/cookies.txt  # Also copy to app directory for easier access
+# Create empty cookies file by default
+RUN touch /cookies.txt
 
 COPY package*.json ./
 
@@ -26,11 +25,8 @@ COPY . .
 # Create temp directory
 RUN mkdir -p /tmp/yt-merge
 
-# Set proper permissions for cookies and app
 RUN adduser -D -u 1001 appuser && \
-    mkdir -p /home/appuser && \
-    chown -R appuser:appuser /app /tmp/yt-merge /home/appuser && \
-    chmod 644 /cookies.txt /app/cookies.txt 2>/dev/null || true
+    chown -R appuser:appuser /app /tmp/yt-merge /cookies.txt
 
 USER appuser
 
