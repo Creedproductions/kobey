@@ -103,7 +103,7 @@ const setupRoutes = () => {
   // Test cookies with YouTube
   app.get('/api/test-cookies', async (req, res) => {
     try {
-      const { youtubeService } = require('./Services/youtubeServiceNew');
+      const { youtubeService } = require('./Services/youtubeService');
       const result = await youtubeService.testCookies();
 
       res.status(200).json({
