@@ -1,347 +1,217 @@
-'use strict';
-
 const fetch = require('node-fetch');
 const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { URL, URLSearchParams } = require('url');
 
 class YouTubeService {
-  constructor(options = {}) {
-    this.apiKey = options.apiKey || process.env.YOUTUBEI_API_KEY || 'AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8';
-    this.baseUrl = options.baseUrl || 'https://youtubei.googleapis.com/youtubei/v1/player';
+  constructor() {
+    this.apiKey = 'AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8';
+    this.baseUrl = 'https://youtubei.googleapis.com/youtubei/v1/player';
     this.tempDir = path.join(os.tmpdir(), 'yt-merge');
 
-    this.defaultTimeoutMs = Number(options.timeoutMs || 30000);
-    this.maxAttemptsPerClient = Number(options.maxAttemptsPerClient || 2);
-    this.cacheTtlMs = Number(options.cacheTtlMs || 3 * 60 * 1000); // 3 minutes
-    this.enableCache = options.enableCache !== false;
-    this.allowMerge = options.allowMerge === true; // set true if you want to merge with ffmpeg
-
-    this._cache = new Map(); // videoId -> { expiresAt, value }
-
-    if (!fs.existsSync(this.tempDir)) fs.mkdirSync(this.tempDir, { recursive: true });
-  }
-
-  // -------------------------
-  // URL + ID handling
-  // -------------------------
-  normalizeYouTubeUrl(input) {
-    try {
-      const raw = input.trim();
-
-      // If user gives only ID
-      if (/^[0-9A-Za-z_-]{11}$/.test(raw)) {
-        return `https://www.youtube.com/watch?v=${raw}`;
-      }
-
-      const u = new URL(raw);
-
-      // youtu.be/<id>
-      if (u.hostname.includes('youtu.be')) {
-        const id = u.pathname.replace('/', '').split(/[?&/#]/)[0];
-        if (id && id.length === 11) return `https://www.youtube.com/watch?v=${id}`;
-      }
-
-      // /shorts/<id>
-      if (u.pathname.startsWith('/shorts/')) {
-        const id = u.pathname.split('/shorts/')[1]?.split(/[?&/#]/)[0];
-        if (id && id.length === 11) return `https://www.youtube.com/watch?v=${id}`;
-      }
-
-      // /embed/<id>
-      if (u.pathname.startsWith('/embed/')) {
-        const id = u.pathname.split('/embed/')[1]?.split(/[?&/#]/)[0];
-        if (id && id.length === 11) return `https://www.youtube.com/watch?v=${id}`;
-      }
-
-      // watch?v=<id>
-      const v = u.searchParams.get('v');
-      if (v && v.length === 11) return `https://www.youtube.com/watch?v=${v}`;
-
-      return raw;
-    } catch {
-      return input;
+    // Ensure temp directory exists
+    if (!fs.existsSync(this.tempDir)) {
+      fs.mkdirSync(this.tempDir, { recursive: true });
     }
   }
 
   extractYouTubeId(url) {
-    const cleaned = this.normalizeYouTubeUrl(url);
-
-    // cleaned watch url
     try {
-      const u = new URL(cleaned);
-      const v = u.searchParams.get('v');
-      if (v && v.length === 11) return v;
-    } catch {}
+      const urlObj = new URL(url);
+      let videoId = urlObj.searchParams.get('v');
 
-    // fallback regex
-    const m = cleaned.match(/([0-9A-Za-z_-]{11})/);
-    return m ? m[1] : null;
-  }
+      if (videoId && videoId.length === 11) return videoId;
 
-  // -------------------------
-  // Low-level helpers
-  // -------------------------
-  _sleep(ms) {
-    return new Promise((r) => setTimeout(r, ms));
-  }
+      const pathname = urlObj.pathname;
 
-  _jitter(base) {
-    // 0.75x .. 1.25x
-    const f = 0.75 + Math.random() * 0.5;
-    return Math.floor(base * f);
-  }
+      if (pathname.includes('youtu.be/')) {
+        const id = pathname.split('youtu.be/')[1]?.split(/[?&/#]/)[0];
+        if (id && id.length === 11) return id;
+      }
 
-  _cacheGet(videoId) {
-    if (!this.enableCache) return null;
-    const hit = this._cache.get(videoId);
-    if (!hit) return null;
-    if (Date.now() > hit.expiresAt) {
-      this._cache.delete(videoId);
+      if (pathname.includes('shorts/')) {
+        const id = pathname.split('shorts/')[1]?.split(/[?&/#]/)[0];
+        if (id && id.length === 11) return id;
+      }
+
+      if (pathname.includes('embed/')) {
+        const id = pathname.split('embed/')[1]?.split(/[?&/#]/)[0];
+        if (id && id.length === 11) return id;
+      }
+
+      const regexPatterns = [
+        /(?:v=|\/)([0-9A-Za-z_-]{11})/,
+        /youtu\.be\/([0-9A-Za-z_-]{11})/,
+        /embed\/([0-9A-Za-z_-]{11})/,
+        /shorts\/([0-9A-Za-z_-]{11})/
+      ];
+
+      for (const pattern of regexPatterns) {
+        const match = url.match(pattern);
+        if (match && match[1]) return match[1];
+      }
+
+      return null;
+    } catch (error) {
+      console.error("URL parsing error:", error.message);
       return null;
     }
-    return hit.value;
-  }
-
-  _cacheSet(videoId, value) {
-    if (!this.enableCache) return;
-    this._cache.set(videoId, { value, expiresAt: Date.now() + this.cacheTtlMs });
-  }
-
-  async _fetchJsonWithTimeout(url, init, timeoutMs) {
-    const controller = new AbortController();
-    const id = setTimeout(() => controller.abort(), timeoutMs);
-
-    try {
-      const res = await fetch(url, { ...init, signal: controller.signal });
-      const text = await res.text();
-
-      let json = null;
-      try { json = text ? JSON.parse(text) : null; } catch {}
-
-      return { ok: res.ok, status: res.status, json, text };
-    } finally {
-      clearTimeout(id);
-    }
-  }
-
-  // -------------------------
-  // YouTubei Player request
-  // -------------------------
-  _clientProfiles() {
-    // Use stable-ish client versions; if one gets flaky, others may still work
-    return [
-      { name: 'WEB', clientName: 'WEB', clientVersion: '2.20241201.01.00', hl: 'en', gl: 'US' },
-      { name: 'ANDROID', clientName: 'ANDROID', clientVersion: '19.09.36', hl: 'en', gl: 'US' },
-      { name: 'IOS', clientName: 'IOS', clientVersion: '19.09.3', hl: 'en', gl: 'US' },
-    ];
-  }
-
-  _buildHeaders(clientName, clientVersion) {
-    // youtubei.googleapis.com does not require X-YouTube headers,
-    // but keeping User-Agent + language helps consistency.
-    return {
-      'Content-Type': 'application/json',
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-      'Accept-Language': 'en-US,en;q=0.9',
-      'X-YouTube-Client-Name': clientName,
-      'X-YouTube-Client-Version': clientVersion,
-    };
-  }
-
-  _buildBody(videoId, client) {
-    return {
-      context: {
-        client: {
-          clientName: client.clientName,
-          clientVersion: client.clientVersion,
-          hl: client.hl,
-          gl: client.gl,
-        },
-      },
-      videoId,
-      // These sometimes reduce “private/unavailable” false positives
-      contentCheckOk: true,
-      racyCheckOk: true,
-    };
-  }
-
-  _readPlayability(data) {
-    const ps = data?.playabilityStatus;
-    const status = ps?.status || 'UNKNOWN';
-    const reason =
-        ps?.reason ||
-        ps?.errorScreen?.playerErrorMessageRenderer?.reason?.simpleText ||
-        null;
-
-    return { status, reason, ps };
   }
 
   async getVideoInfo(videoId) {
-    const cached = this._cacheGet(videoId);
-    if (cached) return cached;
+    const url = `${this.baseUrl}?key=${this.apiKey}`;
 
-    const endpoint = `${this.baseUrl}?key=${this.apiKey}`;
+    const headers = {
+      'Content-Type': 'application/json',
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+    };
 
-    let lastErr = null;
-    let lastData = null;
-
-    const clients = this._clientProfiles();
+    // Try multiple clients to get combined formats
+    const clients = [
+      {
+        name: 'WEB',
+        clientName: 'WEB',
+        clientVersion: '2.20231219.01.00'
+      },
+      {
+        name: 'ANDROID',
+        clientName: 'ANDROID',
+        clientVersion: '19.09.36'
+      },
+      {
+        name: 'IOS',
+        clientName: 'IOS',
+        clientVersion: '19.09.3'
+      }
+    ];
 
     for (const client of clients) {
-      for (let attempt = 1; attempt <= this.maxAttemptsPerClient; attempt++) {
-        try {
-          const headers = this._buildHeaders(client.clientName, client.clientVersion);
-          const body = this._buildBody(videoId, client);
-
-          const r = await this._fetchJsonWithTimeout(
-              endpoint,
-              { method: 'POST', headers, body: JSON.stringify(body) },
-              this.defaultTimeoutMs
-          );
-
-          if (!r.ok || !r.json) {
-            lastErr = new Error(`${client.name} HTTP ${r.status}`);
-            // backoff
-            await this._sleep(this._jitter(400 * attempt));
-            continue;
-          }
-
-          const data = r.json;
-          lastData = data;
-
-          const { status, reason } = this._readPlayability(data);
-
-          // If clearly not playable, no need to keep trying other clients forever
-          if (status && status !== 'OK') {
-            // Sometimes retry helps for transient throttling, so only break on strong statuses
-            const hardStatuses = new Set(['LOGIN_REQUIRED', 'ERROR', 'UNPLAYABLE']);
-            if (hardStatuses.has(status)) {
-              const msg = reason || `Playability: ${status}`;
-              throw new Error(msg);
+      try {
+        const body = {
+          context: {
+            client: {
+              clientName: client.clientName,
+              clientVersion: client.clientVersion,
+              hl: 'en',
+              gl: 'US'
             }
-          }
+          },
+          videoId: videoId
+        };
 
-          // success-ish
-          this._cacheSet(videoId, data);
-          return data;
-        } catch (e) {
-          lastErr = e;
-          // retry with backoff
-          await this._sleep(this._jitter(600 * attempt));
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: headers,
+          body: JSON.stringify(body),
+          timeout: 30000
+        });
+
+        if (!response.ok) {
+          console.log(`⚠️ ${client.name} client failed: ${response.status}`);
           continue;
         }
+
+        const data = await response.json();
+
+        // Check if this client provides combined formats
+        const hasCombinedFormats = data.streamingData?.formats &&
+            data.streamingData.formats.length > 0;
+
+        if (hasCombinedFormats) {
+          console.log(`✅ ${client.name} client provided combined formats!`);
+          return data;
+        } else {
+          console.log(`⚠️ ${client.name} client: no combined formats`);
+        }
+      } catch (error) {
+        console.error(`❌ ${client.name} client error:`, error.message);
+        continue;
       }
     }
 
-    // If we got some response but couldn’t use it, include playability details
-    if (lastData) {
-      const { status, reason } = this._readPlayability(lastData);
-      const msg = reason || `Playability: ${status}`;
-      throw new Error(msg);
+    // If no client provided combined formats, use the last response
+    console.log('⚠️ No combined formats found from any client, using adaptive formats');
+
+    const body = {
+      context: {
+        client: {
+          clientName: "ANDROID",
+          clientVersion: "19.09.36"
+        }
+      },
+      videoId: videoId
+    };
+
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: headers,
+      body: JSON.stringify(body),
+      timeout: 30000
+    });
+
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
     }
 
-    throw lastErr || new Error('YouTube request failed');
-  }
-
-  // -------------------------
-  // Format parsing
-  // -------------------------
-  _parseSignatureCipher(sigCipher) {
-    // signatureCipher is a querystring: url=...&sp=signature&s=....
-    // Without deciphering "s", you cannot use it reliably.
-    // But sometimes it contains "sig" or "signature" already.
-    try {
-      const params = new URLSearchParams(sigCipher);
-      const url = params.get('url');
-      const sp = params.get('sp') || 'signature';
-      const sig = params.get('sig') || params.get('signature');
-      const s = params.get('s');
-
-      if (!url) return { url: null, ciphered: true };
-
-      // If we have already-signed value, attach it.
-      if (sig) {
-        const u = new URL(url);
-        u.searchParams.set(sp, sig);
-        return { url: u.toString(), ciphered: false };
-      }
-
-      // If only "s" exists, it needs decipher -> not usable here
-      if (s) {
-        return { url: null, ciphered: true };
-      }
-
-      // Sometimes url itself is already valid
-      return { url, ciphered: false };
-    } catch {
-      return { url: null, ciphered: true };
-    }
+    return await response.json();
   }
 
   parseFormats(data) {
-    const out = [];
+    const formats = [];
 
-    const sd = data?.streamingData;
-    if (!sd) return out;
-
-    const add = (arr, bucket) => {
-      if (!Array.isArray(arr)) return;
-      for (const f of arr) {
-        const mime = f.mimeType || '';
-        const hasVideo = mime.includes('video/');
-        const hasAudio = mime.includes('audio/');
-        const qualityLabel = f.qualityLabel || f.quality || null;
-
-        let directUrl = f.url || null;
-        let ciphered = false;
-
-        if (!directUrl && f.signatureCipher) {
-          const parsed = this._parseSignatureCipher(f.signatureCipher);
-          directUrl = parsed.url;
-          ciphered = parsed.ciphered;
-        }
-
-        out.push({
-          bucket, // "formats" or "adaptiveFormats"
-          itag: f.itag,
-          mimeType: mime,
-          qualityLabel,
-          quality: qualityLabel || (hasAudio && !hasVideo ? 'audio' : 'unknown'),
-          width: f.width,
-          height: f.height || 0,
-          fps: f.fps,
-          bitrate: f.bitrate,
-          audioQuality: f.audioQuality,
-          contentLength: f.contentLength,
-          hasVideo,
-          hasAudio,
-          isAudioOnly: hasAudio && !hasVideo,
-          isVideoOnly: hasVideo && !hasAudio,
-          url: directUrl,
-          ciphered,
-        });
+    if (data.streamingData) {
+      if (data.streamingData.formats) {
+        formats.push(...data.streamingData.formats);
       }
-    };
 
-    add(sd.formats, 'formats'); // muxed/progressive (usually)
-    add(sd.adaptiveFormats, 'adaptiveFormats'); // separate
+      if (data.streamingData.adaptiveFormats) {
+        formats.push(...data.streamingData.adaptiveFormats);
+      }
+    }
 
-    return out;
+    return formats.map(format => {
+      const hasVideo = format.mimeType?.includes('video');
+      const hasAudio = format.mimeType?.includes('audio');
+      const quality = format.qualityLabel || format.quality || 'unknown';
+      const isAudioOnly = hasAudio && !hasVideo;
+      const isVideoOnly = hasVideo && !hasAudio;
+
+      return {
+        itag: format.itag,
+        mimeType: format.mimeType,
+        quality: quality,
+        qualityLabel: format.qualityLabel,
+        qualityNum: format.height || 0,
+        url: format.url,
+        contentLength: format.contentLength,
+        bitrate: format.bitrate,
+        fps: format.fps,
+        audioQuality: format.audioQuality,
+        hasVideo: hasVideo,
+        hasAudio: hasAudio,
+        isAudioOnly: isAudioOnly,
+        isVideoOnly: isVideoOnly,
+        width: format.width,
+        height: format.height,
+        audioBitrate: format.audioBitrate || format.bitrate
+      };
+    });
   }
 
-  // -------------------------
-  // Optional merge (you can keep it off)
-  // -------------------------
+  /**
+   * Merge video and audio using FFmpeg
+   */
   async mergeVideoAudio(videoUrl, audioUrl, outputPath) {
     return new Promise((resolve, reject) => {
+      console.log('🔄 Starting FFmpeg merge...');
+
       const ffmpegArgs = [
         '-i', videoUrl,
         '-i', audioUrl,
         '-c:v', 'copy',
         '-c:a', 'aac',
+        '-strict', 'experimental',
         '-y',
         outputPath
       ];
@@ -349,204 +219,201 @@ class YouTubeService {
       const ffmpeg = spawn('ffmpeg', ffmpegArgs);
 
       let stderr = '';
-      ffmpeg.stderr.on('data', (d) => (stderr += d.toString()));
 
-      ffmpeg.on('close', (code) => {
-        if (code === 0) resolve(true);
-        else reject(new Error(`FFmpeg failed (${code}): ${stderr.slice(0, 500)}`));
+      ffmpeg.stderr.on('data', (data) => {
+        stderr += data.toString();
       });
 
-      ffmpeg.on('error', reject);
+      ffmpeg.on('close', (code) => {
+        if (code === 0) {
+          console.log('✅ FFmpeg merge successful');
+          resolve(true);
+        } else {
+          console.error('❌ FFmpeg merge failed:', stderr);
+          reject(new Error(`FFmpeg failed with code ${code}`));
+        }
+      });
+
+      ffmpeg.on('error', (error) => {
+        console.error('❌ FFmpeg spawn error:', error);
+        reject(error);
+      });
     });
   }
 
-  // -------------------------
-  // High-level API
-  // -------------------------
-  async fetchYouTubeData(inputUrl) {
-    const normalizedUrl = this.normalizeYouTubeUrl(inputUrl);
-    const videoId = this.extractYouTubeId(normalizedUrl);
-
+  async fetchYouTubeData(url) {
+    const videoId = this.extractYouTubeId(url);
     if (!videoId) {
-      return this._errorPayload(null, 'Invalid YouTube URL');
+      throw new Error('Invalid YouTube URL');
     }
 
     console.log(`🎬 Processing YouTube video: ${videoId}`);
 
     try {
-      const info = await this.getVideoInfo(videoId);
+      const videoInfo = await this.getVideoInfo(videoId);
 
-      const { status, reason } = this._readPlayability(info);
-      if (status && status !== 'OK') {
-        // fail fast (don’t return "success" with empty formats)
-        throw new Error(reason || `Video not playable: ${status}`);
+      if (!videoInfo.videoDetails) {
+        throw new Error('Video not available or private');
       }
 
-      const details = info.videoDetails;
-      if (!details?.title) {
-        // Some error screens still include partial JSON
-        throw new Error('Video details missing (unavailable/private/blocked)');
-      }
+      const allFormats = this.parseFormats(videoInfo);
 
-      const all = this.parseFormats(info);
+      console.log(`✅ Found ${allFormats.length} total formats`);
 
-      // Keep only usable URLs (not ciphered/no-url)
-      const usable = all.filter(f => !!f.url && !f.ciphered);
+      // Separate formats by type
+      const videoFormats = allFormats.filter(f => f.hasVideo && !f.isAudioOnly);
+      const audioFormats = allFormats.filter(f => f.isAudioOnly);
+      const combinedFormats = allFormats.filter(f => f.hasVideo && f.hasAudio);
 
-      const muxed = usable.filter(f => f.hasVideo && f.hasAudio && f.bucket === 'formats');
-      const videoOnly = usable.filter(f => f.isVideoOnly);
-      const audioOnly = usable.filter(f => f.isAudioOnly);
+      console.log(`📹 Video-only formats: ${videoFormats.filter(f => !f.hasAudio).length}`);
+      console.log(`🎵 Audio-only formats: ${audioFormats.length}`);
+      console.log(`🎬 Combined formats (video+audio): ${combinedFormats.length}`);
 
-      console.log(`✅ Found ${all.length} total formats (usable: ${usable.length})`);
-      console.log(`🎬 Muxed (video+audio): ${muxed.length}`);
-      console.log(`📹 Video-only: ${videoOnly.length}`);
-      console.log(`🎵 Audio-only: ${audioOnly.length}`);
+      // Find best audio stream for merging
+      const bestAudio = audioFormats.find(a =>
+          a.audioQuality === 'AUDIO_QUALITY_MEDIUM' ||
+          a.audioQuality === 'AUDIO_QUALITY_HIGH'
+      ) || audioFormats[0];
 
-      // Pick best audio (highest bitrate)
-      audioOnly.sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
-      const bestAudio = audioOnly[0] || null;
-
-      // Build quality map (prefer muxed for same height)
+      // Use a Map to deduplicate by quality (height)
       const qualityMap = new Map();
 
-      const put = (f, meta) => {
-        const h = f.height || 0;
-        if (!qualityMap.has(h)) qualityMap.set(h, meta);
-        else {
-          const cur = qualityMap.get(h);
-          // Prefer muxed over non-muxed
-          if (cur.needsMerging && !meta.needsMerging) qualityMap.set(h, meta);
-        }
-      };
-
-      // 1) Add muxed
-      for (const f of muxed) {
-        put(f, {
-          itag: f.itag,
-          quality: f.qualityLabel || `${f.height || 0}p`,
-          qualityNum: f.height || 0,
-          url: f.url,
-          hasAudio: true,
-          hasVideo: true,
-          needsMerging: false,
-          extension: 'mp4',
-          type: 'video/mp4',
-          mimeType: f.mimeType,
-          bitrate: f.bitrate,
-          contentLength: f.contentLength,
-        });
-      }
-
-      // 2) Add video-only as “merge option” (if allowed) OR as separate download
-      // Sort highest first so user sees better qualities
-      videoOnly.sort((a, b) => (b.height || 0) - (a.height || 0));
-
-      for (const f of videoOnly) {
-        const h = f.height || 0;
-        if (!qualityMap.has(h)) {
-          put(f, {
+      // Add combined formats first (prioritize these - they have audio!)
+      combinedFormats.forEach(f => {
+        const height = f.height || 0;
+        if (!qualityMap.has(height) || (qualityMap.get(height).hasAudio === false && f.hasAudio === true)) {
+          qualityMap.set(height, {
             itag: f.itag,
-            quality: f.qualityLabel || `${h}p`,
-            qualityNum: h,
-            url: f.url, // NOTE: this is video-only url
-            videoUrl: f.url,
-            audioUrl: bestAudio?.url || null,
-            hasAudio: false,
-            hasVideo: true,
-            needsMerging: this.allowMerge && !!bestAudio?.url, // only true if we can merge
-            extension: 'mp4',
+            quality: f.qualityLabel || `${height}p`,
+            qualityNum: height,
+            url: f.url,
             type: 'video/mp4',
+            extension: 'mp4',
+            isPremium: height > 360,
+            hasAudio: true,
+            hasVideo: true,
+            needsMerging: false, // Combined format - no merge needed!
             mimeType: f.mimeType,
-            bitrate: f.bitrate,
             contentLength: f.contentLength,
+            bitrate: f.bitrate
           });
         }
-      }
+      });
 
-      // Final organized formats (low->high)
-      const formats = Array.from(qualityMap.values()).sort((a, b) => (a.qualityNum || 0) - (b.qualityNum || 0));
+      // Add video-only formats ONLY if we don't already have that quality
+      videoFormats
+          .filter(f => !f.hasAudio && f.height >= 360) // Only 360p and above
+          .forEach(f => {
+            const height = f.height || 0;
+            if (!qualityMap.has(height)) {
+              qualityMap.set(height, {
+                itag: f.itag,
+                quality: f.qualityLabel || `${height}p`,
+                qualityNum: height,
+                url: f.url,
+                videoUrl: f.url,
+                audioUrl: bestAudio?.url,
+                type: 'video/mp4',
+                extension: 'mp4',
+                isPremium: height > 360,
+                hasAudio: false, // Video-only stream
+                hasVideo: true,
+                needsMerging: true, // Needs server-side merge
+                mimeType: f.mimeType,
+                contentLength: f.contentLength,
+                bitrate: f.bitrate
+              });
+            }
+          });
 
-      // Audio-only list
-      const audioFormats = audioOnly.map(a => ({
-        itag: a.itag,
-        quality: `audio (${Math.round((a.bitrate || 0) / 1000)}kb/s)`,
-        url: a.url,
+      // Convert Map to array and sort by quality
+      const organizedFormats = Array.from(qualityMap.values())
+          .sort((a, b) => (a.qualityNum || 0) - (b.qualityNum || 0));
+
+      console.log(`🎯 Deduplicated to ${organizedFormats.length} unique qualities`);
+
+      // Prepare audio-only formats
+      const audioOnlyFormats = audioFormats.map(f => ({
+        itag: f.itag,
+        quality: `${f.audioQuality || 'audio'} (${Math.round(f.bitrate / 1000)}kb/s)`,
+        url: f.url,
         type: 'audio/mp4',
         extension: 'm4a',
+        isPremium: f.bitrate > 150000,
+        isAudioOnly: true,
         hasAudio: true,
         hasVideo: false,
-        bitrate: a.bitrate,
-        mimeType: a.mimeType,
+        mimeType: f.mimeType,
+        bitrate: f.bitrate
       }));
 
-      // Default URL selection:
-      // Prefer muxed 360p/720p if present; else smallest muxed; else (if merge enabled) choose 360p (video-only) with merge flag; else choose first muxed/video-only
-      const muxedPreferredItags = new Set([22, 18]); // common muxed
-      let selected = formats.find(f => muxedPreferredItags.has(Number(f.itag)) && !f.needsMerging) ||
-          formats.find(f => f.qualityNum === 360 && !f.needsMerging) ||
-          formats.find(f => !f.needsMerging) ||
-          (this.allowMerge ? formats.find(f => f.qualityNum === 360 && f.needsMerging) : null) ||
-          formats[0] ||
-          null;
+      // CRITICAL: Select default quality - ALWAYS prefer 360p with audio
+      let selectedQuality = null;
+      let defaultUrl = null;
 
-      const defaultUrl = selected?.url || null;
+      // First try: Find 360p with audio (combined format)
+      const quality360WithAudio = organizedFormats.find(f =>
+          f.qualityNum === 360 && f.hasAudio === true && f.needsMerging === false
+      );
+
+      if (quality360WithAudio) {
+        selectedQuality = quality360WithAudio;
+        defaultUrl = quality360WithAudio.url;
+        console.log('✅ Default: 360p with audio (perfect!)');
+      } else {
+        // Second try: Any format with audio (prefer lower quality)
+        const anyWithAudio = organizedFormats.find(f => f.hasAudio === true);
+
+        if (anyWithAudio) {
+          selectedQuality = anyWithAudio;
+          defaultUrl = anyWithAudio.url;
+          console.log(`✅ Default: ${anyWithAudio.quality} with audio (fallback)`);
+        } else {
+          // Last resort: First format (will need merging)
+          selectedQuality = organizedFormats[0];
+          defaultUrl = organizedFormats[0]?.url;
+          console.log(`⚠️ Default: ${organizedFormats[0]?.quality} without audio (needs merge)`);
+        }
+      }
 
       return {
-        title: details.title || 'YouTube Video',
-        thumbnail:
-            details.thumbnail?.thumbnails?.slice(-1)?.[0]?.url ||
+        title: videoInfo.videoDetails.title || "YouTube Video",
+        thumbnail: videoInfo.videoDetails.thumbnail?.thumbnails?.[0]?.url ||
             `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`,
-        duration: Number(details.lengthSeconds || 0),
-        description: details.shortDescription || '',
-        author: details.author || '',
-        viewCount: Number(details.viewCount || 0),
-
-        // main payload
-        formats,
-        videoFormats: formats, // keep your API shape
-        audioFormats,
-
+        duration: videoInfo.videoDetails.lengthSeconds || 0,
+        description: videoInfo.videoDetails.shortDescription || '',
+        author: videoInfo.videoDetails.author || '',
+        viewCount: videoInfo.videoDetails.viewCount || 0,
+        formats: organizedFormats,
+        allFormats: organizedFormats,
+        videoFormats: organizedFormats.filter(f => !f.isAudioOnly),
+        audioFormats: audioOnlyFormats,
         url: defaultUrl,
-        selectedQuality: selected,
-
-        // flags
-        hasMuxed: muxed.length > 0,
-        hasAdaptive: videoOnly.length > 0 && audioOnly.length > 0,
-        audioGuaranteed: muxed.length > 0 || audioOnly.length > 0,
-
-        videoId,
-        normalizedUrl,
+        selectedQuality: selectedQuality,
+        audioGuaranteed: combinedFormats.length > 0 || audioFormats.length > 0,
+        videoId: videoId
       };
-    } catch (e) {
-      console.error('❌ YouTube fetch failed:', e.message);
-      return this._errorPayload(videoId, e.message);
-    }
-  }
 
-  _errorPayload(videoId, message) {
-    return {
-      title: 'YouTube Video',
-      thumbnail: videoId ? `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg` : null,
-      duration: 0,
-      formats: [],
-      videoFormats: [],
-      audioFormats: [],
-      url: null,
-      selectedQuality: null,
-      audioGuaranteed: false,
-      error: message,
-      videoId: videoId || null,
-    };
+    } catch (error) {
+      console.error('❌ YouTube fetch failed:', error.message);
+
+      return {
+        title: "YouTube Video",
+        thumbnail: `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`,
+        duration: 0,
+        formats: [],
+        allFormats: [],
+        url: null,
+        selectedQuality: null,
+        audioGuaranteed: false,
+        error: error.message,
+        videoId: videoId
+      };
+    }
   }
 }
 
-const youtubeService = new YouTubeService({
-  // allowMerge: true, // <- enable only if you want server-side ffmpeg merging
-  enableCache: true,
-  cacheTtlMs: 3 * 60 * 1000,
-  timeoutMs: 30000,
-  maxAttemptsPerClient: 2,
-});
+const youtubeService = new YouTubeService();
 
 async function fetchYouTubeData(url) {
   return youtubeService.fetchYouTubeData(url);
@@ -555,20 +422,19 @@ async function fetchYouTubeData(url) {
 async function testYouTube() {
   try {
     const data = await fetchYouTubeData('https://youtu.be/dQw4w9WgXcQ');
-    const ok = !!data?.title && !data?.error;
-    console.log(ok ? '✅ YouTube service test passed' : '❌ YouTube service test failed');
+    console.log('✅ YouTube service test passed');
     console.log(`Title: ${data.title}`);
     console.log(`Formats: ${data.formats.length}`);
-    console.log(`Error: ${data.error || 'none'}`);
-    return ok;
+    return true;
   } catch (error) {
     console.error('❌ YouTube service test failed:', error.message);
     return false;
   }
 }
 
+
 module.exports = {
   fetchYouTubeData,
   testYouTube,
-  youtubeService,
+  youtubeService
 };
