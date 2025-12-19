@@ -11,6 +11,7 @@ RUN apt-get update && \
     python3-pip \
     curl && \
     pip3 install --break-system-packages --no-cache-dir yt-dlp && \
+    ln -s /usr/bin/python3 /usr/bin/python && \
     rm -rf /var/lib/apt/lists/*
 
 # Copy dependency files first (better layer cache)
