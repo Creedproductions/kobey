@@ -2,31 +2,26 @@ FROM node:20-alpine
 
 WORKDIR /app
 
-# Alpine uses apk instead of apt (much smaller)
+# Install dependencies
 RUN apk add --no-cache \
     ffmpeg \
     python3 \
     py3-pip \
     curl
 
-# Alpine doesn't have the Debian restrictions
-RUN pip3 install --no-cache-dir -U yt-dlp
+# Install latest yt-dlp
+RUN pip3 install --no-cache-dir -U yt-dlp --break-system-packages
 
-# Verify installations
-RUN echo "✅ Node version: $(node --version)" && \
-    echo "✅ Python version: $(python3 --version)" && \
-    echo "✅ FFmpeg version: $(ffmpeg -version | head -n1)" && \
-    echo "✅ yt-dlp version: $(yt-dlp --version)"
+# Verify
+RUN yt-dlp --version && \
+    echo "Build successful: $(date)" > /build-info.txt
 
 COPY package*.json ./
-
 RUN npm install --production
 
 COPY . .
 
-# Create temp directory
 RUN mkdir -p /tmp/yt-merge
-
 RUN adduser -D -u 1001 appuser && \
     chown -R appuser:appuser /app /tmp/yt-merge
 
