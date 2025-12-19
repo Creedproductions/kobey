@@ -123,12 +123,30 @@ class YouTubeDownloader {
 
         const data = response.data;
 
-        if (data.streamingData) {
+        // Check for various response structures
+        if (data.streamingData || data.videoDetails) {
           console.log(`✅ ${client.name} client succeeded`);
+
+          // Log what we got
+          if (data.streamingData) {
+            const formatCount = (data.streamingData.formats?.length || 0) +
+                (data.streamingData.adaptiveFormats?.length || 0);
+            console.log(`📊 Found ${formatCount} formats`);
+          }
+
           return this.processInnertubeData(data, videoId);
+        } else {
+          console.warn(`⚠️ ${client.name} returned data but no streamingData`);
         }
       } catch (error) {
-        console.error(`❌ ${client.name} client failed:`, error.message);
+        const status = error.response?.status;
+        const statusText = error.response?.statusText;
+        const errorData = error.response?.data;
+
+        console.error(`❌ ${client.name} client failed: ${error.message}`);
+        if (status) console.error(`   Status: ${status} ${statusText}`);
+        if (errorData) console.error(`   Error:`, JSON.stringify(errorData).substring(0, 200));
+
         continue;
       }
     }
@@ -161,6 +179,14 @@ class YouTubeDownloader {
     formats.forEach(format => {
       if (!format.url) return;
 
+      // Fix protocol-relative URLs
+      let url = format.url;
+      if (url.startsWith('//')) {
+        url = 'https:' + url;
+      } else if (!url.startsWith('http')) {
+        url = 'https://' + url;
+      }
+
       const hasVideo = format.mimeType?.includes('video');
       const hasAudio = format.mimeType?.includes('audio');
       const quality = format.qualityLabel || '';
@@ -170,7 +196,7 @@ class YouTubeDownloader {
         itag: format.itag,
         quality: quality || `${height}p` || 'unknown',
         qualityNum: height,
-        url: format.url,
+        url: url,  // Use fixed URL
         type: format.mimeType?.split(';')[0] || 'video/mp4',
         extension: format.mimeType?.includes('webm') ? 'webm' : 'mp4',
         filesize: format.contentLength || 'unknown',
