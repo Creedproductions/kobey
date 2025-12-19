@@ -1,237 +1,503 @@
-// youtubeService.js (CommonJS) — yt-dlp based (recommended 2025)
-const fs = require("fs");
-const path = require("path");
-const youtubedl = require("youtube-dl-exec"); // auto-installs latest yt-dlp at build time :contentReference[oaicite:5]{index=5}
+const axios = require("axios");
+const { URL } = require("url");
 
-/**
- * ENV options (optional but recommended):
- * - YTDLP_COOKIES_PATH: absolute/relative path to cookies.txt
- * - YTDLP_EXTRACTOR_ARGS: override extractor args
- * - YTDLP_NO_MERGE_ONLY: "1" to return only muxed formats (audio+video in one file)
- *
- * Why cookies/PO tokens matter:
- * YouTube is enforcing PO Tokens for some clients; yt-dlp documents how to handle this. :contentReference[oaicite:6]{index=6}
- */
-
+// Enhanced YouTube ID extraction
 function extractYouTubeId(url) {
-  if (!url) return null;
-
-  const vMatch = url.match(/[?&]v=([a-zA-Z0-9_-]{11})/);
-  if (vMatch) return vMatch[1];
-
-  const shortMatch = url.match(/youtu\.be\/([a-zA-Z0-9_-]{11})/);
-  if (shortMatch) return shortMatch[1];
-
-  const shortsMatch = url.match(/youtube\.com\/shorts\/([a-zA-Z0-9_-]{11})/);
-  if (shortsMatch) return shortsMatch[1];
-
-  const embedMatch = url.match(/youtube\.com\/embed\/([a-zA-Z0-9_-]{11})/);
-  if (embedMatch) return embedMatch[1];
-
-  return null;
-}
-
-function normalizeYouTubeUrl(input) {
-  if (!input) return input;
-
-  // youtu.be -> watch
-  if (input.includes("youtu.be/")) {
-    const id = input.split("youtu.be/")[1].split("?")[0].split("&")[0];
-    return `https://www.youtube.com/watch?v=${id}`;
-  }
-
   try {
-    const u = new URL(input);
-    if (u.hostname === "youtube.com" || u.hostname === "m.youtube.com") {
-      u.hostname = "www.youtube.com";
+    // Parse URL properly
+    const urlObj = new URL(url);
+    const videoId = urlObj.searchParams.get('v');
+
+    if (videoId && videoId.length === 11) return videoId;
+
+    // Check pathname for alternative patterns
+    const path = urlObj.pathname;
+
+    // youtu.be/ID
+    if (path.includes('youtu.be/')) {
+      const id = path.split('youtu.be/')[1]?.split(/[?&\/]/)[0];
+      if (id && id.length === 11) return id;
     }
-    return u.toString();
-  } catch (_) {
-    return input.replace("m.youtube.com", "www.youtube.com");
+
+    // shorts/ID
+    if (path.includes('shorts/')) {
+      const id = path.split('shorts/')[1]?.split(/[?&\/]/)[0];
+      if (id && id.length === 11) return id;
+    }
+
+    // embed/ID
+    if (path.includes('embed/')) {
+      const id = path.split('embed/')[1]?.split(/[?&\/]/)[0];
+      if (id && id.length === 11) return id;
+    }
+
+    // Last resort: regex search
+    const regexPatterns = [
+      /(?:v=|\/)([0-9A-Za-z_-]{11})/,
+      /youtu\.be\/([0-9A-Za-z_-]{11})/,
+      /embed\/([0-9A-Za-z_-]{11})/,
+      /shorts\/([0-9A-Za-z_-]{11})/
+    ];
+
+    for (const pattern of regexPatterns) {
+      const match = url.match(pattern);
+      if (match && match[1]) return match[1];
+    }
+
+    return null;
+  } catch (error) {
+    console.error("URL parsing error:", error.message);
+    return null;
   }
 }
 
-function extractQualityNumber(label) {
-  if (!label) return 0;
-  const m = String(label).match(/(\d+)p/);
-  if (m) return parseInt(m[1], 10);
-  const q = String(label).toLowerCase();
-  if (q.includes("2160") || q.includes("4k")) return 2160;
-  if (q.includes("1440") || q.includes("2k")) return 1440;
-  if (q.includes("1080")) return 1080;
-  if (q.includes("720")) return 720;
-  if (q.includes("480")) return 480;
-  if (q.includes("360")) return 360;
-  if (q.includes("240")) return 240;
-  if (q.includes("144")) return 144;
-  return 0;
+// Primary: Use yt-dlp or ytdl-core style approach
+async function fetchYouTubeData(url) {
+  const videoId = extractYouTubeId(url);
+  if (!videoId) {
+    throw new Error("Invalid YouTube URL - Could not extract video ID");
+  }
+
+  console.log(`🎬 Processing YouTube video: ${videoId}`);
+
+  // Strategy 1: Direct YouTube API with signature deciphering
+  try {
+    const result = await fetchWithDirectAPI(videoId);
+    if (result.items.length > 0) {
+      console.log(`✅ Direct API success: ${result.items.length} formats`);
+      return processFormats(result);
+    }
+  } catch (error) {
+    console.log("⚠️ Direct API failed:", error.message);
+  }
+
+  // Strategy 2: Piped API (Invidious alternative)
+  try {
+    const result = await fetchWithPipedAPI(videoId);
+    if (result.items.length > 0) {
+      console.log(`✅ Piped API success: ${result.items.length} formats`);
+      return processFormats(result);
+    }
+  } catch (error) {
+    console.log("⚠️ Piped API failed:", error.message);
+  }
+
+  // Strategy 3: YouTube MP3 API (works for most videos)
+  try {
+    const result = await fetchWithYouTubeMP3(videoId);
+    if (result.items.length > 0) {
+      console.log(`✅ YouTubeMP3 success: ${result.items.length} formats`);
+      return processFormats(result);
+    }
+  } catch (error) {
+    console.log("⚠️ YouTubeMP3 failed:", error.message);
+  }
+
+  // Strategy 4: y2mate API fallback
+  try {
+    const result = await fetchWithY2Mate(videoId);
+    if (result.items.length > 0) {
+      console.log(`✅ Y2Mate success: ${result.items.length} formats`);
+      return processFormats(result);
+    }
+  } catch (error) {
+    console.log("⚠️ Y2Mate failed:", error.message);
+  }
+
+  // Strategy 5: Return metadata only with download links
+  try {
+    const metadata = await fetchVideoMetadata(videoId);
+    return {
+      ...metadata,
+      error: "Direct download formats unavailable. Use alternative services.",
+      alternative_links: [
+        `https://ssyoutube.com/watch?v=${videoId}`,
+        `https://en.savefrom.net/watch?v=${videoId}`,
+        `https://ytmp3.cc/youtube-to-mp3/${videoId}`
+      ]
+    };
+  } catch (error) {
+    throw new Error(`All download methods failed. Video may be age-restricted or private.`);
+  }
 }
 
-function getExtensionFromType(mimeType, fallbackExt = "mp4") {
-  if (!mimeType) return fallbackExt;
-  const m = String(mimeType).toLowerCase();
-  if (m.includes("video/mp4")) return "mp4";
-  if (m.includes("video/webm")) return "webm";
-  if (m.includes("audio/mp4")) return "m4a";
-  if (m.includes("audio/webm")) return "webm";
-  if (m.includes("audio/mpeg")) return "mp3";
-  return fallbackExt;
-}
-
-function pickThumbnail(meta) {
-  // yt-dlp can give thumbnail or thumbnails[]
-  if (meta.thumbnail) return meta.thumbnail;
-  const arr = Array.isArray(meta.thumbnails) ? meta.thumbnails : [];
-  if (!arr.length) return null;
-  // pick largest-ish
-  const sorted = [...arr].sort((a, b) => (a.width || 0) - (b.width || 0));
-  return sorted[sorted.length - 1].url || null;
-}
-
-/**
- * Converts yt-dlp format objects to your service "items" array
- */
-function formatsToItems(meta) {
-  const formats = Array.isArray(meta.formats) ? meta.formats : [];
-  const items = [];
-  const seen = new Set();
-
-  for (const f of formats) {
-    if (!f || !f.url) continue;
-
-    // yt-dlp fields: acodec, vcodec, ext, format_note, format_id, filesize, filesize_approx, protocol, etc.
-    const acodec = f.acodec || "none";
-    const vcodec = f.vcodec || "none";
-    const hasAudio = acodec !== "none";
-    const hasVideo = vcodec !== "none";
-
-    // Skip storyboards / images
-    if (!hasAudio && !hasVideo) continue;
-
-    const labelParts = [];
-    const q = f.height ? `${f.height}p` : (f.format_note || f.format_id || "unknown");
-    labelParts.push(q);
-
-    if (hasVideo && !hasAudio) labelParts.push("video only");
-    if (hasAudio && !hasVideo) labelParts.push("audio only");
-
-    // Prefer showing container/codec info lightly
-    if (f.ext) labelParts.push(f.ext);
-
-    const label = labelParts.join(" • ");
-
-    const mime =
-        f.mime_type ||
-        (hasVideo ? `video/${f.ext || "mp4"}` : `audio/${f.ext || "m4a"}`);
-
-    const filesize = f.filesize || f.filesize_approx || "unknown";
-
-    const key = `${f.format_id}::${label}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-
-    items.push({
-      url: f.url,
-      label,
-      type: mime,
-      ext: f.ext || getExtensionFromType(mime, "mp4"),
-      filesize,
-      has_audio: hasAudio,
-      has_video: hasVideo,
-      // optional extra fields if you want them later
-      format_id: f.format_id,
-      fps: f.fps,
-      abr: f.abr,
-      tbr: f.tbr,
-      vcodec,
-      acodec,
+// Method 1: Direct YouTube API (uses innertube)
+async function fetchWithDirectAPI(videoId) {
+  try {
+    const response = await axios.get(`https://www.youtube.com/watch?v=${videoId}`, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept-Language': 'en-US,en;q=0.9'
+      }
     });
+
+    const html = response.data;
+
+    // Extract ytInitialPlayerResponse
+    const ytInitialPlayerResponseMatch = html.match(/ytInitialPlayerResponse\s*=\s*({.+?})\s*;/);
+    const ytInitialDataMatch = html.match(/ytInitialData\s*=\s*({.+?})\s*;/);
+
+    let playerResponse, videoDetails, streamingData;
+
+    if (ytInitialPlayerResponseMatch) {
+      try {
+        playerResponse = JSON.parse(ytInitialPlayerResponseMatch[1]);
+        videoDetails = playerResponse.videoDetails;
+        streamingData = playerResponse.streamingData;
+      } catch (e) {
+        console.log("Failed to parse player response");
+      }
+    }
+
+    // If no streaming data, try to extract from ytInitialData
+    if (!streamingData && ytInitialDataMatch) {
+      try {
+        const initialData = JSON.parse(ytInitialDataMatch[1]);
+        // Navigate through the complex structure to find video info
+        const contents = initialData?.contents?.twoColumnWatchNextResults?.results?.results?.contents;
+        if (contents) {
+          for (const content of contents) {
+            if (content.videoPrimaryInfoRenderer) {
+              videoDetails = videoDetails || {};
+              videoDetails.title = content.videoPrimaryInfoRenderer.title?.runs?.[0]?.text || "YouTube Video";
+            }
+          }
+        }
+      } catch (e) {
+        console.log("Failed to parse initial data");
+      }
+    }
+
+    const formats = [];
+    if (streamingData) {
+      if (streamingData.formats) {
+        formats.push(...streamingData.formats.map(f => ({
+          url: f.url,
+          label: f.qualityLabel || `${f.height}p`,
+          type: f.mimeType,
+          quality: f.height,
+          hasAudio: true
+        })));
+      }
+
+      if (streamingData.adaptiveFormats) {
+        formats.push(...streamingData.adaptiveFormats.map(f => ({
+          url: f.url,
+          label: f.qualityLabel || (f.mimeType.includes('audio') ? 'audio' : `${f.height}p`),
+          type: f.mimeType,
+          quality: f.height,
+          hasAudio: !f.mimeType.includes('video')
+        })));
+      }
+    }
+
+    return {
+      title: videoDetails?.title || "YouTube Video",
+      thumbnail: `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`,
+      duration: videoDetails?.lengthSeconds || 0,
+      items: formats
+    };
+  } catch (error) {
+    throw new Error(`Direct API failed: ${error.message}`);
+  }
+}
+
+// Method 2: Piped API (Invidious alternative)
+async function fetchWithPipedAPI(videoId) {
+  const pipedInstances = [
+    'https://pipedapi.kavin.rocks',
+    'https://pipedapi.moomoo.me',
+    'https://pipedapi-libre.kavin.rocks'
+  ];
+
+  for (const instance of pipedInstances) {
+    try {
+      const response = await axios.get(`${instance}/streams/${videoId}`, {
+        timeout: 10000,
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+      });
+
+      const data = response.data;
+      const formats = [];
+
+      // Video streams
+      if (data.videoStreams) {
+        data.videoStreams.forEach(stream => {
+          if (stream.url) {
+            formats.push({
+              url: stream.url,
+              label: stream.quality || `${stream.height}p`,
+              type: stream.mimeType || 'video/mp4',
+              quality: stream.height,
+              hasAudio: stream.hasAudio || false
+            });
+          }
+        });
+      }
+
+      // Audio streams
+      if (data.audioStreams) {
+        data.audioStreams.forEach(stream => {
+          if (stream.url) {
+            formats.push({
+              url: stream.url,
+              label: 'audio',
+              type: stream.mimeType || 'audio/mp4',
+              quality: 0,
+              hasAudio: true
+            });
+          }
+        });
+      }
+
+      return {
+        title: data.title || "YouTube Video",
+        thumbnail: data.thumbnailUrl || `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`,
+        duration: data.duration || 0,
+        items: formats
+      };
+    } catch (error) {
+      console.log(`Piped instance ${instance} failed: ${error.message}`);
+      continue;
+    }
   }
 
-  // sort by quality asc (audio-only last)
-  items.sort((a, b) => {
-    const aAudioOnly = a.has_audio && !a.has_video;
-    const bAudioOnly = b.has_audio && !b.has_video;
-    if (aAudioOnly && !bAudioOnly) return 1;
-    if (!aAudioOnly && bAudioOnly) return -1;
+  throw new Error("All Piped instances failed");
+}
 
-    const aq = extractQualityNumber(a.label);
-    const bq = extractQualityNumber(b.label);
-    return aq - bq;
+// Method 3: YouTube MP3 API
+async function fetchWithYouTubeMP3(videoId) {
+  try {
+    // First get video info
+    const infoResponse = await axios.get(`https://www.youtube.com/get_video_info?video_id=${videoId}&el=detailpage&ps=default`, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+      }
+    });
+
+    const videoInfo = new URLSearchParams(infoResponse.data);
+    const playerResponse = videoInfo.get('player_response');
+
+    if (playerResponse) {
+      const parsed = JSON.parse(playerResponse);
+      const streamingData = parsed.streamingData;
+      const formats = [];
+
+      if (streamingData?.formats) {
+        streamingData.formats.forEach(f => {
+          if (f.url) {
+            formats.push({
+              url: f.url,
+              label: f.qualityLabel || `${f.height}p`,
+              type: f.mimeType,
+              quality: f.height,
+              hasAudio: true
+            });
+          }
+        });
+      }
+
+      return {
+        title: parsed.videoDetails?.title || "YouTube Video",
+        thumbnail: parsed.videoDetails?.thumbnail?.thumbnails?.[0]?.url ||
+            `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`,
+        duration: parsed.videoDetails?.lengthSeconds || 0,
+        items: formats
+      };
+    }
+
+    throw new Error("No player response");
+  } catch (error) {
+    // Fallback to external service
+    try {
+      const response = await axios.get(`https://ytmp3.nu/api/getInfo?id=${videoId}`, {
+        timeout: 15000
+      });
+
+      if (response.data && response.data.url) {
+        return {
+          title: response.data.title || "YouTube Video",
+          thumbnail: response.data.thumbnail || `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`,
+          duration: response.data.duration || 0,
+          items: [{
+            url: response.data.url,
+            label: 'MP3',
+            type: 'audio/mpeg',
+            quality: 0,
+            hasAudio: true
+          }]
+        };
+      }
+    } catch (fallbackError) {
+      throw new Error(`YouTubeMP3 failed: ${error.message}`);
+    }
+  }
+}
+
+// Method 4: Y2Mate API
+async function fetchWithY2Mate(videoId) {
+  try {
+    // First request to get analysis ID
+    const analyzeResponse = await axios.post('https://www.y2mate.com/mates/analyzeV2/ajax',
+        `k_query=https://www.youtube.com/watch?v=${videoId}&k_page=home&hl=en&q_auto=0`,
+        {
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Origin': 'https://www.y2mate.com',
+            'Referer': 'https://www.y2mate.com/'
+          }
+        }
+    );
+
+    const analyzeData = analyzeResponse.data;
+    if (analyzeData.status !== 'ok') throw new Error("Analysis failed");
+
+    // Second request to get download links
+    const convertResponse = await axios.post('https://www.y2mate.com/mates/convertV2/index',
+        `vid=${videoId}&k=${analyzeData.vid}`,
+        {
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Origin': 'https://www.y2mate.com',
+            'Referer': 'https://www.y2mate.com/'
+          }
+        }
+    );
+
+    const convertData = convertResponse.data;
+    const formats = [];
+
+    // Parse MP4 formats
+    if (convertData.links?.mp4) {
+      Object.entries(convertData.links.mp4).forEach(([quality, data]) => {
+        if (data.q && data.k) {
+          formats.push({
+            url: `https://www.y2mate.com/mates/download/${data.k}/${videoId}`,
+            label: quality,
+            type: 'video/mp4',
+            quality: parseInt(quality) || 0,
+            hasAudio: true
+          });
+        }
+      });
+    }
+
+    return {
+      title: analyzeData.title || "YouTube Video",
+      thumbnail: `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`,
+      duration: 0,
+      items: formats
+    };
+  } catch (error) {
+    throw new Error(`Y2Mate failed: ${error.message}`);
+  }
+}
+
+// Metadata fallback
+async function fetchVideoMetadata(videoId) {
+  try {
+    // Try oEmbed first
+    const oembedResponse = await axios.get(
+        `https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${videoId}&format=json`,
+        { timeout: 10000 }
+    );
+
+    return {
+      title: oembedResponse.data.title || "YouTube Video",
+      thumbnail: oembedResponse.data.thumbnail_url,
+      duration: 0,
+      author: oembedResponse.data.author_name,
+      formats: [],
+      alternative_download: `https://ssyoutube.com/watch?v=${videoId}`
+    };
+  } catch (error) {
+    // Fallback to direct page scraping
+    try {
+      const pageResponse = await axios.get(`https://www.youtube.com/watch?v=${videoId}`, {
+        headers: { 'User-Agent': 'Mozilla/5.0' }
+      });
+
+      const html = pageResponse.data;
+      const titleMatch = html.match(/<meta name="title" content="([^"]+)"/);
+      const thumbnailMatch = html.match(/<meta property="og:image" content="([^"]+)"/);
+
+      return {
+        title: titleMatch ? titleMatch[1].replace(' - YouTube', '') : "YouTube Video",
+        thumbnail: thumbnailMatch ? thumbnailMatch[1] : `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`,
+        duration: 0,
+        formats: [],
+        alternative_download: `https://en.savefrom.net/watch?v=${videoId}`
+      };
+    } catch (pageError) {
+      throw new Error("Could not fetch video metadata");
+    }
+  }
+}
+
+// Process formats into consistent structure
+function processFormats(data) {
+  const qualityOptions = data.items.map(item => {
+    const qualityNum = item.quality || 0;
+    const isAudio = item.label.toLowerCase().includes('audio') || item.type.includes('audio');
+    const isPremium = !isAudio && qualityNum > 360;
+
+    return {
+      quality: item.label,
+      qualityNum: qualityNum,
+      url: item.url,
+      type: item.type,
+      extension: getExtensionFromType(item.type),
+      filesize: 'unknown',
+      isPremium: isPremium,
+      hasAudio: item.hasAudio,
+      isAudioOnly: isAudio
+    };
   });
 
-  return items;
-}
+  // Sort by quality
+  qualityOptions.sort((a, b) => {
+    if (a.isAudioOnly && !b.isAudioOnly) return 1;
+    if (!a.isAudioOnly && b.isAudioOnly) return -1;
+    return a.qualityNum - b.qualityNum;
+  });
 
-/**
- * Strong defaults for 2025:
- * Use clients that are currently less likely to require PO tokens for playback URLs.
- * yt-dlp’s PO token guide notes tv clients generally don’t require them, and web_safari can provide HLS formats. :contentReference[oaicite:7]{index=7}
- */
-function defaultExtractorArgs() {
-  return "youtube:player_client=tv,web_safari,web";
-}
-
-async function fetchYouTubeData(url) {
-  const normalizedUrl = normalizeYouTubeUrl(url);
-  const id = extractYouTubeId(normalizedUrl);
-  if (!id) throw new Error("Could not extract YouTube video id");
-
-  // If someone passes /shorts/, yt-dlp can handle it, but watch URL is safer
-  const safeUrl = normalizedUrl.includes("/shorts/")
-      ? `https://www.youtube.com/watch?v=${id}`
-      : normalizedUrl;
-
-  const cookiesPath = process.env.YTDLP_COOKIES_PATH;
-  const noMergeOnly = process.env.YTDLP_NO_MERGE_ONLY === "1";
-
-  // main extractor args (overrideable)
-  const extractorArgs = process.env.YTDLP_EXTRACTOR_ARGS || defaultExtractorArgs();
-
-  // yt-dlp JSON metadata
-  let meta;
-  try {
-    meta = await youtubedl(safeUrl, {
-      dumpSingleJson: true,
-      noWarnings: true,
-      noPlaylist: true,
-      // Helps reduce random failures / scraping paths
-      preferFreeFormats: true,
-      // keep it quick; you’re only extracting URLs, not downloading here
-      socketTimeout: 20,
-      extractorArgs,
-
-      ...(cookiesPath && fs.existsSync(cookiesPath) ? { cookies: cookiesPath } : {}),
-    });
-  } catch (e) {
-    // yt-dlp returns useful stderr in e.stderr sometimes
-    const extra = e?.stderr ? ` | stderr: ${String(e.stderr).slice(0, 300)}` : "";
-    throw new Error(`yt-dlp failed: ${e.message}${extra}`);
-  }
-
-  if (!meta) throw new Error("yt-dlp returned empty metadata");
-
-  // Build items
-  let items = formatsToItems(meta);
-
-  if (noMergeOnly) {
-    // only muxed formats (audio+video) — this is the only way to guarantee “no merging”
-    // Reality: YouTube usually caps muxed quality (often <=720p).
-    items = items.filter((x) => x.has_audio && x.has_video);
-  }
-
-  if (!items.length) {
-    throw new Error(
-        "No formats found by yt-dlp. If this is happening for many videos, you likely need cookies/PO tokens per yt-dlp PO Token Guide."
-    );
-  }
+  const selectedFormat = qualityOptions.find(opt => !opt.isAudioOnly && opt.qualityNum === 360) ||
+      qualityOptions.find(opt => !opt.isAudioOnly) ||
+      qualityOptions[0];
 
   return {
-    title: meta.title || "YouTube Video",
-    cover: pickThumbnail(meta),
-    duration: meta.duration || null,
-    items,
+    title: data.title,
+    thumbnail: data.thumbnail,
+    duration: data.duration,
+    isShorts: data.title?.toLowerCase().includes('#shorts') || false,
+    formats: qualityOptions,
+    allFormats: qualityOptions,
+    url: selectedFormat ? selectedFormat.url : null,
+    selectedQuality: selectedFormat,
+    audioGuaranteed: selectedFormat ? selectedFormat.hasAudio : false
   };
+}
+
+function getExtensionFromType(mimeType) {
+  if (!mimeType) return 'mp4';
+
+  const typeMap = {
+    'video/mp4': 'mp4',
+    'video/webm': 'webm',
+    'audio/mp4': 'm4a',
+    'audio/mpeg': 'mp3',
+    'audio/webm': 'webm'
+  };
+
+  for (const [type, ext] of Object.entries(typeMap)) {
+    if (mimeType.includes(type)) return ext;
+  }
+
+  return 'mp4';
 }
 
 module.exports = { fetchYouTubeData };
