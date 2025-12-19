@@ -1,85 +1,80 @@
 const express = require('express');
-const fs = require('fs');
-const path = require('path');
-const os = require('os');
-
 const router = express.Router();
+const mergeService = require('../Services/mergeService');
+const fs = require('fs');
 
-const mergeTokenStore = require('../Services/mergeTokenStore');
-const { youtubeService } = require('../Services/youtubeServiceNew');
+/**
+ * POST /api/merge-audio
+ * Merges video and audio streams and returns the merged file
+ */
+router.post('/merge-audio', async (req, res) => {
+    const { videoUrl, audioUrl } = req.body;
 
-// Token -> Promise (merge in progress)
-const inProgress = new Map();
+    if (!videoUrl || !audioUrl) {
+        return res.status(400).json({
+            success: false,
+            error: 'Missing videoUrl or audioUrl'
+        });
+    }
 
-// Token -> { filePath, createdAt }
-const completed = new Map();
+    let mergedFilePath = null;
 
-// Optional cleanup (delete completed files after 30 min)
-const COMPLETED_TTL_MS = 30 * 60 * 1000;
+    try {
+        console.log('🎬 Merge request received');
 
-function cleanupCompleted() {
-    const now = Date.now();
-    for (const [token, info] of completed.entries()) {
-        if (now - info.createdAt > COMPLETED_TTL_MS) {
-            try {
-                if (info.filePath && fs.existsSync(info.filePath)) fs.unlinkSync(info.filePath);
-            } catch (_) {}
-            completed.delete(token);
-            mergeTokenStore.deleteToken?.(token); // if you implement deleteToken
+        // Perform the merge
+        mergedFilePath = await mergeService.mergeStreams(videoUrl, audioUrl);
+
+        // Check file exists
+        if (!fs.existsSync(mergedFilePath)) {
+            throw new Error('Merged file not found');
         }
-    }
-}
 
-router.get('/merge/:token', async (req, res) => {
-    const { token } = req.params;
+        // Get file stats
+        const stats = fs.statSync(mergedFilePath);
+        console.log(`✅ Merge complete. Sending file (${(stats.size / 1024 / 1024).toFixed(2)} MB)`);
 
-    // Clean old cached merges sometimes
-    cleanupCompleted();
-
-    // 1) If already merged -> stream file immediately
-    const done = completed.get(token);
-    if (done?.filePath && fs.existsSync(done.filePath)) {
+        // Set headers for download
         res.setHeader('Content-Type', 'video/mp4');
-        res.setHeader('Content-Disposition', 'attachment; filename="video.mp4"');
-        return fs.createReadStream(done.filePath).pipe(res);
-    }
+        res.setHeader('Content-Length', stats.size);
+        res.setHeader('Content-Disposition', 'attachment; filename="merged_video.mp4"');
 
-    // 2) If merge already running -> don't start again
-    if (inProgress.has(token)) {
-        // IMPORTANT: client should retry after a few seconds
-        return res.status(202).json({ success: false, status: 'merging', token });
-    }
+        // Stream the file to client
+        const fileStream = fs.createReadStream(mergedFilePath);
 
-    // 3) Validate token data
-    const payload = mergeTokenStore.getToken(token);
-    if (!payload?.videoUrl || !payload?.audioUrl) {
-        return res.status(404).json({ success: false, error: 'Invalid/expired merge token' });
-    }
+        fileStream.pipe(res);
 
-    // 4) Start merge ONCE
-    const outPath = path.join(os.tmpdir(), 'yt-merge', `merged_${token}.mp4`);
-    try {
-        fs.mkdirSync(path.dirname(outPath), { recursive: true });
-    } catch (_) {}
+        // Cleanup after sending
+        fileStream.on('end', () => {
+            console.log('📤 File sent successfully');
+            // Cleanup after a delay to ensure file is fully sent
+            setTimeout(() => {
+                mergeService.cleanup(mergedFilePath);
+            }, 5000);
+        });
 
-    const mergePromise = (async () => {
-        await youtubeService.mergeVideoAudio(payload.videoUrl, payload.audioUrl, outPath);
-        completed.set(token, { filePath: outPath, createdAt: Date.now() });
-        return outPath;
-    })();
+        fileStream.on('error', (error) => {
+            console.error('❌ File stream error:', error);
+            if (mergedFilePath) {
+                mergeService.cleanup(mergedFilePath);
+            }
+        });
 
-    inProgress.set(token, mergePromise);
+    } catch (error) {
+        console.error('❌ Merge error:', error);
 
-    try {
-        const filePath = await mergePromise;
-        inProgress.delete(token);
+        // Cleanup on error
+        if (mergedFilePath) {
+            mergeService.cleanup(mergedFilePath);
+        }
 
-        res.setHeader('Content-Type', 'video/mp4');
-        res.setHeader('Content-Disposition', 'attachment; filename="video.mp4"');
-        return fs.createReadStream(filePath).pipe(res);
-    } catch (err) {
-        inProgress.delete(token);
-        return res.status(500).json({ success: false, error: err.message });
+        if (!res.headersSent) {
+            res.status(500).json({
+                success: false,
+                error: 'Failed to merge video and audio',
+                details: error.message
+            });
+        }
     }
 });
 
