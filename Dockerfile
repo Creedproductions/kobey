@@ -7,14 +7,18 @@ RUN apk add --no-cache \
     ffmpeg \
     python3 \
     py3-pip \
-    curl
+    curl \
+    bash
 
 # Install yt-dlp
 RUN pip3 install --no-cache-dir -U yt-dlp --break-system-packages
 
+# Copy cookies file from root of repository (if exists)
+COPY cookies.txt /cookies.txt
+COPY cookies.txt /app/cookies.txt  # Also copy to app directory for easier access
+
 COPY package*.json ./
 
-# Install Node.js dependencies (use --omit=dev instead of --production)
 RUN npm install --omit=dev
 
 COPY . .
@@ -22,8 +26,11 @@ COPY . .
 # Create temp directory
 RUN mkdir -p /tmp/yt-merge
 
+# Set proper permissions for cookies and app
 RUN adduser -D -u 1001 appuser && \
-    chown -R appuser:appuser /app /tmp/yt-merge
+    mkdir -p /home/appuser && \
+    chown -R appuser:appuser /app /tmp/yt-merge /home/appuser && \
+    chmod 644 /cookies.txt /app/cookies.txt 2>/dev/null || true
 
 USER appuser
 

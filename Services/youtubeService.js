@@ -2,11 +2,49 @@ const { spawn } = require('child_process');
 const { URL } = require('url');
 const os = require('os');
 const path = require('path');
+const fs = require('fs');
 
 class YouTubeService {
   constructor() {
     this.ytDlpPath = this.findYtDlp();
     this.tempDir = path.join(os.tmpdir(), 'yt-merge');
+    this.cookiesPath = this.getCookiesPath();
+
+    // Log cookies status on startup
+    if (this.cookiesPath) {
+      console.log(`✅ YouTubeService: Found cookies at ${this.cookiesPath}`);
+      try {
+        const stats = fs.statSync(this.cookiesPath);
+        const sizeKB = (stats.size / 1024).toFixed(2);
+        console.log(`📊 Cookies file size: ${sizeKB} KB`);
+      } catch (err) {
+        console.log('⚠️ Could not read cookies file stats');
+      }
+    } else {
+      console.log('⚠️ YouTubeService: No cookies file found. Age-restricted videos may fail.');
+    }
+  }
+
+  getCookiesPath() {
+    const possiblePaths = [
+      '/cookies.txt',
+      '/app/cookies.txt',
+      path.join(__dirname, 'cookies.txt'),
+      path.join(process.cwd(), 'cookies.txt'),
+      'cookies.txt'
+    ];
+
+    for (const cookiePath of possiblePaths) {
+      try {
+        if (fs.existsSync(cookiePath)) {
+          return cookiePath;
+        }
+      } catch (err) {
+        // Continue checking other paths
+      }
+    }
+
+    return null;
   }
 
   findYtDlp() {
@@ -113,6 +151,12 @@ class YouTubeService {
         '--geo-bypass'
       ];
 
+      // Add cookies if available
+      if (this.cookiesPath) {
+        args.push('--cookies', this.cookiesPath);
+        console.log(`🍪 Using cookies from: ${this.cookiesPath}`);
+      }
+
       const ytDlpProcess = spawn(this.ytDlpPath, args, {
         stdio: ['ignore', 'pipe', 'pipe'],
         timeout: 30000
@@ -147,7 +191,8 @@ class YouTubeService {
               url: formats.length > 0 ? formats[0].url : null,
               selectedQuality: formats.length > 0 ? formats[0] : null,
               audioGuaranteed: formats.length > 0 ? formats[0].hasAudio : false,
-              videoId: videoId
+              videoId: videoId,
+              cookiesUsed: this.cookiesPath ? true : false
             };
 
             console.log(`✅ yt-dlp found ${formats.length} formats`);
@@ -161,7 +206,13 @@ class YouTubeService {
         } else {
           console.error('❌ yt-dlp failed with code:', code);
           console.error('stderr:', stderr);
-          reject(new Error(`yt-dlp failed: ${stderr || 'Unknown error'}`));
+
+          // Check if it's an age-restriction error
+          if (stderr.includes('age-restricted') || stderr.includes('private')) {
+            reject(new Error('Video is age-restricted or private. Make sure cookies are valid for this account.'));
+          } else {
+            reject(new Error(`yt-dlp failed: ${stderr || 'Unknown error'}`));
+          }
         }
       });
 
@@ -240,6 +291,53 @@ class YouTubeService {
 
     return formats;
   }
+
+  // Test cookies functionality
+  async testCookies() {
+    if (!this.cookiesPath) {
+      return {
+        success: false,
+        message: 'No cookies file found'
+      };
+    }
+
+    try {
+      // Test with a known public video
+      const testVideoId = 'dQw4w9WgXcQ'; // Rickroll
+      console.log(`🍪 Testing cookies with video: ${testVideoId}`);
+
+      const args = [
+        `https://www.youtube.com/watch?v=${testVideoId}`,
+        '--dump-json',
+        '--no-warnings',
+        '--ignore-errors',
+        '--no-playlist',
+        '--cookies',
+        this.cookiesPath,
+        '--skip-download'
+      ];
+
+      const { execSync } = require('child_process');
+      const output = execSync(`yt-dlp ${args.join(' ')}`, {
+        encoding: 'utf8',
+        timeout: 10000
+      });
+
+      const info = JSON.parse(output);
+      return {
+        success: true,
+        message: 'Cookies are working',
+        videoTitle: info.title || 'Unknown',
+        cookiesPath: this.cookiesPath
+      };
+    } catch (error) {
+      return {
+        success: false,
+        message: `Cookies test failed: ${error.message}`,
+        cookiesPath: this.cookiesPath
+      };
+    }
+  }
 }
 
 // Create singleton instance
@@ -264,7 +362,14 @@ async function testYouTube() {
   }
 }
 
+// Export cookies test function
+async function testCookies() {
+  return youtubeService.testCookies();
+}
+
 module.exports = {
   fetchYouTubeData,
-  testYouTube
+  testYouTube,
+  testCookies,
+  youtubeService
 };
