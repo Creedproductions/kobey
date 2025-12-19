@@ -2,16 +2,25 @@ FROM node:20-slim
 
 WORKDIR /app
 
-# Install FFmpeg and other dependencies
+# Install system dependencies: Python, FFmpeg, and yt-dlp
 RUN apt-get update && \
     apt-get install -y \
     ca-certificates \
     ffmpeg \
+    python3 \
+    python3-pip \
+    curl \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
 
-# Verify FFmpeg installation
-RUN ffmpeg -version
+# Install yt-dlp using pip
+RUN pip3 install --no-cache-dir -U yt-dlp
+
+# Verify installations
+RUN echo "✅ Node version: $(node --version)" && \
+    echo "✅ Python version: $(python3 --version)" && \
+    echo "✅ FFmpeg version: $(ffmpeg -version | head -n1)" && \
+    echo "✅ yt-dlp version: $(yt-dlp --version)"
 
 COPY package*.json ./
 

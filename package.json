@@ -8,6 +8,7 @@
   "scripts": {
     "start": "node App.js",
     "dev": "nodemon App.js",
+    "postinstall": "chmod +x koyeb-setup.sh && ./koyeb-setup.sh",
     "build": "echo 'Build completed successfully.'"
   },
   "dependencies": {
