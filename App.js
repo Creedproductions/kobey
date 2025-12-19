@@ -3,6 +3,7 @@ const cors = require('cors');
 const downloaderRoutes = require('./Routes/downloaderRoutes');
 const mergeRoutes = require('./mergeRoutes'); // NEW
 const config = require('./Config/config');
+const convertRoutes = require('./Routes/convertRoutes');
 
 const app = express();
 
@@ -19,6 +20,7 @@ const corsOptions = {
   methods: ['GET', 'POST', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
 };
+app.use('/api', convertRoutes);
 
 const setupMiddleware = () => {
   app.use(express.json());
