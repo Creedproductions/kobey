@@ -219,10 +219,18 @@ class YouTubeDownloader {
 
     videoFormats.forEach(format => {
       if (format.qualityNum >= 480 && bestAudio) {
+        // Ensure audio URL has proper protocol
+        let audioUrl = bestAudio.url;
+        if (audioUrl.startsWith('//')) {
+          audioUrl = 'https:' + audioUrl;
+        } else if (!audioUrl.startsWith('http')) {
+          audioUrl = 'https://' + audioUrl;
+        }
+
         qualityOptions.push({
           quality: format.quality,
           qualityNum: format.qualityNum,
-          url: `MERGE:${format.url}:${bestAudio.url}`,
+          url: `MERGE:${format.url}:${audioUrl}`,
           type: format.type,
           extension: format.extension,
           filesize: format.filesize,
