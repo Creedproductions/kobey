@@ -6,7 +6,7 @@ const audioMergerService = require("./audioMergerService");
  */
 async function fetchYouTubeData(url) {
   const normalizedUrl = normalizeYouTubeUrl(url);
-  console.log(`🔍 Fetching YouTube data for: ${normalizedUrl}`);
+  console.log(`ðŸ” Fetching YouTube data for: ${normalizedUrl}`);
 
   let attempts = 0;
   const maxAttempts = 3;
@@ -18,11 +18,11 @@ async function fetchYouTubeData(url) {
       return await fetchWithVidFlyApi(normalizedUrl, attempts);
     } catch (err) {
       lastError = err;
-      console.error(`❌ Attempt ${attempts}/${maxAttempts} failed: ${err.message}`);
+      console.error(`âŒ Attempt ${attempts}/${maxAttempts} failed: ${err.message}`);
 
       if (attempts < maxAttempts) {
         const backoffMs = Math.min(1000 * Math.pow(2, attempts - 1), 8000);
-        console.log(`⏱️ Retrying in ${backoffMs/1000} seconds...`);
+        console.log(`â±ï¸ Retrying in ${backoffMs/1000} seconds...`);
         await new Promise(resolve => setTimeout(resolve, backoffMs));
       }
     }
@@ -85,12 +85,12 @@ async function fetchWithVidFlyApi(url, attemptNum) {
 
     return processYouTubeData(data, url);
   } catch (err) {
-    console.error(`❌ YouTube API error on attempt ${attemptNum}:`, err.message);
+    console.error(`âŒ YouTube API error on attempt ${attemptNum}:`, err.message);
 
     if (err.response) {
-      console.error(`📡 Response status: ${err.response.status}`);
+      console.error(`ðŸ“¡ Response status: ${err.response.status}`);
       if (err.response.data) {
-        console.error(`📡 Response data:`,
+        console.error(`ðŸ“¡ Response data:`,
             typeof err.response.data === 'object'
                 ? JSON.stringify(err.response.data).substring(0, 200) + '...'
                 : String(err.response.data).substring(0, 200) + '...'
@@ -107,14 +107,14 @@ async function fetchWithVidFlyApi(url, attemptNum) {
  */
 function processYouTubeData(data, url) {
   const isShorts = url.includes('/shorts/');
-  console.log(`📊 YouTube: Found ${data.items.length} total formats (${isShorts ? 'SHORTS' : 'REGULAR'})`);
+  console.log(`ðŸ“Š YouTube: Found ${data.items.length} total formats (${isShorts ? 'SHORTS' : 'REGULAR'})`);
 
   // Get ALL formats that have a valid URL
   let availableFormats = data.items.filter(item => {
     return item.url && item.url.length > 0;
   });
 
-  console.log(`✅ Found ${availableFormats.length} total formats with URLs`);
+  console.log(`âœ… Found ${availableFormats.length} total formats with URLs`);
 
   // Detect audio presence for metadata
   const formatWithAudioInfo = availableFormats.map(item => {
@@ -180,7 +180,7 @@ function processYouTubeData(data, url) {
 
   availableFormats = deduplicatedFormats;
 
-  console.log(`🔄 After deduplication: ${availableFormats.length} formats (${audioFormats.length} audio-only)`);
+  console.log(`ðŸ”„ After deduplication: ${availableFormats.length} formats (${audioFormats.length} audio-only)`);
 
   // ========================================
   // AUTOMATIC AUDIO MERGING FOR VIDEO-ONLY FORMATS
@@ -194,7 +194,7 @@ function processYouTubeData(data, url) {
       const compatibleAudio = audioMergerService.findCompatibleAudio(format, audioFormats);
 
       if (compatibleAudio) {
-        console.log(`🎵 Found audio for ${format.label}: ${compatibleAudio.label}`);
+        console.log(`ðŸŽµ Found audio for ${format.label}: ${compatibleAudio.label}`);
 
         // Create merged format entry
         const mergedFormat = {
@@ -210,7 +210,7 @@ function processYouTubeData(data, url) {
         };
 
         mergedFormats.push(mergedFormat);
-        console.log(`✅ Created merged format: ${format.label} + ${compatibleAudio.label}`);
+        console.log(`âœ… Created merged format: ${format.label} + ${compatibleAudio.label}`);
       } else {
         // Keep original video-only format if no audio found
         mergedFormats.push(format);
@@ -223,15 +223,15 @@ function processYouTubeData(data, url) {
 
   availableFormats = mergedFormats;
 
-  console.log(`🎬 After audio merging: ${availableFormats.length} total formats`);
+  console.log(`ðŸŽ¬ After audio merging: ${availableFormats.length} total formats`);
 
   // Log final formats
-  console.log('🎬 Final available formats:');
+  console.log('ðŸŽ¬ Final available formats:');
   availableFormats.forEach((format, index) => {
-    const audioStatus = format.isAudioOnly ? '🎵 Audio Only' :
-        format.isVideoOnly ? '📹 Video Only' :
-            format.isMergedFormat ? '🎬 Merged Video+Audio' :
-                format.hasAudio ? '🎬 Video+Audio' : '❓ Unknown';
+    const audioStatus = format.isAudioOnly ? 'ðŸŽµ Audio Only' :
+        format.isVideoOnly ? 'ðŸ“¹ Video Only' :
+            format.isMergedFormat ? 'ðŸŽ¬ Merged Video+Audio' :
+                format.hasAudio ? 'ðŸŽ¬ Video+Audio' : 'â“ Unknown';
     console.log(`  ${index + 1}. ${format.label} - ${audioStatus}`);
   });
 
@@ -290,11 +290,11 @@ function processYouTubeData(data, url) {
     audioGuaranteed: selectedFormat.hasAudio
   };
 
-  console.log(`✅ YouTube service completed with ${qualityOptions.length} quality options`);
-  console.log(`📋 Sending formats:`, qualityOptions.map(f => {
-    const type = f.isAudioOnly ? '🎵 Audio' :
-        f.isMergedFormat ? '🎬 Merged' :
-            f.isVideoOnly ? '📹 Video' : '🎬 Video+Audio';
+  console.log(`âœ… YouTube service completed with ${qualityOptions.length} quality options`);
+  console.log(`ðŸ“‹ Sending formats:`, qualityOptions.map(f => {
+    const type = f.isAudioOnly ? 'ðŸŽµ Audio' :
+        f.isMergedFormat ? 'ðŸŽ¬ Merged' :
+            f.isVideoOnly ? 'ðŸ“¹ Video' : 'ðŸŽ¬ Video+Audio';
     return `${f.quality} (${type}, premium: ${f.isPremium})`;
   }));
 
