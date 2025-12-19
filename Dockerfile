@@ -2,26 +2,26 @@ FROM node:20-alpine
 
 WORKDIR /app
 
-# Install dependencies
+# Install system dependencies
 RUN apk add --no-cache \
     ffmpeg \
     python3 \
     py3-pip \
     curl
 
-# Install latest yt-dlp
+# Install yt-dlp
 RUN pip3 install --no-cache-dir -U yt-dlp --break-system-packages
 
-# Verify
-RUN yt-dlp --version && \
-    echo "Build successful: $(date)" > /build-info.txt
-
 COPY package*.json ./
-RUN npm install --production
+
+# Install Node.js dependencies (use --omit=dev instead of --production)
+RUN npm install --omit=dev
 
 COPY . .
 
+# Create temp directory
 RUN mkdir -p /tmp/yt-merge
+
 RUN adduser -D -u 1001 appuser && \
     chown -R appuser:appuser /app /tmp/yt-merge
 
