@@ -2,6 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const downloaderRoutes = require('./Routes/downloaderRoutes');
 const config = require('./Config/config');
+const mergeRoutes = require('./Routes/mergeRoutes');
 const fs = require('fs');
 const path = require('path');
 
@@ -76,6 +77,8 @@ const setupMiddleware = () => {
 
 const setupRoutes = () => {
   app.use('/api', downloaderRoutes);
+  app.use('/api', mergeRoutes); // ← ADD THIS
+
 
   // Add cookies status endpoint
   app.get('/api/cookies-status', (req, res) => {
@@ -103,7 +106,7 @@ const setupRoutes = () => {
   // Test cookies with YouTube
   app.get('/api/test-cookies', async (req, res) => {
     try {
-      const { youtubeService } = require('./services/youtubeService');
+      const { youtubeService } = require('./Services/youtubeServiceNew');
       const result = await youtubeService.testCookies();
 
       res.status(200).json({

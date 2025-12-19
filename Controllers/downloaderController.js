@@ -11,7 +11,8 @@ const { advancedThreadsDownloader } = require('../Services/advancedThreadsServic
 const fetchLinkedinData = require('../Services/linkedinService');
 const facebookInsta = require('../Services/facebookInstaService');
 const { downloadTwmateData } = require('../Services/twitterService');
-const { fetchYouTubeData } = require('../Services/youtubeService');
+// ===== NEW YOUTUBE SERVICE =====
+const { fetchYouTubeData } = require('../Services/youtubeServiceNew');
 
 const bitly = new BitlyClient(config.BITLY_ACCESS_TOKEN);
 
@@ -219,24 +220,27 @@ const platformDownloaders = {
       return fallbackData;
     }
   },
+
   async youtube(url, req) {
-    console.log('YouTube: Processing URL:', url);
+    console.log('🎬 YouTube: Processing URL:', url);
 
     try {
-      // Use the new yt-dlp service
+      // Use the new InnerTube API service
       const data = await fetchYouTubeData(url);
 
       if (!data || !data.title) {
-        console.error('YouTube service returned invalid data:', data);
+        console.error('❌ YouTube service returned invalid data:', data);
         throw new Error('YouTube service returned invalid data');
       }
 
-      console.log('✅ YouTube: Successfully fetched data, formats count:', data.formats?.length || 0);
+      console.log('✅ YouTube: Successfully fetched data');
+      console.log(`📊 Total formats: ${data.formats?.length || 0}`);
+      console.log(`📹 Video formats: ${data.videoFormats?.length || 0}`);
+      console.log(`🎵 Audio formats: ${data.audioFormats?.length || 0}`);
 
-      // If no formats but we have an error message, return it
+      // If we have an error, return it
       if (data.error) {
         console.log('⚠️ YouTube service returned error:', data.error);
-        // Return the data as-is, the formatter will handle the error
         return data;
       }
 
@@ -254,12 +258,6 @@ const platformDownloaders = {
       console.error('❌ YouTube download error:', error.message);
 
       // Enhanced error messages
-      if (error.message.includes('yt-dlp not found')) {
-        throw new Error('YouTube downloader not configured properly.');
-      }
-      if (error.message.includes('age-restricted')) {
-        throw new Error('Video is age-restricted or private.');
-      }
       if (error.message.includes('Invalid YouTube URL')) {
         throw new Error('Invalid YouTube URL format.');
       }
@@ -267,6 +265,7 @@ const platformDownloaders = {
       throw new Error(`YouTube download failed: ${error.message}`);
     }
   },
+
   async pinterest(url) {
     try {
       const data = await downloadWithTimeout(() => pindl(url));
@@ -435,9 +434,7 @@ const dataFormatters = {
       source: 'tiktok',
     };
   },
-// ========================================
-// YOUTUBE FORMATTER - SIMPLIFIED
-// ========================================
+
   youtube(data, req) {
     console.log('🎬 Formatting YouTube data...');
 
@@ -450,7 +447,6 @@ const dataFormatters = {
     if (data.error) {
       console.log('⚠️ YouTube service returned error:', data.error);
 
-      // Return a structured error response
       return {
         title: data.title || "YouTube Video",
         url: null,
@@ -460,51 +456,40 @@ const dataFormatters = {
         source: 'youtube',
         formats: [],
         allFormats: [],
+        videoFormats: [],
+        audioFormats: [],
         selectedQuality: null,
         error: data.error,
-        alternative_links: data.alternative_links || []
       };
     }
 
     const hasFormats = data.formats && data.formats.length > 0;
-    const hasAllFormats = data.allFormats && data.allFormats.length > 0;
+    console.log(`📊 YouTube data: hasFormats=${hasFormats}, formatCount=${data.formats?.length || 0}`);
 
-    console.log(`📊 YouTube data: hasFormats=${hasFormats}, hasAllFormats=${hasAllFormats}`);
-
-    let qualityOptions = [];
+    let qualityOptions = data.formats || [];
     let selectedQuality = null;
     let defaultUrl = data.url;
 
-    if (hasFormats || hasAllFormats) {
-      // Use formats if available, otherwise use allFormats
-      qualityOptions = data.formats || data.allFormats;
-
+    if (hasFormats) {
       console.log(`✅ YouTube: ${qualityOptions.length} quality options available`);
 
-      // Find the best quality option
-      if (qualityOptions.length > 0) {
-        // Try to find 360p first (for free users)
-        selectedQuality = qualityOptions.find(opt =>
-            opt.quality && (opt.quality.includes('360p') || opt.qualityNum === 360)
-        );
+      // Find default quality (360p for free users)
+      selectedQuality = qualityOptions.find(opt =>
+          opt.qualityLabel?.includes('360') || opt.quality?.includes('360')
+      ) || qualityOptions[0];
 
-        // If no 360p, take the first non-audio format
-        if (!selectedQuality) {
-          selectedQuality = qualityOptions.find(opt => !opt.isAudioOnly) || qualityOptions[0];
-        }
+      defaultUrl = selectedQuality?.url || data.url;
 
-        defaultUrl = selectedQuality?.url || data.url;
-
-        console.log(`🎯 Selected quality: ${selectedQuality?.quality || 'unknown'}`);
-        console.log(`🔗 Selected URL: ${selectedQuality?.url ? 'present' : 'missing'}`);
-      }
+      console.log(`🎯 Selected quality: ${selectedQuality?.quality || 'unknown'}`);
+      console.log(`🔗 Default URL: ${defaultUrl ? 'present' : 'missing'}`);
     } else {
       console.log('⚠️ No quality formats found');
-      // If service returned no formats but has a direct URL
+
+      // If service returned a direct URL
       if (data.url) {
         qualityOptions = [{
-          quality: 'Direct',
-          qualityNum: 0,
+          quality: '360p',
+          qualityNum: 360,
           url: data.url,
           type: 'video/mp4',
           extension: 'mp4',
@@ -526,6 +511,8 @@ const dataFormatters = {
       source: 'youtube',
       formats: qualityOptions,
       allFormats: qualityOptions,
+      videoFormats: data.videoFormats || qualityOptions.filter(f => !f.isAudioOnly),
+      audioFormats: data.audioFormats || [],
       selectedQuality: selectedQuality
     };
 
@@ -536,10 +523,11 @@ const dataFormatters = {
 
     console.log(`✅ YouTube formatting complete`);
     console.log(`📦 Sending to client: ${qualityOptions.length} formats`);
-    console.log(`🔗 Default URL: ${defaultUrl ? `present (${defaultUrl.length} chars)` : 'missing'}`);
+    console.log(`🔗 Default URL: ${defaultUrl ? 'present' : 'missing'}`);
 
     return result;
   },
+
   threads(data) {
     console.log("Processing advanced Threads data...");
     return {
@@ -582,7 +570,7 @@ const formatData = async (platform, data, req) => {
     };
   }
 
-  // Pass the request object to YouTube formatter for URL conversion
+  // Pass the request object to YouTube formatter
   if (platform === 'youtube') {
     return formatter(data, req);
   }
@@ -594,7 +582,7 @@ const formatData = async (platform, data, req) => {
 
 const downloadMedia = async (req, res) => {
   const { url } = req.body;
-  console.log("Received URL:", url);
+  console.log("📥 Received URL:", url);
 
   try {
     const urlValidation = validateUrl(url);
@@ -624,14 +612,14 @@ const downloadMedia = async (req, res) => {
       console.log(`YouTube URL processed: ${cleanedUrl} -> ${processedUrl}`);
     }
 
-    console.info(`Download Media: Fetching data for platform '${platform}'.`);
+    console.info(`🚀 Download Media: Fetching data for platform '${platform}'.`);
 
     const downloader = platformDownloaders[platform];
     if (!downloader) {
       throw new Error(`No downloader available for platform: ${platform}`);
     }
 
-    // Pass the request object to YouTube downloader for URL conversion
+    // Pass the request object to YouTube downloader
     const data = platform === 'youtube'
         ? await downloader(processedUrl, req)
         : await downloader(processedUrl);
@@ -667,22 +655,16 @@ const downloadMedia = async (req, res) => {
       });
     }
 
-    console.log(`Final ${platform} URL length:`, formattedData.url.length);
-    console.log(`Formats count: ${formattedData.formats?.length || 0}`);
-    console.log(`AllFormats count: ${formattedData.allFormats?.length || 0}`);
+    console.log(`✅ Final ${platform} URL: ${formattedData.url ? 'present' : 'missing'}`);
+    console.log(`📊 Formats count: ${formattedData.formats?.length || 0}`);
+    console.log(`📹 Video formats: ${formattedData.videoFormats?.length || 0}`);
+    console.log(`🎵 Audio formats: ${formattedData.audioFormats?.length || 0}`);
 
-    // Log merge URLs for debugging
-    if (platform === 'youtube' && formattedData.formats) {
-      const mergeFormats = formattedData.formats.filter(f => f.url && f.url.includes('/api/merge-audio'));
-      console.log(`🎵 Merge formats available: ${mergeFormats.length}`);
-    }
+    console.info("✨ Download Media: Media successfully downloaded and formatted.");
 
-    console.info("Download Media: Media successfully downloaded and formatted.");
-
-    // ENSURE THE RESPONSE INCLUDES ALL DATA
     res.status(200).json({
       success: true,
-      data: formattedData, // This must include formats and allFormats
+      data: formattedData,
       platform: platform,
       timestamp: new Date().toISOString(),
       debug: {
@@ -694,12 +676,16 @@ const downloadMedia = async (req, res) => {
         hasFormats: !!formattedData.formats,
         formatsCount: formattedData.formats?.length || 0,
         hasAllFormats: !!formattedData.allFormats,
-        allFormatsCount: formattedData.allFormats?.length || 0
+        allFormatsCount: formattedData.allFormats?.length || 0,
+        hasVideoFormats: !!formattedData.videoFormats,
+        videoFormatsCount: formattedData.videoFormats?.length || 0,
+        hasAudioFormats: !!formattedData.audioFormats,
+        audioFormatsCount: formattedData.audioFormats?.length || 0
       }
     });
 
   } catch (error) {
-    console.error(`Download Media: Error occurred - ${error.message}`);
+    console.error(`❌ Download Media: Error occurred - ${error.message}`);
     console.error('Error stack:', error.stack);
 
     let statusCode = 500;
