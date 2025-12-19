@@ -221,6 +221,31 @@ const platformDownloaders = {
 
     try {
       const data = await fetchYouTubeData(url);
+      const base = getServerBaseUrl(req);
+
+      if (Array.isArray(data?.formats)) {
+        data.formats = data.formats.map(f => {
+          if (f.needsMerging && f.videoUrl && f.audioUrl) {
+            const token = mergeTokenStore.createToken({
+              videoUrl: f.videoUrl,
+              audioUrl: f.audioUrl,
+              title: data.title
+            });
+
+            return {
+              ...f,
+              mergeToken: token,
+              downloadUrl: `${base}/api/merge/${token}`, // CLIENT MUST USE THIS
+            };
+          }
+
+          // direct formats
+          return { ...f, downloadUrl: f.url };
+        });
+
+        // also set data.url to a working download URL
+        if (!data.url && data.formats.length) data.url = data.formats[0].downloadUrl;
+      }
 
       if (!data || !data.title) {
         console.error('❌ YouTube service returned invalid data:', data);
@@ -444,8 +469,7 @@ const dataFormatters = {
         null;
 
     // Ensure selectedQuality has a valid URL
-    let defaultUrl = selectedQuality?.url || data.url || null;
-
+    defaultUrl = selectedQuality?.downloadUrl || selectedQuality?.url || data.url;
     // If data.url exists but points to a merge-needed original, still prefer selectedQuality.url
     if (!defaultUrl && qualityOptions.length > 0) {
       defaultUrl = qualityOptions[0].url;

@@ -1,34 +1,27 @@
 const crypto = require('crypto');
 
 const store = new Map();
-
-// tokens expire fast so you don't leak memory
 const TTL_MS = 10 * 60 * 1000; // 10 minutes
 
-function create(videoUrl, audioUrl) {
+function createToken(payload) {
     const token = crypto.randomBytes(16).toString('hex');
-    store.set(token, { videoUrl, audioUrl, createdAt: Date.now() });
+    store.set(token, { payload, createdAt: Date.now() });
     return token;
 }
 
-function get(token) {
-    const data = store.get(token);
-    if (!data) return null;
+function getToken(token) {
+    const item = store.get(token);
+    if (!item) return null;
 
-    if (Date.now() - data.createdAt > TTL_MS) {
+    if (Date.now() - item.createdAt > TTL_MS) {
         store.delete(token);
         return null;
     }
-
-    return data;
+    return item.payload;
 }
 
-function del(token) {
+function deleteToken(token) {
     store.delete(token);
 }
 
-module.exports = {
-    create,
-    get,
-    delete: del
-};
+module.exports = { createToken, getToken, deleteToken };
