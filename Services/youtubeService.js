@@ -2,7 +2,7 @@ const axios = require('axios');
 
 class YouTubeDownloader {
   constructor() {
-    this.innertubeApiKey = 'AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8';
+    // No API key needed for innertube
     this.innertubeBaseUrl = 'https://www.youtube.com/youtubei/v1/player';
   }
 
@@ -99,9 +99,9 @@ class YouTubeDownloader {
         console.log(`🔄 Trying ${client.name} client...`);
 
         const response = await axios.post(
-            `${this.innertubeBaseUrl}?key=${this.innertubeApiKey}`,
+            this.innertubeBaseUrl,
             {
-              ...client.context,
+              context: client.context,
               videoId: videoId
             },
             {
@@ -110,8 +110,12 @@ class YouTubeDownloader {
                 'User-Agent': client.context.client.userAgent,
                 'Accept': '*/*',
                 'Accept-Language': 'en-US,en;q=0.9',
+                'X-YouTube-Client-Name': client.name === 'WEB' ? '1' :
+                    client.name === 'ANDROID' ? '3' :
+                        client.name === 'IOS' ? '5' : '2',
+                'X-YouTube-Client-Version': client.context.client.clientVersion,
                 'Origin': 'https://www.youtube.com',
-                'Referer': 'https://www.youtube.com/'
+                'Referer': `https://www.youtube.com/watch?v=${videoId}`
               },
               timeout: 30000
             }
