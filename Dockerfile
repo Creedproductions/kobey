@@ -2,10 +2,16 @@ FROM node:20-slim
 
 WORKDIR /app
 
+# Install FFmpeg and other dependencies
 RUN apt-get update && \
-    apt-get install -y ca-certificates && \
-    rm -rf /var/lib/apt/lists/* && \
-    apt-get clean
+    apt-get install -y \
+    ca-certificates \
+    ffmpeg \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
+
+# Verify FFmpeg installation
+RUN ffmpeg -version
 
 COPY package*.json ./
 
@@ -14,8 +20,12 @@ RUN npm install --production && \
 
 COPY . .
 
+# Create temp directory for audio merging
+RUN mkdir -p /tmp/yt-merge
+
 RUN useradd -m -u 1001 appuser && \
-    chown -R appuser:appuser /app
+    chown -R appuser:appuser /app && \
+    chown -R appuser:appuser /tmp/yt-merge
 
 USER appuser
 

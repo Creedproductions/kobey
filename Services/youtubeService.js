@@ -1,6 +1,92 @@
 const axios = require("axios");
 const audioMergerService = require("./audioMergerService");
 
+// ---------------------------
+// youtubei.js fallback (InnerTube)
+// ---------------------------
+let _innertube = null;
+
+async function getInnertube() {
+  if (_innertube) return _innertube;
+  const mod = await import("youtubei.js"); // works from CommonJS
+  _innertube = await mod.Innertube.create({
+    lang: "en",
+    location: "US",
+    user_agent: getRandomUserAgent()
+  });
+  return _innertube;
+}
+
+function extractYouTubeId(url) {
+  // watch?v=
+  const vMatch = url.match(/[?&]v=([a-zA-Z0-9_-]{11})/);
+  if (vMatch) return vMatch[1];
+
+  // youtu.be/
+  const shortMatch = url.match(/youtu\.be\/([a-zA-Z0-9_-]{11})/);
+  if (shortMatch) return shortMatch[1];
+
+  // shorts/
+  const shortsMatch = url.match(/youtube\.com\/shorts\/([a-zA-Z0-9_-]{11})/);
+  if (shortsMatch) return shortsMatch[1];
+
+  return null;
+}
+
+async function fetchWithYouTubeJs(url) {
+  const yt = await getInnertube();
+  const id = extractYouTubeId(url);
+  if (!id) throw new Error("Could not extract YouTube video id");
+
+  // getBasicInfo gives VideoInfo which contains streaming_data + player
+  const info = await yt.getBasicInfo(id);
+  const title = info?.basic_info?.title || "YouTube Video";
+  const thumbs = info?.basic_info?.thumbnail || [];
+  const cover = thumbs.length ? thumbs[thumbs.length - 1].url : null;
+  const duration = info?.basic_info?.duration;
+
+  const sd = info?.streaming_data;
+  const formats = [
+    ...(sd?.formats || []),
+    ...(sd?.adaptive_formats || [])
+  ];
+
+  if (!formats.length) throw new Error("No formats returned by youtubei.js");
+
+  // IMPORTANT: decipher URLs (avoid throttling / invalid urls)
+  const player = info?.actions?.session?.player;
+  const items = [];
+
+  for (const f of formats) {
+    try {
+      const directUrl = await f.decipher(player);
+      if (!directUrl) continue;
+
+      const qualityLabel = f.quality_label || f.qualityLabel || (f.has_audio && !f.has_video ? "audio" : "unknown");
+      const mime = f.mime_type || f.mimeType || "";
+
+      items.push({
+        url: directUrl,
+        label: qualityLabel,
+        type: mime,
+        ext: getExtensionFromType(mime),
+        filesize: f.content_length || f.contentLength || "unknown",
+      });
+    } catch (_) {
+      // skip broken format
+    }
+  }
+
+  if (!items.length) throw new Error("All formats failed to decipher");
+
+  return {
+    title,
+    cover,
+    duration,
+    items
+  };
+}
+
 /**
  * Fetches YouTube video data with automatic audio merging
  */
@@ -8,6 +94,17 @@ async function fetchYouTubeData(url) {
   const normalizedUrl = normalizeYouTubeUrl(url);
   console.log(`🔍 Fetching YouTube data for: ${normalizedUrl}`);
 
+  // 1) First try youtubei.js (no external dependency)
+  try {
+    console.log("🔄 Attempting to fetch via youtubei.js (InnerTube)...");
+    const ytjs = await fetchWithYouTubeJs(normalizedUrl);
+    console.log("✅ Successfully fetched via youtubei.js");
+    return processYouTubeData(ytjs, normalizedUrl);
+  } catch (e) {
+    console.warn(`⚠️ youtubei.js failed, falling back to VidFly: ${e.message}`);
+  }
+
+  // 2) VidFly fallback (with retries)
   let attempts = 0;
   const maxAttempts = 3;
   let lastError = null;
@@ -15,15 +112,15 @@ async function fetchYouTubeData(url) {
   while (attempts < maxAttempts) {
     attempts++;
     try {
+      console.log(`🔄 Attempt ${attempts}/${maxAttempts} via VidFly API...`);
       return await fetchWithVidFlyApi(normalizedUrl, attempts);
     } catch (err) {
       lastError = err;
       console.error(`❌ Attempt ${attempts}/${maxAttempts} failed: ${err.message}`);
-
       if (attempts < maxAttempts) {
-        const backoffMs = Math.min(1000 * Math.pow(2, attempts - 1), 8000);
+        const backoffMs = Math.min(1200 * Math.pow(2, attempts - 1), 10000);
         console.log(`⏱️ Retrying in ${backoffMs/1000} seconds...`);
-        await new Promise(resolve => setTimeout(resolve, backoffMs));
+        await new Promise(r => setTimeout(r, backoffMs));
       }
     }
   }
@@ -60,27 +157,33 @@ function normalizeYouTubeUrl(url) {
  */
 async function fetchWithVidFlyApi(url, attemptNum) {
   try {
-    const timeout = 30000 + ((attemptNum - 1) * 10000);
+    const timeout = 60000 + ((attemptNum - 1) * 20000);
 
     const res = await axios.get(
-      "https://api.vidfly.ai/api/media/youtube/download",
-      {
-        params: { url },
-        headers: {
-          accept: "*/*",
-          "content-type": "application/json",
-          "x-app-name": "vidfly-web",
-          "x-app-version": "1.0.0",
-          Referer: "https://vidfly.ai/",
-          "User-Agent": getRandomUserAgent(),
-        },
-        timeout: timeout,
-      }
+        "https://api.vidfly.ai/api/media/youtube/download",
+        {
+          params: { url },
+          headers: {
+            accept: "*/*",
+            "content-type": "application/json",
+            "x-app-name": "vidfly-web",
+            "x-app-version": "1.0.0",
+            Referer: "https://vidfly.ai/",
+            "User-Agent": getRandomUserAgent(),
+          },
+          timeout: timeout,
+        }
     );
 
     const data = res.data?.data;
+
+    // If it's not the expected shape, log the first bit (often HTML/blocked)
     if (!data || !data.items || !data.title) {
-      throw new Error("Invalid or empty response from YouTube downloader API");
+      const peek =
+          typeof res.data === "string"
+              ? res.data.slice(0, 200)
+              : JSON.stringify(res.data).slice(0, 200);
+      throw new Error(`Invalid VidFly response. Peek: ${peek}`);
     }
 
     return processYouTubeData(data, url);
@@ -91,15 +194,23 @@ async function fetchWithVidFlyApi(url, attemptNum) {
       console.error(`📡 Response status: ${err.response.status}`);
       if (err.response.data) {
         console.error(`📡 Response data:`,
-          typeof err.response.data === 'object'
-            ? JSON.stringify(err.response.data).substring(0, 200) + '...'
-            : String(err.response.data).substring(0, 200) + '...'
+            typeof err.response.data === 'object'
+                ? JSON.stringify(err.response.data).substring(0, 200) + '...'
+                : String(err.response.data).substring(0, 200) + '...'
         );
       }
     }
 
     throw new Error(`YouTube downloader API request failed: ${err.message}`);
   }
+}
+
+/**
+ * Build merge token with safe delimiter
+ */
+function buildMergeToken(videoUrl, audioUrl) {
+  // use a delimiter that will NOT collide with "https://"
+  return `MERGE::${encodeURIComponent(videoUrl)}::${encodeURIComponent(audioUrl)}`;
 }
 
 /**
@@ -122,13 +233,13 @@ function processYouTubeData(data, url) {
     const type = (item.type || '').toLowerCase();
 
     const isVideoOnly = label.includes('video only') ||
-                       label.includes('vid only') ||
-                       label.includes('without audio') ||
-                       type.includes('video only');
+        label.includes('vid only') ||
+        label.includes('without audio') ||
+        type.includes('video only');
 
     const isAudioOnly = label.includes('audio only') ||
-                       type.includes('audio only') ||
-                       label.includes('audio') && !label.includes('video');
+        type.includes('audio only') ||
+        label.includes('audio') && !label.includes('video');
 
     return {
       ...item,
@@ -167,7 +278,7 @@ function processYouTubeData(data, url) {
         const existingFormat = seenVideoQualities.get(qualityNum);
         if (!existingFormat.hasAudio && format.hasAudio) {
           const index = deduplicatedFormats.findIndex(f =>
-            !f.isAudioOnly && extractQualityNumber(f.label || '') === qualityNum
+              !f.isAudioOnly && extractQualityNumber(f.label || '') === qualityNum
           );
           if (index !== -1) {
             deduplicatedFormats[index] = format;
@@ -196,11 +307,11 @@ function processYouTubeData(data, url) {
       if (compatibleAudio) {
         console.log(`🎵 Found audio for ${format.label}: ${compatibleAudio.label}`);
 
-        // Create merged format entry
+        // Create merged format entry using the new merge token
         const mergedFormat = {
           ...format,
-          // Create special URL that triggers audio merging
-          url: `MERGE:${format.url}:${compatibleAudio.url}`,
+          // Use the new merge token format
+          url: buildMergeToken(format.url, compatibleAudio.url),
           hasAudio: true, // Mark as having audio now
           isVideoOnly: false, // No longer video-only
           isMergedFormat: true, // Flag as merged format
@@ -229,9 +340,9 @@ function processYouTubeData(data, url) {
   console.log('🎬 Final available formats:');
   availableFormats.forEach((format, index) => {
     const audioStatus = format.isAudioOnly ? '🎵 Audio Only' :
-                       format.isVideoOnly ? '📹 Video Only' :
-                       format.isMergedFormat ? '🎬 Merged Video+Audio' :
-                       format.hasAudio ? '🎬 Video+Audio' : '❓ Unknown';
+        format.isVideoOnly ? '📹 Video Only' :
+            format.isMergedFormat ? '🎬 Merged Video+Audio' :
+                format.hasAudio ? '🎬 Video+Audio' : '❓ Unknown';
     console.log(`  ${index + 1}. ${format.label} - ${audioStatus}`);
   });
 
@@ -250,7 +361,7 @@ function processYouTubeData(data, url) {
     return {
       quality: quality,
       qualityNum: qualityNum,
-      url: format.url, // This may be a MERGE: URL for merged formats
+      url: format.url, // This may be a MERGE:: URL for merged formats
       type: format.type || 'video/mp4',
       extension: format.ext || format.extension || getExtensionFromType(format.type),
       filesize: format.filesize || 'unknown',
@@ -274,8 +385,8 @@ function processYouTubeData(data, url) {
 
   // Select default format (360p for free users, or highest available if premium)
   let selectedFormat = qualityOptions.find(opt => !opt.isAudioOnly && opt.qualityNum === 360) ||
-                      qualityOptions.find(opt => !opt.isAudioOnly) ||
-                      qualityOptions[0];
+      qualityOptions.find(opt => !opt.isAudioOnly) ||
+      qualityOptions[0];
 
   // Build result with all quality options
   const result = {
@@ -293,8 +404,8 @@ function processYouTubeData(data, url) {
   console.log(`✅ YouTube service completed with ${qualityOptions.length} quality options`);
   console.log(`📋 Sending formats:`, qualityOptions.map(f => {
     const type = f.isAudioOnly ? '🎵 Audio' :
-                 f.isMergedFormat ? '🎬 Merged' :
-                 f.isVideoOnly ? '📹 Video' : '🎬 Video+Audio';
+        f.isMergedFormat ? '🎬 Merged' :
+            f.isVideoOnly ? '📹 Video' : '🎬 Video+Audio';
     return `${f.quality} (${type}, premium: ${f.isPremium})`;
   }));
 
