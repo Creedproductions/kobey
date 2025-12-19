@@ -1,48 +1,34 @@
-FROM node:20-slim
+FROM node:20-alpine
 
 WORKDIR /app
 
-# Install system dependencies: Python, FFmpeg, and yt-dlp
-RUN apt-get update && \
-    apt-get install -y \
-    ca-certificates \
+# Alpine uses apk instead of apt (much smaller)
+RUN apk add --no-cache \
     ffmpeg \
     python3 \
-    python3-pip \
-    curl \
-    && rm -rf /var/lib/apt/lists/* \
-    && apt-get clean
+    py3-pip \
+    curl
 
-# OPTION 1: Use --break-system-packages (simplest)
-RUN pip3 install --no-cache-dir -U yt-dlp --break-system-packages
-
-# OPTION 2: Install via apt (slightly older version but stable)
-# RUN apt-get install -y yt-dlp
-
-# OPTION 3: Create virtual environment (most proper)
-# RUN python3 -m venv /opt/venv && \
-#     /opt/venv/bin/pip install -U yt-dlp && \
-#     ln -sf /opt/venv/bin/yt-dlp /usr/local/bin/yt-dlp
+# Alpine doesn't have the Debian restrictions
+RUN pip3 install --no-cache-dir -U yt-dlp
 
 # Verify installations
 RUN echo "✅ Node version: $(node --version)" && \
     echo "✅ Python version: $(python3 --version)" && \
     echo "✅ FFmpeg version: $(ffmpeg -version | head -n1)" && \
-    echo "✅ yt-dlp version: $(yt-dlp --version || echo 'Not found')"
+    echo "✅ yt-dlp version: $(yt-dlp --version)"
 
 COPY package*.json ./
 
-RUN npm install --production && \
-    npm cache clean --force
+RUN npm install --production
 
 COPY . .
 
-# Create temp directory for audio merging
+# Create temp directory
 RUN mkdir -p /tmp/yt-merge
 
-RUN useradd -m -u 1001 appuser && \
-    chown -R appuser:appuser /app && \
-    chown -R appuser:appuser /tmp/yt-merge
+RUN adduser -D -u 1001 appuser && \
+    chown -R appuser:appuser /app /tmp/yt-merge
 
 USER appuser
 
