@@ -1,280 +1,376 @@
 const fetch = require('node-fetch');
+const fs = require('fs');
+const path = require('path');
 
-class YoutubeServiceNew {
+class YouTubeService {
   constructor() {
-    this.apiKey = 'AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8';
+    this.apiKey = process.env.YT_INNERTUBE_KEY || 'AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8';
     this.baseUrl = 'https://youtubei.googleapis.com/youtubei/v1/player';
+
+    this.cookiePathCandidates = [
+      process.env.COOKIES_PATH,
+      '/cookies.txt',
+      '/app/cookies.txt',
+      path.join(__dirname, '..', 'cookies.txt'),
+      path.join(process.cwd(), 'cookies.txt'),
+      'cookies.txt'
+    ].filter(Boolean);
   }
 
   extractYouTubeId(url) {
     try {
-      const urlObj = new URL(url);
-      let videoId = urlObj.searchParams.get('v');
+      const u = new URL(url);
 
-      if (videoId && videoId.length === 11) return videoId;
+      // watch?v=
+      const v = u.searchParams.get('v');
+      if (v && v.length === 11) return v;
 
-      const pathname = urlObj.pathname;
-
-      if (pathname.includes('youtu.be/')) {
-        const id = pathname.split('youtu.be/')[1]?.split(/[?&/#]/)[0];
+      // youtu.be/<id>
+      if (u.hostname.includes('youtu.be')) {
+        const id = u.pathname.split('/').filter(Boolean)[0];
         if (id && id.length === 11) return id;
       }
 
-      if (pathname.includes('shorts/')) {
-        const id = pathname.split('shorts/')[1]?.split(/[?&/#]/)[0];
-        if (id && id.length === 11) return id;
-      }
+      // /shorts/<id> or /embed/<id>
+      const parts = u.pathname.split('/').filter(Boolean);
+      const shortsIndex = parts.indexOf('shorts');
+      if (shortsIndex !== -1 && parts[shortsIndex + 1]?.length === 11) return parts[shortsIndex + 1];
 
-      if (pathname.includes('embed/')) {
-        const id = pathname.split('embed/')[1]?.split(/[?&/#]/)[0];
-        if (id && id.length === 11) return id;
-      }
+      const embedIndex = parts.indexOf('embed');
+      if (embedIndex !== -1 && parts[embedIndex + 1]?.length === 11) return parts[embedIndex + 1];
 
-      const regexPatterns = [
-        /(?:v=|\/)([0-9A-Za-z_-]{11})/,
-        /youtu\.be\/([0-9A-Za-z_-]{11})/,
-        /embed\/([0-9A-Za-z_-]{11})/,
-        /shorts\/([0-9A-Za-z_-]{11})/
-      ];
-
-      for (const pattern of regexPatterns) {
-        const match = url.match(pattern);
-        if (match && match[1]) return match[1];
-      }
-
-      return null;
-    } catch (error) {
-      console.error("URL parsing error:", error.message);
+      // fallback regex
+      const match = url.match(/([0-9A-Za-z_-]{11})/);
+      return match ? match[1] : null;
+    } catch {
       return null;
     }
   }
 
-  async getVideoInfo(videoId) {
+  // Parse Netscape cookie file into a "Cookie: a=b; c=d" header
+  readCookiesHeader() {
+    let cookiePath = null;
+    for (const p of this.cookiePathCandidates) {
+      try {
+        if (fs.existsSync(p)) { cookiePath = p; break; }
+      } catch {}
+    }
+    if (!cookiePath) return null;
+
+    const raw = fs.readFileSync(cookiePath, 'utf8')
+        .split('\n')
+        .map(l => l.trim())
+        .filter(l => l && !l.startsWith('#'));
+
+    // Netscape format: domain \t flag \t path \t secure \t expiration \t name \t value
+    const cookies = [];
+    for (const line of raw) {
+      const parts = line.split('\t');
+      if (parts.length >= 7) {
+        const name = parts[5];
+        const value = parts[6];
+        if (name && value) cookies.push(`${name}=${value}`);
+      }
+    }
+    return cookies.length ? cookies.join('; ') : null;
+  }
+
+  // Try multiple clients because some videos/shorts fail on one client but work on another
+  getClientProfiles() {
+    return [
+      {
+        name: 'ANDROID',
+        headers: {
+          'Content-Type': 'application/json',
+          'User-Agent': 'com.google.android.youtube/19.17.34 (Linux; U; Android 11)',
+          'X-YouTube-Client-Name': '3',      // ANDROID
+          'X-YouTube-Client-Version': '19.17.34'
+        },
+        bodyClient: { clientName: 'ANDROID', clientVersion: '19.17.34', hl: 'en', gl: 'US' }
+      },
+      {
+        name: 'WEB',
+        headers: {
+          'Content-Type': 'application/json',
+          'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36',
+          'X-YouTube-Client-Name': '1',      // WEB
+          'X-YouTube-Client-Version': '2.20230728.00.00'
+        },
+        bodyClient: { clientName: 'WEB', clientVersion: '2.20230728.00.00', hl: 'en', gl: 'US' }
+      }
+    ];
+  }
+
+  async callPlayer(videoId, profile) {
     const url = `${this.baseUrl}?key=${this.apiKey}`;
 
-    const headers = {
-      'X-YouTube-Client-Name': 'WEB',
-      'X-YouTube-Client-Version': '2.20230728.00.00',
-      'Content-Type': 'application/json'
-    };
+    const headers = { ...profile.headers };
+    const cookieHeader = this.readCookiesHeader();
+    if (cookieHeader) headers['Cookie'] = cookieHeader;
 
     const body = {
-      context: {
-        client: {
-          clientName: "ANDROID",
-          clientVersion: "19.17.34"
-        }
-      },
-      videoId: videoId
+      context: { client: profile.bodyClient },
+      videoId
     };
 
-    try {
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: headers,
-        body: JSON.stringify(body),
-        timeout: 30000
-      });
+    const res = await fetch(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
+      // node-fetch v2 uses "timeout"
+      timeout: 35000
+    });
 
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
+    const text = await res.text();
+    let json;
+    try { json = JSON.parse(text); } catch { json = { _raw: text }; }
 
-      const data = await response.json();
-      return data;
-    } catch (error) {
-      console.error('Error fetching video info:', error);
-      throw error;
+    if (!res.ok) {
+      const msg = `InnerTube HTTP ${res.status} (${profile.name})`;
+      return { ok: false, error: msg, data: json };
     }
+
+    return { ok: true, data: json };
   }
 
   parseFormats(data) {
-    const formats = [];
+    const out = [];
+    const sd = data?.streamingData;
+    if (!sd) return out;
 
-    if (data.streamingData) {
-      if (data.streamingData.formats) {
-        formats.push(...data.streamingData.formats);
-      }
+    const list = [
+      ...(Array.isArray(sd.formats) ? sd.formats : []),
+      ...(Array.isArray(sd.adaptiveFormats) ? sd.adaptiveFormats : [])
+    ];
 
-      if (data.streamingData.adaptiveFormats) {
-        formats.push(...data.streamingData.adaptiveFormats);
+    // NOTE: if the response only has signatureCipher/cipher, you won't have a usable URL without deciphering.
+    // We will keep only formats that have a direct URL so your app won't break.
+    for (const f of list) {
+      const hasUrl = !!f.url;
+      const mime = f.mimeType || '';
+      const hasVideo = mime.includes('video/');
+      const hasAudio = mime.includes('audio/');
+      const height = f.height || 0;
+
+      out.push({
+        itag: f.itag,
+        mimeType: mime,
+        qualityLabel: f.qualityLabel,
+        quality: f.qualityLabel || f.quality || (height ? `${height}p` : 'unknown'),
+        qualityNum: height,
+        url: hasUrl ? f.url : null,
+        contentLength: f.contentLength,
+        bitrate: f.bitrate,
+        fps: f.fps,
+        audioQuality: f.audioQuality,
+        audioBitrate: f.audioBitrate || f.bitrate,
+        hasVideo,
+        hasAudio,
+        isAudioOnly: hasAudio && !hasVideo,
+        isVideoOnly: hasVideo && !hasAudio
+      });
+    }
+
+    return out;
+  }
+
+  buildResponse(videoId, data) {
+    const vd = data?.videoDetails;
+    const ps = data?.playabilityStatus;
+
+    // Prefer YouTube reason messages
+    if (!vd) {
+      const reason = ps?.reason || ps?.status || 'Video not available or private';
+      return {
+        title: 'YouTube Video',
+        thumbnail: `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`,
+        duration: 0,
+        formats: [],
+        videoFormats: [],
+        audioFormats: [],
+        url: null,
+        selectedQuality: null,
+        audioGuaranteed: false,
+        videoId,
+        error: reason,
+        playabilityStatus: ps || null
+      };
+    }
+
+    const all = this.parseFormats(data);
+
+    // Only formats with direct URLs (no cipher)
+    const usable = all.filter(f => !!f.url);
+
+    const combined = usable.filter(f => f.hasVideo && f.hasAudio);
+    const audioOnly = usable.filter(f => f.isAudioOnly);
+    const videoOnly = usable.filter(f => f.isVideoOnly);
+
+    // Choose best audio for merge
+    const bestAudio =
+        audioOnly.sort((a, b) => (b.audioBitrate || 0) - (a.audioBitrate || 0))[0] || null;
+
+    const organized = [];
+
+    // Combined first (direct play)
+    for (const f of combined) {
+      organized.push({
+        itag: f.itag,
+        quality: f.quality,
+        qualityNum: f.qualityNum,
+        url: f.url,
+        type: 'video/mp4',
+        extension: 'mp4',
+        isPremium: (f.qualityNum || 0) > 360,
+        hasAudio: true,
+        hasVideo: true,
+        needsMerging: false,
+        mimeType: f.mimeType,
+        contentLength: f.contentLength,
+        bitrate: f.bitrate
+      });
+    }
+
+    // Video-only (needs merge) — only if we have bestAudio
+    if (bestAudio) {
+      for (const f of videoOnly.filter(v => (v.qualityNum || 0) >= 480)) {
+        organized.push({
+          itag: f.itag,
+          quality: f.quality,
+          qualityNum: f.qualityNum,
+          url: f.url,
+          videoUrl: f.url,
+          audioUrl: bestAudio.url,
+          type: 'video/mp4',
+          extension: 'mp4',
+          isPremium: true,
+          hasAudio: false,
+          hasVideo: true,
+          needsMerging: true,
+          mimeType: f.mimeType,
+          contentLength: f.contentLength,
+          bitrate: f.bitrate
+        });
       }
     }
 
-    return formats.map(format => {
-      const hasVideo = format.mimeType?.includes('video');
-      const hasAudio = format.mimeType?.includes('audio');
-      const quality = format.qualityLabel || format.quality || 'unknown';
-      const isAudioOnly = hasAudio && !hasVideo;
-      const isVideoOnly = hasVideo && !hasAudio;
+    organized.sort((a, b) => (a.qualityNum || 0) - (b.qualityNum || 0));
 
-      return {
-        itag: format.itag,
-        mimeType: format.mimeType,
-        quality: quality,
-        qualityLabel: format.qualityLabel,
-        qualityNum: format.height || 0,
-        url: format.url,
-        contentLength: format.contentLength,
-        bitrate: format.bitrate,
-        fps: format.fps,
-        audioQuality: format.audioQuality,
-        hasVideo: hasVideo,
-        hasAudio: hasAudio,
-        isAudioOnly: isAudioOnly,
-        isVideoOnly: isVideoOnly,
-        width: format.width,
-        height: format.height,
-        needsMerging: isVideoOnly && (format.height >= 480)
-      };
-    });
+    const audioFormats = audioOnly.map(f => ({
+      itag: f.itag,
+      quality: `${f.audioQuality || 'audio'} (${Math.round((f.bitrate || 0) / 1000)}kb/s)`,
+      url: f.url,
+      type: 'audio/mp4',
+      extension: 'm4a',
+      isPremium: (f.bitrate || 0) > 150000,
+      isAudioOnly: true,
+      hasAudio: true,
+      hasVideo: false,
+      mimeType: f.mimeType,
+      bitrate: f.bitrate
+    }));
+
+    // Default: prefer 360p combined
+    const default360 = organized.find(x => x.qualityNum === 360 && x.hasAudio && !x.needsMerging);
+    const selected = default360 || organized[0] || null;
+
+    return {
+      title: vd.title || 'YouTube Video',
+      thumbnail: vd.thumbnail?.thumbnails?.slice(-1)?.[0]?.url
+          || `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`,
+      duration: vd.lengthSeconds || 0,
+      description: vd.shortDescription || '',
+      author: vd.author || '',
+      viewCount: vd.viewCount || 0,
+      formats: organized,
+      allFormats: organized,
+      videoFormats: organized.filter(f => !f.isAudioOnly),
+      audioFormats,
+      url: selected?.url || null,
+      selectedQuality: selected,
+      audioGuaranteed: usable.length > 0,
+      videoId,
+      playabilityStatus: ps || null
+    };
   }
 
   async fetchYouTubeData(url) {
     const videoId = this.extractYouTubeId(url);
-    if (!videoId) {
-      throw new Error('Invalid YouTube URL');
+    if (!videoId) throw new Error('Invalid YouTube URL');
+
+    // Try multiple client profiles
+    const profiles = this.getClientProfiles();
+
+    let lastError = null;
+    let bestData = null;
+
+    for (const p of profiles) {
+      const r = await this.callPlayer(videoId, p);
+
+      if (!r.ok) {
+        lastError = r.error;
+        continue;
+      }
+
+      const ps = r.data?.playabilityStatus;
+      const vd = r.data?.videoDetails;
+
+      // Accept OK responses
+      if (vd) {
+        bestData = r.data;
+        break;
+      }
+
+      // Keep the most informative failure
+      const reason = ps?.reason || ps?.status || 'Video not available or private';
+      lastError = `${reason} (${p.name})`;
+      bestData = r.data; // keep playabilityStatus for debugging
     }
 
-    console.log(`🎬 Processing YouTube video: ${videoId}`);
-
-    try {
-      const videoInfo = await this.getVideoInfo(videoId);
-
-      if (!videoInfo.videoDetails) {
-        throw new Error('Video not available or private');
-      }
-
-      const allFormats = this.parseFormats(videoInfo);
-
-      console.log(`✅ Found ${allFormats.length} total formats`);
-
-      const videoFormats = allFormats.filter(f => f.hasVideo && !f.isAudioOnly);
-      const audioFormats = allFormats.filter(f => f.isAudioOnly);
-      const combinedFormats = allFormats.filter(f => f.hasVideo && f.hasAudio);
-
-      console.log(`📹 Video formats: ${videoFormats.length}`);
-      console.log(`🎵 Audio formats: ${audioFormats.length}`);
-      console.log(`🎬 Combined formats: ${combinedFormats.length}`);
-
-      let selectedQuality = null;
-      let defaultUrl = null;
-
-      if (combinedFormats.length > 0) {
-        selectedQuality = combinedFormats.find(f =>
-            f.qualityLabel?.includes('360') || f.quality?.includes('360')
-        ) || combinedFormats[0];
-        defaultUrl = selectedQuality.url;
-      } else if (videoFormats.length > 0) {
-        selectedQuality = videoFormats.find(f =>
-            f.qualityLabel?.includes('360') || f.quality?.includes('360')
-        ) || videoFormats[0];
-        defaultUrl = selectedQuality.url;
-      }
-
-      const organizedFormats = [
-        ...combinedFormats.map(f => ({
-          ...f,
-          quality: f.qualityLabel || f.quality || `${f.height}p`,
-          type: 'video/mp4',
-          extension: 'mp4',
-          isPremium: (f.height || 0) > 360,
-          isMergedFormat: false
-        })),
-        ...videoFormats
-            .filter(f => f.isVideoOnly && f.height >= 360)
-            .map(f => {
-              const bestAudio = audioFormats.find(a =>
-                  a.audioQuality === 'AUDIO_QUALITY_MEDIUM' ||
-                  a.audioQuality === 'AUDIO_QUALITY_HIGH'
-              ) || audioFormats[0];
-
-              return {
-                ...f,
-                quality: f.qualityLabel || `${f.height}p`,
-                type: 'video/mp4',
-                extension: 'mp4',
-                isPremium: f.height > 360,
-                needsMerging: true,
-                isMergedFormat: true,
-                audioUrl: bestAudio?.url,
-                originalVideoUrl: f.url
-              };
-            })
-      ];
-
-      organizedFormats.sort((a, b) => {
-        const aHeight = a.height || a.qualityNum || 0;
-        const bHeight = b.height || b.qualityNum || 0;
-        return aHeight - bHeight;
-      });
-
-      const audioOnlyFormats = audioFormats.map(f => ({
-        ...f,
-        quality: `${f.audioQuality || 'audio'} (${Math.round(f.bitrate / 1000)}kb/s)`,
-        type: 'audio/mp4',
-        extension: 'm4a',
-        isPremium: f.bitrate > 150000
-      }));
-
+    // Build a stable response regardless
+    if (!bestData) {
       return {
-        title: videoInfo.videoDetails.title || "YouTube Video",
-        thumbnail: videoInfo.videoDetails.thumbnail?.thumbnails?.[0]?.url ||
-            `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`,
-        duration: videoInfo.videoDetails.lengthSeconds || 0,
-        description: videoInfo.videoDetails.shortDescription || '',
-        author: videoInfo.videoDetails.author || '',
-        viewCount: videoInfo.videoDetails.viewCount || 0,
-        formats: organizedFormats,
-        allFormats: organizedFormats,
-        videoFormats: organizedFormats.filter(f => !f.isAudioOnly),
-        audioFormats: audioOnlyFormats,
-        url: defaultUrl,
-        selectedQuality: selectedQuality,
-        audioGuaranteed: combinedFormats.length > 0 || audioFormats.length > 0,
-        videoId: videoId
-      };
-
-    } catch (error) {
-      console.error('❌ YouTube fetch failed:', error.message);
-
-      return {
-        title: "YouTube Video",
+        title: 'YouTube Video',
         thumbnail: `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`,
         duration: 0,
         formats: [],
-        allFormats: [],
+        videoFormats: [],
+        audioFormats: [],
         url: null,
         selectedQuality: null,
         audioGuaranteed: false,
-        error: error.message,
-        videoId: videoId
+        videoId,
+        error: lastError || 'Video not available or private'
       };
     }
+
+    const response = this.buildResponse(videoId, bestData);
+
+    // If videoDetails missing, return error response but DO NOT throw
+    return response;
+  }
+
+  // optional: used by your /api/test-cookies endpoint
+  async testCookies() {
+    const cookieHeader = this.readCookiesHeader();
+    if (!cookieHeader) {
+      return { success: false, message: 'No cookies header parsed from cookies.txt' };
+    }
+    return {
+      success: true,
+      message: 'Cookies parsed OK',
+      cookieLength: cookieHeader.length
+    };
   }
 }
 
-const youtubeService = new YoutubeServiceNew();
+const youtubeService = new YouTubeService();
 
 async function fetchYouTubeData(url) {
   return youtubeService.fetchYouTubeData(url);
 }
 
-async function testYouTube() {
-  try {
-    const data = await fetchYouTubeData('https://youtu.be/dQw4w9WgXcQ');
-    console.log('✅ YouTube service test passed');
-    console.log(`Title: ${data.title}`);
-    console.log(`Formats: ${data.formats.length}`);
-    return true;
-  } catch (error) {
-    console.error('❌ YouTube service test failed:', error.message);
-    return false;
-  }
-}
-
 module.exports = {
   fetchYouTubeData,
-  testYouTube,
   youtubeService
 };
