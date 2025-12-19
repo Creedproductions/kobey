@@ -13,14 +13,22 @@ RUN apt-get update && \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
 
-# Install yt-dlp using pip
-RUN pip3 install --no-cache-dir -U yt-dlp
+# OPTION 1: Use --break-system-packages (simplest)
+RUN pip3 install --no-cache-dir -U yt-dlp --break-system-packages
+
+# OPTION 2: Install via apt (slightly older version but stable)
+# RUN apt-get install -y yt-dlp
+
+# OPTION 3: Create virtual environment (most proper)
+# RUN python3 -m venv /opt/venv && \
+#     /opt/venv/bin/pip install -U yt-dlp && \
+#     ln -sf /opt/venv/bin/yt-dlp /usr/local/bin/yt-dlp
 
 # Verify installations
 RUN echo "✅ Node version: $(node --version)" && \
     echo "✅ Python version: $(python3 --version)" && \
     echo "✅ FFmpeg version: $(ffmpeg -version | head -n1)" && \
-    echo "✅ yt-dlp version: $(yt-dlp --version)"
+    echo "✅ yt-dlp version: $(yt-dlp --version || echo 'Not found')"
 
 COPY package*.json ./
 
