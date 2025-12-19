@@ -10,7 +10,6 @@ class YouTubeService {
     this.baseUrl = 'https://youtubei.googleapis.com/youtubei/v1/player';
     this.tempDir = path.join(os.tmpdir(), 'yt-merge');
 
-    // Ensure temp directory exists
     if (!fs.existsSync(this.tempDir)) {
       fs.mkdirSync(this.tempDir, { recursive: true });
     }
@@ -20,7 +19,6 @@ class YouTubeService {
     try {
       const urlObj = new URL(url);
       let videoId = urlObj.searchParams.get('v');
-
       if (videoId && videoId.length === 11) return videoId;
 
       const pathname = urlObj.pathname;
@@ -75,38 +73,31 @@ class YouTubeService {
           clientVersion: "19.17.34"
         }
       },
-      videoId: videoId
+      videoId
     };
 
-    try {
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: headers,
-        body: JSON.stringify(body),
-        timeout: 30000
-      });
+    const response = await fetch(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
+      timeout: 30000
+    });
 
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
-
-      const data = await response.json();
-      return data;
-    } catch (error) {
-      console.error('Error fetching video info:', error);
-      throw error;
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
     }
+
+    return await response.json();
   }
 
   parseFormats(data) {
     const formats = [];
 
     if (data.streamingData) {
-      if (data.streamingData.formats) {
+      if (Array.isArray(data.streamingData.formats)) {
         formats.push(...data.streamingData.formats);
       }
-
-      if (data.streamingData.adaptiveFormats) {
+      if (Array.isArray(data.streamingData.adaptiveFormats)) {
         formats.push(...data.streamingData.adaptiveFormats);
       }
     }
@@ -121,7 +112,7 @@ class YouTubeService {
       return {
         itag: format.itag,
         mimeType: format.mimeType,
-        quality: quality,
+        quality,
         qualityLabel: format.qualityLabel,
         qualityNum: format.height || 0,
         url: format.url,
@@ -129,10 +120,10 @@ class YouTubeService {
         bitrate: format.bitrate,
         fps: format.fps,
         audioQuality: format.audioQuality,
-        hasVideo: hasVideo,
-        hasAudio: hasAudio,
-        isAudioOnly: isAudioOnly,
-        isVideoOnly: isVideoOnly,
+        hasVideo,
+        hasAudio,
+        isAudioOnly,
+        isVideoOnly,
         width: format.width,
         height: format.height,
         audioBitrate: format.audioBitrate || format.bitrate
@@ -141,7 +132,7 @@ class YouTubeService {
   }
 
   /**
-   * Merge video and audio using FFmpeg
+   * Merge video and audio using FFmpeg (kept for compatibility, but your mergeRoutes/mergeService handles merging)
    */
   async mergeVideoAudio(videoUrl, audioUrl, outputPath) {
     return new Promise((resolve, reject) => {
@@ -158,12 +149,9 @@ class YouTubeService {
       ];
 
       const ffmpeg = spawn('ffmpeg', ffmpegArgs);
-
       let stderr = '';
 
-      ffmpeg.stderr.on('data', (data) => {
-        stderr += data.toString();
-      });
+      ffmpeg.stderr.on('data', (data) => { stderr += data.toString(); });
 
       ffmpeg.on('close', (code) => {
         if (code === 0) {
@@ -182,11 +170,33 @@ class YouTubeService {
     });
   }
 
+  /**
+   * Pick best item per height (dedupe repeated qualities)
+   * Score: higher fps first, then higher bitrate
+   */
+  pickBestPerHeight(items) {
+    const map = new Map();
+    for (const f of items) {
+      const h = f.height || 0;
+      if (!h) continue;
+
+      const prev = map.get(h);
+      if (!prev) {
+        map.set(h, f);
+        continue;
+      }
+
+      const prevScore = (prev.fps || 0) * 1_000_000 + (prev.bitrate || 0);
+      const newScore  = (f.fps || 0)   * 1_000_000 + (f.bitrate || 0);
+
+      if (newScore > prevScore) map.set(h, f);
+    }
+    return Array.from(map.values());
+  }
+
   async fetchYouTubeData(url) {
     const videoId = this.extractYouTubeId(url);
-    if (!videoId) {
-      throw new Error('Invalid YouTube URL');
-    }
+    if (!videoId) throw new Error('Invalid YouTube URL');
 
     console.log(`🎬 Processing YouTube video: ${videoId}`);
 
@@ -198,10 +208,8 @@ class YouTubeService {
       }
 
       const allFormats = this.parseFormats(videoInfo);
-
       console.log(`✅ Found ${allFormats.length} total formats`);
 
-      // Separate formats by type
       const videoFormats = allFormats.filter(f => f.hasVideo && !f.isAudioOnly);
       const audioFormats = allFormats.filter(f => f.isAudioOnly);
       const combinedFormats = allFormats.filter(f => f.hasVideo && f.hasAudio);
@@ -210,17 +218,25 @@ class YouTubeService {
       console.log(`🎵 Audio-only formats: ${audioFormats.length}`);
       console.log(`🎬 Combined formats (video+audio): ${combinedFormats.length}`);
 
-      // Find best audio stream for merging
-      const bestAudio = audioFormats.find(a =>
-          a.audioQuality === 'AUDIO_QUALITY_MEDIUM' ||
-          a.audioQuality === 'AUDIO_QUALITY_HIGH'
-      ) || audioFormats[0];
+      // ✅ Best audio selection: prefer audio/mp4, then highest bitrate
+      const audioMp4 = audioFormats
+          .filter(a => (a.mimeType || '').includes('audio/mp4'))
+          .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
+
+      const bestAudio =
+          audioMp4[0] ||
+          audioFormats.slice().sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
 
       // Organize formats for client
-      const organizedFormats = [];
+      let organizedFormats = [];
 
-      // Add combined formats first (360p and below - DIRECT DOWNLOAD, NO MERGING)
-      combinedFormats.forEach(f => {
+      // ✅ Combined formats (if any) – dedupe by height
+      const combinedMp4 = combinedFormats
+          .filter(f => (f.mimeType || '').includes('video/mp4'));
+
+      const bestCombined = this.pickBestPerHeight(combinedMp4);
+
+      bestCombined.forEach(f => {
         organizedFormats.push({
           itag: f.itag,
           quality: f.qualityLabel || `${f.height}p`,
@@ -231,90 +247,140 @@ class YouTubeService {
           isPremium: (f.height || 0) > 360,
           hasAudio: true,
           hasVideo: true,
-          needsMerging: false, // COMBINED FORMATS DON'T NEED MERGING
+          needsMerging: false,
           mimeType: f.mimeType,
           contentLength: f.contentLength,
-          bitrate: f.bitrate
+          bitrate: f.bitrate,
+          fps: f.fps
         });
       });
 
-      // Add high-quality video formats (480p+ - NEEDS SERVER-SIDE MERGING)
-      videoFormats
-          .filter(f => !f.hasAudio && f.height >= 480)
+      // ✅ Video-only formats (mp4) – dedupe by height, then merge server-side
+      const videoOnlyMp4 = videoFormats
+          .filter(f => !f.hasAudio)
+          .filter(f => (f.mimeType || '').includes('video/mp4'));
+
+      const bestVideoOnly = this.pickBestPerHeight(videoOnlyMp4);
+
+      bestVideoOnly
+          .filter(f => (f.height || 0) >= 360) // keep 360+ as options (change to >=480 if you want)
           .forEach(f => {
             organizedFormats.push({
               itag: f.itag,
               quality: f.qualityLabel || `${f.height}p`,
               qualityNum: f.height || 0,
-              url: f.url, // This is the video-only URL
-              videoUrl: f.url, // Store separately for clarity
-              audioUrl: bestAudio?.url, // Audio stream to merge
+
+              // IMPORTANT: keep these for controller to create merge token / merge URL
+              videoUrl: f.url,
+              audioUrl: bestAudio?.url,
+
+              // url stays unset here for merge-needed items (controller will replace it)
+              url: f.url, // fallback (but controller should override with /api/merge/<token>.mp4)
               type: 'video/mp4',
               extension: 'mp4',
-              isPremium: true, // 480p+ is premium
-              hasAudio: false, // Video stream has no audio
+              isPremium: (f.height || 0) > 360,
+
+              // Final output will have audio after merge endpoint
+              hasAudio: true,
               hasVideo: true,
-              needsMerging: true, // SERVER MUST MERGE THIS
+              needsMerging: true,
+
               mimeType: f.mimeType,
               contentLength: f.contentLength,
-              bitrate: f.bitrate
+              bitrate: f.bitrate,
+              fps: f.fps
             });
           });
+
+      // If no audio exists, remove merge-needed formats (can’t guarantee audio)
+      if (!bestAudio?.url) {
+        organizedFormats = organizedFormats.filter(f => !f.needsMerging);
+      }
+
+      // ✅ Deduplicate AGAIN by height in case combined+video-only both present
+      // Prefer combined (needsMerging=false) over merge-needed
+      const finalMap = new Map();
+      for (const f of organizedFormats) {
+        const h = f.qualityNum || 0;
+        if (!h) continue;
+
+        const prev = finalMap.get(h);
+        if (!prev) {
+          finalMap.set(h, f);
+          continue;
+        }
+
+        // prefer non-merging over merging
+        if (prev.needsMerging && !f.needsMerging) {
+          finalMap.set(h, f);
+          continue;
+        }
+
+        // otherwise prefer higher fps/bitrate
+        const prevScore = (prev.fps || 0) * 1_000_000 + (prev.bitrate || 0);
+        const newScore  = (f.fps || 0)   * 1_000_000 + (f.bitrate || 0);
+        if (newScore > prevScore) finalMap.set(h, f);
+      }
+
+      organizedFormats = Array.from(finalMap.values());
 
       // Sort by quality
       organizedFormats.sort((a, b) => (a.qualityNum || 0) - (b.qualityNum || 0));
 
-      // Prepare audio-only formats
-      const audioOnlyFormats = audioFormats.map(f => ({
-        itag: f.itag,
-        quality: `${f.audioQuality || 'audio'} (${Math.round(f.bitrate / 1000)}kb/s)`,
-        url: f.url,
-        type: 'audio/mp4',
-        extension: 'm4a',
-        isPremium: f.bitrate > 150000,
-        isAudioOnly: true,
-        hasAudio: true,
-        hasVideo: false,
-        mimeType: f.mimeType,
-        bitrate: f.bitrate
-      }));
+      // Audio-only formats
+      const audioOnlyFormats = audioFormats
+          .slice()
+          .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))
+          .map(f => ({
+            itag: f.itag,
+            quality: `${f.audioQuality || 'audio'} (${Math.round((f.bitrate || 0) / 1000)}kb/s)`,
+            url: f.url,
+            type: 'audio/mp4',
+            extension: 'm4a',
+            isPremium: (f.bitrate || 0) > 150000,
+            isAudioOnly: true,
+            hasAudio: true,
+            hasVideo: false,
+            mimeType: f.mimeType,
+            bitrate: f.bitrate
+          }));
 
-      // Select default quality (360p combined format if available)
+      // Default quality: prefer 360p (either combined or merge-needed)
       let selectedQuality = null;
       let defaultUrl = null;
 
-      const default360 = organizedFormats.find(f =>
-          f.qualityNum === 360 && f.hasAudio && !f.needsMerging
-      );
-
+      const default360 = organizedFormats.find(f => f.qualityNum === 360);
       if (default360) {
         selectedQuality = default360;
         defaultUrl = default360.url;
-        console.log('✅ Default: 360p combined format (with audio, no merging needed)');
+        console.log('✅ Default: 360p selected');
       } else if (organizedFormats.length > 0) {
         selectedQuality = organizedFormats[0];
         defaultUrl = organizedFormats[0].url;
-        console.log(`⚠️ Default: ${organizedFormats[0].quality} (fallback)`);
+        console.log(`⚠️ Default fallback: ${organizedFormats[0].quality}`);
       }
 
       return {
         title: videoInfo.videoDetails.title || "YouTube Video",
-        thumbnail: videoInfo.videoDetails.thumbnail?.thumbnails?.[0]?.url ||
+        thumbnail:
+            videoInfo.videoDetails.thumbnail?.thumbnails?.[0]?.url ||
             `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`,
         duration: videoInfo.videoDetails.lengthSeconds || 0,
         description: videoInfo.videoDetails.shortDescription || '',
         author: videoInfo.videoDetails.author || '',
         viewCount: videoInfo.videoDetails.viewCount || 0,
+
+        // deliver deduped formats
         formats: organizedFormats,
         allFormats: organizedFormats,
-        videoFormats: organizedFormats.filter(f => !f.isAudioOnly),
+        videoFormats: organizedFormats, // your app expects this sometimes
         audioFormats: audioOnlyFormats,
-        url: defaultUrl,
-        selectedQuality: selectedQuality,
-        audioGuaranteed: combinedFormats.length > 0 || audioFormats.length > 0,
-        videoId: videoId
-      };
 
+        url: defaultUrl,
+        selectedQuality,
+        audioGuaranteed: organizedFormats.length > 0 && (!!bestAudio?.url || bestCombined.length > 0),
+        videoId
+      };
     } catch (error) {
       console.error('❌ YouTube fetch failed:', error.message);
 
@@ -328,7 +394,7 @@ class YouTubeService {
         selectedQuality: null,
         audioGuaranteed: false,
         error: error.message,
-        videoId: videoId
+        videoId
       };
     }
   }
