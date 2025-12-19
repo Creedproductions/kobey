@@ -2,15 +2,21 @@ FROM node:20-slim
 
 WORKDIR /app
 
-# Install FFmpeg + certs
+# Install FFmpeg, Python, and yt-dlp in one layer
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends ca-certificates ffmpeg && \
+    apt-get install -y --no-install-recommends \
+    ca-certificates \
+    ffmpeg \
+    python3 \
+    python3-pip \
+    curl && \
+    pip3 install --no-cache-dir yt-dlp && \
     rm -rf /var/lib/apt/lists/*
 
 # Copy dependency files first (better layer cache)
 COPY package*.json ./
 
-# Install production deps (prefer npm ci if lockfile exists)
+# Install production deps
 RUN if [ -f package-lock.json ]; then \
       npm ci --omit=dev; \
     else \
@@ -32,7 +38,7 @@ USER appuser
 ENV NODE_ENV=production
 EXPOSE 8000
 
-# Healthcheck with timeout so it can't hang
+# Healthcheck
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
   CMD node -e "\
     const http=require('http'); \

@@ -8,6 +8,7 @@
   "scripts": {
     "start": "node App.js",
     "dev": "nodemon App.js",
+    "postinstall": "npx yt-dlp --version || echo 'yt-dlp will be installed'",
     "build": "echo 'Build completed successfully.'"
   },
   "dependencies": {
@@ -30,6 +31,7 @@
     "nodemailer": "^6.9.16",
     "pg": "^8.13.1",
     "youtubei.js": "^16.0.1",
+    "yt-dlp-exec": "^1.0.2",
     "ytdl-core": "^4.11.5"
   },
   "devDependencies": {
