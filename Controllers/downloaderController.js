@@ -572,11 +572,32 @@ const downloadMedia = async (req, res) => {
     }
 
     if (!formattedData || !formattedData.url) {
+      // If YouTube returned a known error, return it cleanly (NOT 500)
+      if (platform === 'youtube' && (formattedData?.error || data?.error)) {
+        const msg = formattedData?.error || data?.error || 'YouTube returned no downloadable formats';
+        console.warn(`⚠️ YouTube: No URL available: ${msg}`);
+
+        return res.status(200).json({
+          success: false,
+          platform,
+          error: msg,
+          data: formattedData || {
+            title: data?.title || 'YouTube Video',
+            thumbnail: data?.thumbnail || PLACEHOLDER_THUMBNAIL,
+            formats: [],
+            url: null
+          },
+          timestamp: new Date().toISOString()
+        });
+      }
+
+      console.error("Download Media: Formatted data is invalid or missing URL.");
       return res.status(404).json({
-        error: 'No downloadable URL found',
         success: false,
-        platform: platform,
-        data: formattedData || null
+        platform,
+        error: 'No downloadable media found for this URL',
+        data: formattedData || null,
+        timestamp: new Date().toISOString()
       });
     }
 
