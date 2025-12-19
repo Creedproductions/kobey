@@ -219,55 +219,54 @@ const platformDownloaders = {
       return fallbackData;
     }
   },
-// ========================================
-// YOUTUBE - UPDATED FOR NEW SERVICE
-// ========================================
-      async youtube(url, req) {
-        console.log('YouTube: Processing URL:', url);
+  async youtube(url, req) {
+    console.log('YouTube: Processing URL:', url);
 
-        try {
-          // Use the new yt-dlp based service (no more external APIs)
-          const data = await fetchYouTubeData(url);
+    try {
+      // Use the new yt-dlp service
+      const data = await fetchYouTubeData(url);
 
-          if (!data || !data.title) {
-            console.error('YouTube service returned invalid data:', data);
-            throw new Error('YouTube service returned invalid data');
-          }
+      if (!data || !data.title) {
+        console.error('YouTube service returned invalid data:', data);
+        throw new Error('YouTube service returned invalid data');
+      }
 
-          console.log('✅ YouTube: Successfully fetched data, formats count:', data.formats?.length || 0);
-          console.log('📊 YouTube data structure:', {
-            hasTitle: !!data.title,
-            hasThumbnail: !!data.thumbnail,
-            formatsCount: data.formats?.length || 0,
-            hasUrl: !!data.url,
-            error: data.error || 'none'
-          });
+      console.log('✅ YouTube: Successfully fetched data, formats count:', data.formats?.length || 0);
 
-          // IMPORTANT: The new service handles everything internally
-          // No need for MERGE URL conversion anymore
+      // If no formats but we have an error message, return it
+      if (data.error) {
+        console.log('⚠️ YouTube service returned error:', data.error);
+        // Return the data as-is, the formatter will handle the error
+        return data;
+      }
 
-          return data;
-        } catch (error) {
-          console.error('❌ YouTube download error:', error.message);
+      // Ensure we have at least basic data
+      if (!data.url && data.formats?.length === 0) {
+        console.warn('⚠️ No downloadable formats found');
+        return {
+          ...data,
+          error: data.error || "No downloadable formats available"
+        };
+      }
 
-          // Enhanced error messages
-          if (error.message.includes('yt-dlp not found')) {
-            throw new Error('YouTube downloader not configured. Please install yt-dlp on the server.');
-          }
-          if (error.message.includes('timeout')) {
-            throw new Error('YouTube download timed out - video may be processing, try again');
-          }
-          if (error.message.includes('age-restricted') || error.message.includes('private')) {
-            throw new Error('Video is age-restricted or private. Cannot download.');
-          }
-          if (error.message.includes('Invalid YouTube URL')) {
-            throw new Error('Invalid YouTube URL. Please check the URL and try again.');
-          }
+      return data;
+    } catch (error) {
+      console.error('❌ YouTube download error:', error.message);
 
-          throw new Error(`YouTube download failed: ${error.message}`);
-        }
-      },
+      // Enhanced error messages
+      if (error.message.includes('yt-dlp not found')) {
+        throw new Error('YouTube downloader not configured properly.');
+      }
+      if (error.message.includes('age-restricted')) {
+        throw new Error('Video is age-restricted or private.');
+      }
+      if (error.message.includes('Invalid YouTube URL')) {
+        throw new Error('Invalid YouTube URL format.');
+      }
 
+      throw new Error(`YouTube download failed: ${error.message}`);
+    }
+  },
   async pinterest(url) {
     try {
       const data = await downloadWithTimeout(() => pindl(url));
