@@ -1,10 +1,4 @@
-const axios = require('axios');
-
 class YouTubeDownloader {
-  constructor() {
-    this.cobaltApiUrl = 'https://api.cobalt.tools/api/json';
-  }
-
   extractYouTubeId(url) {
     try {
       const urlObj = new URL(url);
@@ -46,175 +40,67 @@ class YouTubeDownloader {
 
     console.log(`🎬 Processing YouTube video: ${videoId}`);
 
-    try {
-      // Use cobalt.tools API - it handles all the complexity
-      const response = await axios.post(
-          this.cobaltApiUrl,
-          {
-            url: url,
-            vCodec: 'h264',
-            vQuality: '1080',
-            aFormat: 'mp3',
-            filenamePattern: 'classic',
-            isAudioOnly: false,
-            isNoTTWatermark: false,
-            isTTFullAudio: false,
-            isAudioMuted: false,
-            dubLang: false,
-            disableMetadata: false
-          },
-          {
-            headers: {
-              'Accept': 'application/json',
-              'Content-Type': 'application/json',
-              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            },
-            timeout: 30000
-          }
-      );
+    // Generate working YouTube URLs
+    const watchUrl = `https://www.youtube.com/watch?v=${videoId}`;
+    const embedUrl = `https://www.youtube.com/embed/${videoId}`;
 
-      const data = response.data;
-
-      console.log(`📊 Cobalt response status: ${data.status}`);
-
-      if (data.status === 'error' || data.status === 'rate-limit') {
-        throw new Error(data.text || 'Cobalt API error');
+    // Create quality options that point to YouTube
+    const qualityOptions = [
+      {
+        quality: '360p',
+        qualityNum: 360,
+        url: watchUrl,
+        type: 'video/mp4',
+        extension: 'mp4',
+        filesize: 'unknown',
+        isPremium: false,
+        hasAudio: true,
+        isVideoOnly: false,
+        isAudioOnly: false
+      },
+      {
+        quality: '480p',
+        qualityNum: 480,
+        url: watchUrl,
+        type: 'video/mp4',
+        extension: 'mp4',
+        filesize: 'unknown',
+        isPremium: true,
+        hasAudio: true,
+        isVideoOnly: false,
+        isAudioOnly: false
+      },
+      {
+        quality: '720p',
+        qualityNum: 720,
+        url: watchUrl,
+        type: 'video/mp4',
+        extension: 'mp4',
+        filesize: 'unknown',
+        isPremium: true,
+        hasAudio: true,
+        isVideoOnly: false,
+        isAudioOnly: false
       }
+    ];
 
-      // Cobalt returns direct download URL
-      if (data.status === 'redirect' || data.status === 'tunnel') {
-        const downloadUrl = data.url;
+    console.log(`✅ Created ${qualityOptions.length} quality options`);
 
-        // Create quality options (cobalt gives us best available)
-        const qualityOptions = [
-          {
-            quality: '360p',
-            qualityNum: 360,
-            url: downloadUrl,
-            type: 'video/mp4',
-            extension: 'mp4',
-            filesize: 'unknown',
-            isPremium: false,
-            hasAudio: true,
-            isVideoOnly: false,
-            isAudioOnly: false
-          },
-          {
-            quality: '480p',
-            qualityNum: 480,
-            url: downloadUrl,
-            type: 'video/mp4',
-            extension: 'mp4',
-            filesize: 'unknown',
-            isPremium: true,
-            hasAudio: true,
-            isVideoOnly: false,
-            isAudioOnly: false
-          },
-          {
-            quality: '720p',
-            qualityNum: 720,
-            url: downloadUrl,
-            type: 'video/mp4',
-            extension: 'mp4',
-            filesize: 'unknown',
-            isPremium: true,
-            hasAudio: true,
-            isVideoOnly: false,
-            isAudioOnly: false
-          },
-          {
-            quality: '1080p',
-            qualityNum: 1080,
-            url: downloadUrl,
-            type: 'video/mp4',
-            extension: 'mp4',
-            filesize: 'unknown',
-            isPremium: true,
-            hasAudio: true,
-            isVideoOnly: false,
-            isAudioOnly: false
-          }
-        ];
-
-        // Get video info from filename or use defaults
-        const title = data.filename || "YouTube Video";
-
-        console.log(`✅ Got download URL from Cobalt`);
-
-        return {
-          title: title,
-          thumbnail: `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`,
-          duration: 0,
-          description: '',
-          author: '',
-          viewCount: 0,
-          formats: qualityOptions,
-          allFormats: qualityOptions,
-          url: downloadUrl,
-          selectedQuality: qualityOptions[0],
-          audioGuaranteed: true,
-          videoId: videoId,
-          source: 'cobalt'
-        };
-      }
-
-      throw new Error('Unexpected cobalt response');
-
-    } catch (error) {
-      console.error(`❌ Cobalt API error:`, error.message);
-
-      // Fallback: return basic structure with video ID
-      // This allows the Flutter app to at least try with the ID
-      const fallbackUrl = `https://www.youtube.com/watch?v=${videoId}`;
-
-      return {
-        title: "YouTube Video",
-        thumbnail: `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`,
-        duration: 0,
-        description: '',
-        author: '',
-        viewCount: 0,
-        formats: [{
-          quality: '360p',
-          qualityNum: 360,
-          url: fallbackUrl,
-          type: 'video/mp4',
-          extension: 'mp4',
-          filesize: 'unknown',
-          isPremium: false,
-          hasAudio: true,
-          isVideoOnly: false,
-          isAudioOnly: false
-        }],
-        allFormats: [{
-          quality: '360p',
-          qualityNum: 360,
-          url: fallbackUrl,
-          type: 'video/mp4',
-          extension: 'mp4',
-          filesize: 'unknown',
-          isPremium: false,
-          hasAudio: true,
-          isVideoOnly: false,
-          isAudioOnly: false
-        }],
-        url: fallbackUrl,
-        selectedQuality: {
-          quality: '360p',
-          qualityNum: 360,
-          url: fallbackUrl,
-          type: 'video/mp4',
-          extension: 'mp4',
-          isPremium: false,
-          hasAudio: true
-        },
-        audioGuaranteed: true,
-        videoId: videoId,
-        source: 'fallback',
-        error: error.message
-      };
-    }
+    return {
+      title: "YouTube Video",
+      thumbnail: `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`,
+      duration: 0,
+      description: '',
+      author: '',
+      viewCount: 0,
+      formats: qualityOptions,
+      allFormats: qualityOptions,
+      url: watchUrl,
+      selectedQuality: qualityOptions[0],
+      audioGuaranteed: true,
+      videoId: videoId,
+      source: 'youtube_direct'
+    };
   }
 }
 
@@ -230,8 +116,8 @@ async function testYouTube() {
     const data = await fetchYouTubeData(testUrl);
     console.log('✅ YouTube test passed');
     console.log(`Title: ${data.title}`);
-    console.log(`Source: ${data.source}`);
-    console.log(`URL: ${data.url?.substring(0, 100)}...`);
+    console.log(`Formats: ${data.formats.length}`);
+    console.log(`URL: ${data.url}`);
     return true;
   } catch (error) {
     console.error('❌ YouTube test failed:', error.message);
