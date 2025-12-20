@@ -1,9 +1,10 @@
-const axios = require("axios");
+const { spawn } = require('child_process');
+const { promisify } = require('util');
+const exec = promisify(require('child_process').exec);
 
 class YouTubeDownloader {
   constructor() {
-    this.youtubeApiKey = 'AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8';
-    this.youtubeBaseUrl = 'https://youtubei.googleapis.com/youtubei/v1/player';
+    this.ytDlpPath = 'yt-dlp'; // Will be installed globally
   }
 
   extractYouTubeId(url) {
@@ -21,16 +22,10 @@ class YouTubeDownloader {
         const id = pathname.split('shorts/')[1]?.split(/[?&/#]/)[0];
         if (id && id.length === 11) return id;
       }
-      if (pathname.includes('embed/')) {
-        const id = pathname.split('embed/')[1]?.split(/[?&/#]/)[0];
-        if (id && id.length === 11) return id;
-      }
 
       const regexPatterns = [
         /(?:v=|\/)([0-9A-Za-z_-]{11})/,
-        /youtu\.be\/([0-9A-Za-z_-]{11})/,
-        /embed\/([0-9A-Za-z_-]{11})/,
-        /shorts\/([0-9A-Za-z_-]{11})/
+        /youtu\.be\/([0-9A-Za-z_-]{11})/
       ];
 
       for (const pattern of regexPatterns) {
@@ -40,7 +35,6 @@ class YouTubeDownloader {
 
       return null;
     } catch (error) {
-      console.error("URL parsing error:", error.message);
       return null;
     }
   }
@@ -56,276 +50,150 @@ class YouTubeDownloader {
     return url;
   }
 
-  async randomDelay() {
-    const ms = Math.floor(Math.random() * 1500) + 500;
-    await new Promise(resolve => setTimeout(resolve, ms));
+  extractQualityNumber(qualityLabel) {
+    if (!qualityLabel) return 0;
+    const match = qualityLabel.match(/(\d+)p/);
+    if (match) return parseInt(match[1]);
+    return 360;
   }
 
   /**
-   * BEST CLIENT ORDER FOR 2025:
-   * 1. WEB_EMBEDDED - Bypasses age/region restrictions
-   * 2. ANDROID - Most reliable for normal videos
-   * 3. ANDROID_TESTSUITE - Good fallback
-   * 4. IOS - Last resort
+   * Use yt-dlp to fetch video information
    */
-  async fetchWithYouTubeApi(videoId, attempts = 1) {
-    const url = `${this.youtubeBaseUrl}?key=${this.youtubeApiKey}`;
+  async fetchWithYtDlp(url) {
+    const normalizedUrl = this.normalizeYouTubeUrl(url);
 
-    const clients = [
-      {
-        name: 'WEB_EMBEDDED',
-        clientName: 'WEB_EMBEDDED_PLAYER',
-        clientVersion: '1.20220731.00.00',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-YouTube-Client-Name': '56',
-          'X-YouTube-Client-Version': '1.20220731.00.00',
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-          'Referer': 'https://www.youtube.com/',
-          'Origin': 'https://www.youtube.com'
-        },
-        extraContext: {
-          thirdParty: {
-            embedUrl: 'https://www.youtube.com/'
-          }
-        }
-      },
-      {
-        name: 'ANDROID',
-        clientName: 'ANDROID',
-        clientVersion: '19.17.34',
-        androidSdkVersion: 30,
-        headers: {
-          'Content-Type': 'application/json',
-          'X-YouTube-Client-Name': '3',
-          'X-YouTube-Client-Version': '19.17.34',
-          'User-Agent': 'com.google.android.youtube/19.17.34 (Linux; U; Android 13) gzip'
-        }
-      },
-      {
-        name: 'ANDROID_TESTSUITE',
-        clientName: 'ANDROID_TESTSUITE',
-        clientVersion: '1.9',
-        androidSdkVersion: 30,
-        headers: {
-          'Content-Type': 'application/json',
-          'X-YouTube-Client-Name': '30',
-          'X-YouTube-Client-Version': '1.9',
-          'User-Agent': 'com.google.android.youtube/'
-        }
-      },
-      {
-        name: 'IOS',
-        clientName: 'IOS',
-        clientVersion: '19.09.3',
-        deviceModel: 'iPhone14,3',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-YouTube-Client-Name': '5',
-          'X-YouTube-Client-Version': '19.09.3',
-          'User-Agent': 'com.google.ios.youtube/19.09.3 (iPhone14,3; U; CPU iOS 15_6 like Mac OS X)'
-        }
+    console.log('🔧 Using yt-dlp to fetch video info...');
+
+    try {
+      // Get JSON info about the video
+      const { stdout, stderr } = await exec(
+          `${this.ytDlpPath} --dump-json --no-warnings "${normalizedUrl}"`,
+          { timeout: 30000, maxBuffer: 10 * 1024 * 1024 }
+      );
+
+      if (stderr && !stderr.includes('WARNING')) {
+        console.error('yt-dlp stderr:', stderr);
       }
-    ];
 
-    for (const client of clients) {
-      try {
-        await this.randomDelay();
+      const info = JSON.parse(stdout);
 
-        const body = {
-          context: {
-            client: {
-              clientName: client.clientName,
-              clientVersion: client.clientVersion,
-              hl: 'en',
-              gl: 'US'
-            }
-          },
-          videoId: videoId
-        };
+      console.log(`✅ yt-dlp succeeded: "${info.title}"`);
+      console.log(`📊 Formats available: ${info.formats?.length || 0}`);
 
-        // Add extra context for embedded player
-        if (client.extraContext) {
-          Object.assign(body.context, client.extraContext);
-        }
-
-        if (client.androidSdkVersion) {
-          body.context.client.androidSdkVersion = client.androidSdkVersion;
-        }
-        if (client.deviceModel) {
-          body.context.client.deviceModel = client.deviceModel;
-        }
-
-        console.log(`🔄 Trying ${client.name} client...`);
-
-        const response = await axios.post(url, body, {
-          headers: client.headers,
-          timeout: 30000
-        });
-
-        const data = response.data;
-
-        // Check for valid playability and streaming data
-        const status = data.playabilityStatus?.status;
-        const hasStreamingData = data.streamingData &&
-            (data.streamingData.formats?.length > 0 || data.streamingData.adaptiveFormats?.length > 0);
-
-        if (status === 'OK' && hasStreamingData) {
-          console.log(`✅ ${client.name} SUCCESS!`);
-          return this.processYouTubeApiData(data, videoId);
-        } else {
-          const reason = data.playabilityStatus?.reason || 'No reason provided';
-          console.warn(`⚠️ ${client.name}: ${status} - ${reason}`);
-        }
-
-      } catch (error) {
-        console.error(`❌ ${client.name} failed:`, error.message);
-        continue;
-      }
+      return this.processYtDlpData(info);
+    } catch (error) {
+      console.error('❌ yt-dlp failed:', error.message);
+      throw new Error(`yt-dlp extraction failed: ${error.message}`);
     }
-
-    throw new Error('All YouTube API clients failed');
   }
 
-  processYouTubeApiData(data, videoId) {
-    const formats = [];
+  /**
+   * Process yt-dlp data into our format
+   */
+  processYtDlpData(data) {
+    const formats = data.formats || [];
 
-    if (data.streamingData) {
-      if (data.streamingData.formats) formats.push(...data.streamingData.formats);
-      if (data.streamingData.adaptiveFormats) formats.push(...data.streamingData.adaptiveFormats);
-    }
+    // Filter video formats (with height) and audio formats
+    const videoFormats = formats.filter(f =>
+        f.vcodec && f.vcodec !== 'none' && f.height && f.url
+    );
 
-    const parsedFormats = formats.map(format => {
-      const hasVideo = format.mimeType?.includes('video');
-      const hasAudio = format.mimeType?.includes('audio');
-      const qualityLabel = format.qualityLabel || '';
-      const qualityNum = this.extractQualityNumber(qualityLabel);
+    const audioFormats = formats.filter(f =>
+        f.acodec && f.acodec !== 'none' && (!f.vcodec || f.vcodec === 'none') && f.url
+    );
 
-      return {
-        itag: format.itag,
-        label: qualityLabel || `${qualityNum}p` || 'unknown',
-        qualityNum: qualityNum,
-        url: format.url,
-        mimeType: format.mimeType,
-        type: format.mimeType?.includes('audio') ? 'audio only' :
-            format.mimeType?.includes('video') ? 'video only' : 'unknown',
-        filesize: format.contentLength,
-        bitrate: format.bitrate,
-        hasAudio: hasAudio && !hasVideo ? false : hasAudio,
-        hasVideo: hasVideo,
-        isVideoOnly: hasVideo && !hasAudio,
-        isAudioOnly: hasAudio && !hasVideo,
-        width: format.width,
-        height: format.height
-      };
-    }).filter(f => f.url);
-
+    // Group video formats by quality
     const qualityMap = new Map();
-    parsedFormats.forEach(format => {
-      const quality = format.qualityNum;
+
+    videoFormats.forEach(format => {
+      const quality = format.height;
+      const hasAudio = format.acodec && format.acodec !== 'none';
+
       if (!qualityMap.has(quality)) {
         qualityMap.set(quality, format);
       } else {
+        // Prefer formats with audio
         const existing = qualityMap.get(quality);
-        if (!existing.hasAudio && format.hasAudio) {
+        const existingHasAudio = existing.acodec && existing.acodec !== 'none';
+
+        if (!existingHasAudio && hasAudio) {
           qualityMap.set(quality, format);
-        } else if (existing.hasAudio && format.hasAudio && format.bitrate > existing.bitrate) {
+        } else if (existingHasAudio === hasAudio && format.filesize > existing.filesize) {
           qualityMap.set(quality, format);
         }
       }
     });
 
-    const organizedFormats = Array.from(qualityMap.values()).sort((a, b) => a.qualityNum - b.qualityNum);
-    const audioFormats = parsedFormats.filter(f => f.isAudioOnly);
+    // Convert to our format
+    const qualityOptions = Array.from(qualityMap.values())
+        .sort((a, b) => (a.height || 0) - (b.height || 0))
+        .map(format => {
+          const quality = format.height;
+          const hasAudio = format.acodec && format.acodec !== 'none';
+          const isPremium = quality > 360;
 
-    const qualityOptions = organizedFormats.map(format => {
-      const isPremium = format.qualityNum > 360;
-      return {
-        quality: format.label,
-        qualityNum: format.qualityNum,
-        url: format.url,
-        type: format.mimeType,
-        extension: this.getExtensionFromType(format.mimeType),
-        filesize: format.filesize || 'unknown',
-        isPremium: isPremium,
-        hasAudio: format.hasAudio,
-        isVideoOnly: format.isVideoOnly,
-        isAudioOnly: format.isAudioOnly,
-        bitrate: format.bitrate
-      };
-    });
+          return {
+            quality: `${quality}p`,
+            qualityNum: quality,
+            url: format.url,
+            type: format.ext === 'mp4' ? 'video/mp4' : `video/${format.ext}`,
+            extension: format.ext || 'mp4',
+            filesize: format.filesize || 'unknown',
+            isPremium: isPremium,
+            hasAudio: hasAudio,
+            isVideoOnly: !hasAudio,
+            isAudioOnly: false,
+            bitrate: format.tbr || format.abr || 0
+          };
+        });
 
-    audioFormats.forEach(audio => {
+    // Add audio-only formats
+    const bestAudio = audioFormats
+        .sort((a, b) => (b.abr || 0) - (a.abr || 0))[0];
+
+    if (bestAudio) {
       qualityOptions.push({
-        quality: audio.label,
+        quality: `Audio (${Math.round(bestAudio.abr || 128)}kbps)`,
         qualityNum: 0,
-        url: audio.url,
-        type: audio.mimeType,
-        extension: this.getExtensionFromType(audio.mimeType),
-        filesize: audio.filesize || 'unknown',
+        url: bestAudio.url,
+        type: 'audio/mp4',
+        extension: bestAudio.ext || 'm4a',
+        filesize: bestAudio.filesize || 'unknown',
         isPremium: false,
         hasAudio: true,
         isVideoOnly: false,
         isAudioOnly: true,
-        bitrate: audio.bitrate
+        bitrate: bestAudio.abr || 128
       });
-    });
+    }
 
-    let selectedFormat = qualityOptions.find(opt => !opt.isAudioOnly && opt.qualityNum === 360 && opt.hasAudio) ||
-        qualityOptions.find(opt => !opt.isAudioOnly && opt.hasAudio) ||
-        qualityOptions[0];
+    // Select default quality (360p with audio, or best available)
+    let selectedFormat = qualityOptions.find(opt =>
+        !opt.isAudioOnly && opt.qualityNum === 360 && opt.hasAudio
+    ) || qualityOptions.find(opt => !opt.isAudioOnly) || qualityOptions[0];
+
+    const videoId = this.extractYouTubeId(data.webpage_url || data.url);
 
     return {
-      title: data.videoDetails?.title || "YouTube Video",
-      thumbnail: data.videoDetails?.thumbnail?.thumbnails?.[0]?.url || `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`,
-      duration: data.videoDetails?.lengthSeconds || 0,
-      description: data.videoDetails?.shortDescription || '',
-      author: data.videoDetails?.author || '',
-      viewCount: data.videoDetails?.viewCount || 0,
+      title: data.title || "YouTube Video",
+      thumbnail: data.thumbnail || `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`,
+      duration: data.duration || 0,
+      description: data.description || '',
+      author: data.uploader || data.channel || '',
+      viewCount: data.view_count || 0,
       formats: qualityOptions,
       allFormats: qualityOptions,
       url: selectedFormat?.url || null,
       selectedQuality: selectedFormat,
       audioGuaranteed: selectedFormat?.hasAudio || false,
       videoId: videoId,
-      source: 'youtube_api'
+      source: 'yt-dlp'
     };
-  }
-
-  extractQualityNumber(qualityLabel) {
-    if (!qualityLabel) return 0;
-    const match = qualityLabel.match(/(\d+)p/);
-    if (match) return parseInt(match[1]);
-    if (qualityLabel.includes('1440') || qualityLabel.includes('2k')) return 1440;
-    if (qualityLabel.includes('2160') || qualityLabel.includes('4k')) return 2160;
-    if (qualityLabel.includes('1080')) return 1080;
-    if (qualityLabel.includes('720')) return 720;
-    if (qualityLabel.includes('480')) return 480;
-    if (qualityLabel.includes('360')) return 360;
-    if (qualityLabel.includes('240')) return 240;
-    if (qualityLabel.includes('144')) return 144;
-    return 0;
-  }
-
-  getExtensionFromType(mimeType) {
-    if (!mimeType) return 'mp4';
-    const typeMap = {
-      'video/mp4': 'mp4',
-      'video/webm': 'webm',
-      'audio/mp4': 'm4a',
-      'audio/mpeg': 'mp3',
-      'audio/webm': 'webm',
-      'audio/ogg': 'ogg'
-    };
-    for (const [type, ext] of Object.entries(typeMap)) {
-      if (mimeType.includes(type)) return ext;
-    }
-    return 'mp4';
   }
 
   async fetchYouTubeData(url) {
-    const normalizedUrl = this.normalizeYouTubeUrl(url);
-    const videoId = this.extractYouTubeId(normalizedUrl);
+    const videoId = this.extractYouTubeId(url);
 
     if (!videoId) {
       throw new Error('Invalid YouTube URL');
@@ -333,33 +201,14 @@ class YouTubeDownloader {
 
     console.log(`🎬 Processing YouTube video: ${videoId}`);
 
-    let attempts = 0;
-    const maxAttempts = 5;
-    let lastError = null;
-
-    while (attempts < maxAttempts) {
-      attempts++;
-      try {
-        console.log(`🔄 Attempt ${attempts}/${maxAttempts}...`);
-        const result = await this.fetchWithYouTubeApi(videoId, attempts);
-        console.log(`✅ SUCCESS with ${result.formats.length} formats`);
-        return result;
-      } catch (error) {
-        lastError = error;
-        console.error(`❌ Attempt ${attempts} failed:`, error.message);
-
-        if (attempts < maxAttempts) {
-          const baseDelay = 1000 * Math.pow(2, attempts - 1);
-          const jitter = Math.random() * 1000;
-          const backoffMs = Math.min(baseDelay + jitter, 10000);
-
-          console.log(`⏳ Waiting ${(backoffMs/1000).toFixed(1)}s before retry...`);
-          await new Promise(resolve => setTimeout(resolve, backoffMs));
-        }
-      }
+    try {
+      const result = await this.fetchWithYtDlp(url);
+      console.log(`✅ SUCCESS with ${result.formats.length} formats (via yt-dlp)`);
+      return result;
+    } catch (error) {
+      console.error('❌ yt-dlp extraction failed:', error.message);
+      throw error;
     }
-
-    throw new Error(`All ${maxAttempts} attempts failed: ${lastError?.message || 'Unknown error'}`);
   }
 }
 
@@ -372,7 +221,7 @@ async function fetchYouTubeData(url) {
 async function testYouTube() {
   try {
     const testUrl = 'https://youtu.be/dQw4w9WgXcQ';
-    console.log(`\n🧪 Testing YouTube downloader with: ${testUrl}\n`);
+    console.log(`\n🧪 Testing yt-dlp YouTube downloader with: ${testUrl}\n`);
 
     const data = await fetchYouTubeData(testUrl);
 

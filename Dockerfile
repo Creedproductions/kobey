@@ -2,15 +2,18 @@ FROM node:20-slim
 
 WORKDIR /app
 
-# Only need FFmpeg for merging
+# Install FFmpeg, Python, and yt-dlp in one layer
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     ca-certificates \
     ffmpeg \
+    python3 \
+    python3-pip \
     curl && \
+    pip3 install --break-system-packages --no-cache-dir yt-dlp && \
     rm -rf /var/lib/apt/lists/*
 
-# Copy dependency files first
+# Copy dependency files first (better layer cache)
 COPY package*.json ./
 
 # Install production deps
@@ -35,6 +38,7 @@ USER appuser
 ENV NODE_ENV=production
 EXPOSE 8000
 
+# Healthcheck
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
   CMD node -e "\
     const http=require('http'); \
