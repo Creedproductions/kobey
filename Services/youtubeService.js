@@ -1,10 +1,11 @@
+
 const { spawn } = require('child_process');
 const { promisify } = require('util');
 const exec = promisify(require('child_process').exec);
 
 class YouTubeDownloader {
   constructor() {
-    this.ytDlpPath = 'yt-dlp'; // Will be installed globally
+    this.ytDlpPath = 'yt-dlp';
   }
 
   extractYouTubeId(url) {
@@ -50,23 +51,12 @@ class YouTubeDownloader {
     return url;
   }
 
-  extractQualityNumber(qualityLabel) {
-    if (!qualityLabel) return 0;
-    const match = qualityLabel.match(/(\d+)p/);
-    if (match) return parseInt(match[1]);
-    return 360;
-  }
-
-  /**
-   * Use yt-dlp to fetch video information
-   */
   async fetchWithYtDlp(url) {
     const normalizedUrl = this.normalizeYouTubeUrl(url);
 
     console.log('🔧 Using yt-dlp to fetch video info...');
 
     try {
-      // Get JSON info about the video
       const { stdout, stderr } = await exec(
           `${this.ytDlpPath} --dump-json --no-warnings "${normalizedUrl}"`,
           { timeout: 30000, maxBuffer: 10 * 1024 * 1024 }
@@ -88,70 +78,85 @@ class YouTubeDownloader {
     }
   }
 
-  /**
-   * Process yt-dlp data into our format
-   */
+  // 🔥 NEW: Process data with separate video and audio URLs for client-side merging
   processYtDlpData(data) {
     const formats = data.formats || [];
 
-    // Filter video formats (with height) and audio formats
-    const videoFormats = formats.filter(f =>
-        f.vcodec && f.vcodec !== 'none' && f.height && f.url
+    // Get video-only formats
+    const videoOnlyFormats = formats.filter(f =>
+        f.vcodec && f.vcodec !== 'none' &&
+        f.height &&
+        (!f.acodec || f.acodec === 'none') &&
+        f.url
     );
 
-    const audioFormats = formats.filter(f =>
-        f.acodec && f.acodec !== 'none' && (!f.vcodec || f.vcodec === 'none') && f.url
+    // Get video+audio combined formats
+    const combinedFormats = formats.filter(f =>
+        f.vcodec && f.vcodec !== 'none' &&
+        f.acodec && f.acodec !== 'none' &&
+        f.height &&
+        f.url
     );
 
-    // Group video formats by quality
-    const qualityMap = new Map();
+    // Get audio-only formats
+    const audioOnlyFormats = formats.filter(f =>
+        f.acodec && f.acodec !== 'none' &&
+        (!f.vcodec || f.vcodec === 'none') &&
+        f.url
+    );
 
-    videoFormats.forEach(format => {
+    console.log(`📊 Video-only: ${videoOnlyFormats.length}, Combined: ${combinedFormats.length}, Audio-only: ${audioOnlyFormats.length}`);
+
+    // Find best audio for merging
+    const bestAudio = audioOnlyFormats
+        .sort((a, b) => (b.abr || 0) - (a.abr || 0))[0];
+
+    const qualityOptions = [];
+
+    // 🔥 STRATEGY 1: Add combined formats (have audio already - NO MERGE NEEDED)
+    combinedFormats.forEach(format => {
       const quality = format.height;
-      const hasAudio = format.acodec && format.acodec !== 'none';
+      qualityOptions.push({
+        quality: `${quality}p`,
+        qualityNum: quality,
+        url: format.url,
+        type: format.ext === 'mp4' ? 'video/mp4' : `video/${format.ext}`,
+        extension: format.ext || 'mp4',
+        filesize: format.filesize || 'unknown',
+        isPremium: quality > 360,
+        hasAudio: true,
+        isVideoOnly: false,
+        isAudioOnly: false,
+        needsMerge: false, // 🔥 No merging needed!
+        bitrate: format.tbr || format.abr || 0
+      });
+    });
 
-      if (!qualityMap.has(quality)) {
-        qualityMap.set(quality, format);
-      } else {
-        // Prefer formats with audio
-        const existing = qualityMap.get(quality);
-        const existingHasAudio = existing.acodec && existing.acodec !== 'none';
+    // 🔥 STRATEGY 2: Add video-only formats WITH separate audio URL for client-side merge
+    videoOnlyFormats.forEach(format => {
+      const quality = format.height;
 
-        if (!existingHasAudio && hasAudio) {
-          qualityMap.set(quality, format);
-        } else if (existingHasAudio === hasAudio && format.filesize > existing.filesize) {
-          qualityMap.set(quality, format);
-        }
+      if (!qualityOptions.find(q => q.qualityNum === quality)) {
+        qualityOptions.push({
+          quality: `${quality}p`,
+          qualityNum: quality,
+          videoUrl: format.url, // 🔥 Separate video URL
+          audioUrl: bestAudio?.url, // 🔥 Separate audio URL
+          url: format.url, // Fallback (client will merge)
+          type: format.ext === 'mp4' ? 'video/mp4' : `video/${format.ext}`,
+          extension: format.ext || 'mp4',
+          filesize: format.filesize || 'unknown',
+          isPremium: quality > 360,
+          hasAudio: false,
+          isVideoOnly: true,
+          isAudioOnly: false,
+          needsMerge: true, // 🔥 Client must merge!
+          bitrate: format.tbr || 0
+        });
       }
     });
 
-    // Convert to our format
-    const qualityOptions = Array.from(qualityMap.values())
-        .sort((a, b) => (a.height || 0) - (b.height || 0))
-        .map(format => {
-          const quality = format.height;
-          const hasAudio = format.acodec && format.acodec !== 'none';
-          const isPremium = quality > 360;
-
-          return {
-            quality: `${quality}p`,
-            qualityNum: quality,
-            url: format.url,
-            type: format.ext === 'mp4' ? 'video/mp4' : `video/${format.ext}`,
-            extension: format.ext || 'mp4',
-            filesize: format.filesize || 'unknown',
-            isPremium: isPremium,
-            hasAudio: hasAudio,
-            isVideoOnly: !hasAudio,
-            isAudioOnly: false,
-            bitrate: format.tbr || format.abr || 0
-          };
-        });
-
-    // Add audio-only formats
-    const bestAudio = audioFormats
-        .sort((a, b) => (b.abr || 0) - (a.abr || 0))[0];
-
+    // Add audio-only format
     if (bestAudio) {
       qualityOptions.push({
         quality: `Audio (${Math.round(bestAudio.abr || 128)}kbps)`,
@@ -164,16 +169,29 @@ class YouTubeDownloader {
         hasAudio: true,
         isVideoOnly: false,
         isAudioOnly: true,
+        needsMerge: false,
         bitrate: bestAudio.abr || 128
       });
     }
 
-    // Select default quality (360p with audio, or best available)
+    // Sort by quality
+    qualityOptions.sort((a, b) => {
+      if (a.isAudioOnly && !b.isAudioOnly) return 1;
+      if (!a.isAudioOnly && b.isAudioOnly) return -1;
+      return a.qualityNum - b.qualityNum;
+    });
+
+    // Select default (360p with audio, or 360p that will be merged)
     let selectedFormat = qualityOptions.find(opt =>
-        !opt.isAudioOnly && opt.qualityNum === 360 && opt.hasAudio
-    ) || qualityOptions.find(opt => !opt.isAudioOnly) || qualityOptions[0];
+            !opt.isAudioOnly && opt.qualityNum === 360 && opt.hasAudio
+        ) || qualityOptions.find(opt => !opt.isAudioOnly && opt.qualityNum === 360)
+        || qualityOptions.find(opt => !opt.isAudioOnly)
+        || qualityOptions[0];
 
     const videoId = this.extractYouTubeId(data.webpage_url || data.url);
+
+    console.log(`✅ Created ${qualityOptions.length} quality options`);
+    console.log(`🎯 Default: ${selectedFormat?.quality} (needsMerge: ${selectedFormat?.needsMerge})`);
 
     return {
       title: data.title || "YouTube Video",
@@ -186,9 +204,10 @@ class YouTubeDownloader {
       allFormats: qualityOptions,
       url: selectedFormat?.url || null,
       selectedQuality: selectedFormat,
-      audioGuaranteed: selectedFormat?.hasAudio || false,
       videoId: videoId,
-      source: 'yt-dlp'
+      source: 'yt-dlp',
+      // 🔥 CRITICAL: Provide best audio URL for client-side merging
+      bestAudioUrl: bestAudio?.url,
     };
   }
 
@@ -218,26 +237,7 @@ async function fetchYouTubeData(url) {
   return youtubeDownloader.fetchYouTubeData(url);
 }
 
-async function testYouTube() {
-  try {
-    const testUrl = 'https://youtu.be/dQw4w9WgXcQ';
-    console.log(`\n🧪 Testing yt-dlp YouTube downloader with: ${testUrl}\n`);
-
-    const data = await fetchYouTubeData(testUrl);
-
-    console.log('\n✅ TEST PASSED');
-    console.log(`📺 Title: ${data.title}`);
-    console.log(`📊 Formats: ${data.formats.length}`);
-
-    return true;
-  } catch (error) {
-    console.error('\n❌ TEST FAILED:', error.message);
-    return false;
-  }
-}
-
 module.exports = {
   fetchYouTubeData,
-  testYouTube,
   YouTubeDownloader
 };
