@@ -1,9 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const downloaderRoutes = require('./Routes/downloaderRoutes');
-const mergeRoutes = require('./mergeRoutes'); // NEW
 const config = require('./Config/config');
-const convertRoutes = require('./Routes/convertRoutes');
 
 const app = express();
 
@@ -14,13 +12,11 @@ const corsOptions = {
   origin: [
     'https://savedownloader.vercel.app',
     'https://savedownloaderweb.vercel.app',
-    'http://localhost:5173',
-    '*' // Allow all during testing
+    'http://localhost:5173'
   ],
   methods: ['GET', 'POST', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
 };
-app.use('/api', convertRoutes);
 
 const setupMiddleware = () => {
   app.use(express.json());
@@ -29,26 +25,24 @@ const setupMiddleware = () => {
 
 const setupRoutes = () => {
   app.use('/api', downloaderRoutes);
-  app.use('/api', mergeRoutes); // NEW - Add merge routes
 
   app.get('/health', (req, res) => {
     res.status(200).json({
       status: 'OK',
       timestamp: new Date().toISOString(),
       environment: NODE_ENV,
-      features: ['downloads', 'audio-merge'],
-      ffmpeg: 'enabled'
+      features: ['downloads'],
+      database: 'disabled'
     });
   });
 
   app.get('/', (req, res) => {
     res.status(200).json({
-      message: 'Media Downloader API v2',
+      message: 'Media Downloader API',
       status: 'running',
       endpoints: {
         health: '/health',
         download: '/api/download',
-        merge: '/api/merge-audio?videoUrl=...&audioUrl=...',
         mockVideos: '/api/mock-videos'
       }
     });
@@ -57,18 +51,18 @@ const setupRoutes = () => {
 
 const setupErrorHandling = () => {
   process.on('uncaughtException', (error) => {
-    console.error('❌ Uncaught Exception:', error);
+    console.error('Ã¢ÂÅ’ Uncaught Exception:', error);
     if (NODE_ENV !== 'production') {
       process.exit(1);
     }
   });
 
   process.on('unhandledRejection', (reason, promise) => {
-    console.error('❌ Unhandled Rejection at:', promise, 'reason:', reason);
+    console.error('Ã¢ÂÅ’ Unhandled Rejection at:', promise, 'reason:', reason);
   });
 
   process.on('SIGTERM', () => {
-    console.log('🛑 SIGTERM received, shutting down gracefully');
+    console.log('Ã°Å¸â€˜â€¹ SIGTERM received, shutting down gracefully');
     if (server) {
       server.close(() => {
         process.exit(0);
@@ -79,7 +73,7 @@ const setupErrorHandling = () => {
   });
 
   process.on('SIGINT', () => {
-    console.log('🛑 SIGINT received, shutting down gracefully');
+    console.log('Ã°Å¸â€˜â€¹ SIGINT received, shutting down gracefully');
     if (server) {
       server.close(() => {
         process.exit(0);
@@ -92,15 +86,14 @@ const setupErrorHandling = () => {
 
 const startServer = () => {
   const server = app.listen(PORT, () => {
-    console.log(`🚀 Server running on port ${PORT}`);
-    console.log(`🌍 Environment: ${NODE_ENV}`);
-    console.log(`💊 Health check: http://localhost:${PORT}/health`);
-    console.log(`📥 Download API: http://localhost:${PORT}/api/download`);
-    console.log(`🔀 Merge API: http://localhost:${PORT}/api/merge-audio`);
+    console.log(`Ã°Å¸Å¡â‚¬ Server running on port ${PORT}`);
+    console.log(`Ã°Å¸Å’Â Environment: ${NODE_ENV}`);
+    console.log(`Ã°Å¸â€œÅ  Health check: http://localhost:${PORT}/health`);
+    console.log(`Ã°Å¸â€œÂ¥ Download API: http://localhost:${PORT}/api/download`);
   });
 
   server.on('error', (error) => {
-    console.error('❌ Server error:', error);
+    console.error('Ã¢ÂÅ’ Server error:', error);
     if (error.code === 'EADDRINUSE') {
       console.error(`Port ${PORT} is already in use`);
       process.exit(1);
