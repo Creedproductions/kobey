@@ -6,7 +6,6 @@ class YouTubeDownloader {
     this.isInitializing = false;
   }
 
-  // Initialize the Innertube instance (Singleton pattern)
   async init() {
     if (this.innertube) return;
     if (this.isInitializing) {
@@ -18,7 +17,6 @@ class YouTubeDownloader {
 
     this.isInitializing = true;
     try {
-      // Innertube works best with a cache to store session data
       this.innertube = await Innertube.create({
         cache: new UniversalCache(false),
         generate_session_locally: true
@@ -34,23 +32,22 @@ class YouTubeDownloader {
 
   extractYouTubeId(url) {
     try {
+      if (url.includes('youtu.be/')) {
+        return url.split('youtu.be/')[1]?.split(/[?&/#]/)[0];
+      }
       const urlObj = new URL(url);
       let videoId = urlObj.searchParams.get('v');
       if (videoId) return videoId;
 
       const pathname = urlObj.pathname;
-      if (pathname.includes('youtu.be/')) {
-        return pathname.split('youtu.be/')[1]?.split(/[?&/#]/)[0];
-      }
       if (pathname.includes('/shorts/') || pathname.includes('/embed/')) {
         return pathname.split('/').pop()?.split(/[?&/#]/)[0];
       }
-
+      return null;
+    } catch {
       const regex = /(?:v=|\/)([0-9A-Za-z_-]{11})/;
       const match = String(url).match(regex);
       return match ? match[1] : null;
-    } catch {
-      return null;
     }
   }
 
@@ -65,29 +62,39 @@ class YouTubeDownloader {
     console.log(`🎬 Processing YouTube video via Innertube: ${videoId}`);
 
     try {
-      // getInfo() fetches metadata and streaming manifests
       const info = await this.innertube.getInfo(videoId);
+
+      // Safety check for streaming data
+      if (!info.streaming_data) {
+        throw new Error('No streaming data available for this video.');
+      }
+
       const basic = info.basic_info;
 
-      // Extract and format quality options
+      // Access formats safely using the streaming_data object
+      // This fixes the "info.formats is not iterable" error
+      const formats = info.streaming_data.formats || [];
+      const adaptive_formats = info.streaming_data.adaptive_formats || [];
+      const allFormatsRaw = [...formats, ...adaptive_formats];
+
       const qualityOptions = [];
 
-      // Combine video+audio formats and video-only formats
-      const allFormats = [...info.formats, ...info.adaptive_formats];
+      allFormatsRaw.forEach((f) => {
+        // In Innertube, f.has_video / f.has_audio are properties
+        const hasVideo = !!f.has_video || !!f.width;
+        const hasAudio = !!f.has_audio || f.mime_type.includes('audio');
 
-      allFormats.forEach((f) => {
-        const hasVideo = f.has_video;
-        const hasAudio = f.has_audio;
         const quality = f.quality_label || (hasAudio && !hasVideo ? 'Audio' : 'Unknown');
 
         qualityOptions.push({
           quality: quality,
-          qualityNum: parseInt(f.height) || 0,
-          url: f.decipher(this.innertube.session.player), // Decipher the URL
+          qualityNum: f.height || 0,
+          // Use the signature decipher logic provided by the session
+          url: f.decipher(this.innertube.session.player),
           type: f.mime_type,
           extension: f.mime_type.split(';')[0].split('/')[1] || 'mp4',
           filesize: f.content_length || 'unknown',
-          isPremium: parseInt(f.height) > 360,
+          isPremium: (f.height || 0) > 360,
           hasAudio: hasAudio,
           isVideoOnly: hasVideo && !hasAudio,
           isAudioOnly: hasAudio && !hasVideo,
@@ -96,13 +103,21 @@ class YouTubeDownloader {
         });
       });
 
-      // Sort: Highest resolution first
-      qualityOptions.sort((a, b) => b.qualityNum - a.qualityNum);
+      // Filter out formats that failed to decipher (no URL)
+      const validOptions = qualityOptions.filter(o => o.url);
 
-      // Select default (360p combined or first available)
+      // Sort: Highest resolution first, then Audio at the bottom
+      validOptions.sort((a, b) => {
+        if (a.isAudioOnly && !b.isAudioOnly) return 1;
+        if (!a.isAudioOnly && b.isAudioOnly) return -1;
+        return b.qualityNum - a.qualityNum;
+      });
+
+      // Selection logic: Prefer 360p with audio for "fast" preview
       const selectedFormat =
-          qualityOptions.find(o => o.qualityNum === 360 && o.hasAudio) ||
-          qualityOptions[0];
+          validOptions.find(o => o.qualityNum === 360 && o.hasAudio) ||
+          validOptions.find(o => o.hasAudio) ||
+          validOptions[0];
 
       return {
         title: basic.title,
@@ -111,16 +126,16 @@ class YouTubeDownloader {
         description: basic.short_description || '',
         author: basic.author,
         viewCount: basic.view_count,
-        formats: qualityOptions,
-        allFormats: qualityOptions,
+        formats: validOptions,
+        allFormats: validOptions,
         url: selectedFormat?.url || null,
         selectedQuality: selectedFormat,
         videoId,
         source: 'innertube',
-        bestAudioUrl: qualityOptions.find(o => o.isAudioOnly)?.url
+        bestAudioUrl: validOptions.find(o => o.isAudioOnly)?.url
       };
     } catch (err) {
-      console.error('❌ Innertube error:', err.message);
+      console.error('❌ Innertube error:', err);
       throw new Error(`YouTube extraction failed: ${err.message}`);
     }
   }
