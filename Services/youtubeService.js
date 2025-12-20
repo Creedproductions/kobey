@@ -57,35 +57,21 @@ class YouTubeDownloader {
   }
 
   /**
-   * CRITICAL FIX: Better response inspection
+   * Random delay to avoid bot detection
+   */
+  async randomDelay() {
+    const ms = Math.floor(Math.random() * 1500) + 500; // 500-2000ms
+    await new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  /**
+   * OPTIMIZED: Prioritize ANDROID client which works most reliably
    */
   async fetchWithYouTubeApi(videoId, attempts = 1) {
     const url = `${this.youtubeBaseUrl}?key=${this.youtubeApiKey}`;
 
+    // CRITICAL: ANDROID client works most reliably - try it FIRST
     const clients = [
-      {
-        name: 'ANDROID_TESTSUITE',
-        clientName: 'ANDROID_TESTSUITE',
-        clientVersion: '1.9',
-        androidSdkVersion: 30,
-        headers: {
-          'Content-Type': 'application/json',
-          'X-YouTube-Client-Name': '30',
-          'X-YouTube-Client-Version': '1.9',
-          'User-Agent': 'com.google.android.youtube/'
-        }
-      },
-      {
-        name: 'ANDROID_EMBEDDED',
-        clientName: 'ANDROID_EMBEDDED_PLAYER',
-        clientVersion: '19.13.36',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-YouTube-Client-Name': '55',
-          'X-YouTube-Client-Version': '19.13.36',
-          'User-Agent': 'com.google.android.youtube/19.13.36'
-        }
-      },
       {
         name: 'ANDROID',
         clientName: 'ANDROID',
@@ -99,6 +85,18 @@ class YouTubeDownloader {
         }
       },
       {
+        name: 'ANDROID_TESTSUITE',
+        clientName: 'ANDROID_TESTSUITE',
+        clientVersion: '1.9',
+        androidSdkVersion: 30,
+        headers: {
+          'Content-Type': 'application/json',
+          'X-YouTube-Client-Name': '30',
+          'X-YouTube-Client-Version': '1.9',
+          'User-Agent': 'com.google.android.youtube/'
+        }
+      },
+      {
         name: 'IOS',
         clientName: 'IOS',
         clientVersion: '19.09.3',
@@ -109,22 +107,14 @@ class YouTubeDownloader {
           'X-YouTube-Client-Version': '19.09.3',
           'User-Agent': 'com.google.ios.youtube/19.09.3 (iPhone14,3; U; CPU iOS 15_6 like Mac OS X)'
         }
-      },
-      {
-        name: 'WEB',
-        clientName: 'WEB',
-        clientVersion: '2.20230728.00.00',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-YouTube-Client-Name': '1',
-          'X-YouTube-Client-Version': '2.20230728.00.00',
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        }
       }
     ];
 
     for (const client of clients) {
       try {
+        // Add random delay to avoid pattern detection
+        await this.randomDelay();
+
         const body = {
           context: {
             client: {
@@ -137,12 +127,9 @@ class YouTubeDownloader {
           videoId: videoId
         };
 
-        // Add Android SDK version if present
         if (client.androidSdkVersion) {
           body.context.client.androidSdkVersion = client.androidSdkVersion;
         }
-
-        // Add device model if present
         if (client.deviceModel) {
           body.context.client.deviceModel = client.deviceModel;
         }
@@ -156,48 +143,28 @@ class YouTubeDownloader {
 
         const data = response.data;
 
-        // CRITICAL: Log what we actually got
-        console.log(`📦 ${client.name} Response keys:`, Object.keys(data));
-
-        if (data.playabilityStatus) {
-          console.log(`📊 Playability: ${data.playabilityStatus.status}`);
-          if (data.playabilityStatus.reason) {
-            console.log(`⚠️ Reason: ${data.playabilityStatus.reason}`);
-          }
-        }
-
-        // Check for streaming data
-        if (data.streamingData) {
+        // Check playability
+        if (data.playabilityStatus?.status === 'OK' && data.streamingData) {
           const formats = data.streamingData.formats || [];
           const adaptiveFormats = data.streamingData.adaptiveFormats || [];
 
-          console.log(`✅ ${client.name} HAS streaming data!`);
-          console.log(`   Combined formats: ${formats.length}`);
-          console.log(`   Adaptive formats: ${adaptiveFormats.length}`);
+          console.log(`✅ ${client.name} SUCCESS!`);
+          console.log(`   Combined: ${formats.length}, Adaptive: ${adaptiveFormats.length}`);
 
-          if (formats.length > 0 || adaptiveFormats.length > 0) {
-            return this.processYouTubeApiData(data, videoId);
-          }
+          return this.processYouTubeApiData(data, videoId);
         } else {
-          console.warn(`❌ ${client.name}: NO streamingData in response`);
-
-          // Log what we got instead
-          if (data.videoDetails) {
-            console.log(`   BUT we have videoDetails: "${data.videoDetails.title}"`);
-          }
+          const status = data.playabilityStatus?.status || 'UNKNOWN';
+          const reason = data.playabilityStatus?.reason || 'No reason provided';
+          console.warn(`⚠️ ${client.name}: ${status} - ${reason}`);
         }
 
       } catch (error) {
         console.error(`❌ ${client.name} failed:`, error.message);
-        if (error.response) {
-          console.error(`   Status: ${error.response.status}`);
-          console.error(`   Keys:`, Object.keys(error.response.data || {}));
-        }
         continue;
       }
     }
 
-    throw new Error('All YouTube API clients failed - no streaming data available');
+    throw new Error('All YouTube API clients failed');
   }
 
   processYouTubeApiData(data, videoId) {
@@ -206,50 +173,6 @@ class YouTubeDownloader {
     if (data.streamingData) {
       if (data.streamingData.formats) formats.push(...data.streamingData.formats);
       if (data.streamingData.adaptiveFormats) formats.push(...data.streamingData.adaptiveFormats);
-    }
-
-    // If we got video details but no formats, create a browser fallback
-    if (formats.length === 0 && data.videoDetails) {
-      console.warn('⚠️ No formats available - creating browser fallback');
-      return {
-        title: data.videoDetails.title || "YouTube Video",
-        thumbnail: data.videoDetails.thumbnail?.thumbnails?.[0]?.url ||
-            `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`,
-        duration: data.videoDetails.lengthSeconds || 0,
-        description: data.videoDetails.shortDescription || '',
-        author: data.videoDetails.author || '',
-        viewCount: data.videoDetails.viewCount || 0,
-        formats: [{
-          quality: 'Browser',
-          qualityNum: 360,
-          url: `https://www.youtube.com/watch?v=${videoId}`,
-          type: 'text/html',
-          extension: 'browser',
-          isPremium: false,
-          hasAudio: true,
-          isVideoOnly: false,
-          isAudioOnly: false
-        }],
-        allFormats: [{
-          quality: 'Browser',
-          qualityNum: 360,
-          url: `https://www.youtube.com/watch?v=${videoId}`,
-          type: 'text/html',
-          extension: 'browser',
-          isPremium: false,
-          hasAudio: true,
-          isVideoOnly: false,
-          isAudioOnly: false
-        }],
-        url: `https://www.youtube.com/watch?v=${videoId}`,
-        selectedQuality: {
-          quality: 'Browser',
-          url: `https://www.youtube.com/watch?v=${videoId}`
-        },
-        audioGuaranteed: false,
-        videoId: videoId,
-        source: 'youtube_browser_fallback'
-      };
     }
 
     const parsedFormats = formats.map(format => {
@@ -390,8 +313,9 @@ class YouTubeDownloader {
 
     console.log(`🎬 Processing YouTube video: ${videoId}`);
 
+    // Try up to 5 times with increasing delays
     let attempts = 0;
-    const maxAttempts = 3;
+    const maxAttempts = 5;
     let lastError = null;
 
     while (attempts < maxAttempts) {
@@ -399,15 +323,19 @@ class YouTubeDownloader {
       try {
         console.log(`🔄 Attempt ${attempts}/${maxAttempts}...`);
         const result = await this.fetchWithYouTubeApi(videoId, attempts);
-        console.log(`✅ SUCCESS with ${result.formats.length} formats (source: ${result.source})`);
+        console.log(`✅ SUCCESS with ${result.formats.length} formats`);
         return result;
       } catch (error) {
         lastError = error;
         console.error(`❌ Attempt ${attempts} failed:`, error.message);
 
         if (attempts < maxAttempts) {
-          const backoffMs = Math.min(1000 * Math.pow(2, attempts - 1), 8000);
-          console.log(`⏳ Waiting ${backoffMs/1000}s before retry...`);
+          // Exponential backoff with jitter
+          const baseDelay = 1000 * Math.pow(2, attempts - 1);
+          const jitter = Math.random() * 1000;
+          const backoffMs = Math.min(baseDelay + jitter, 10000);
+
+          console.log(`⏳ Waiting ${(backoffMs/1000).toFixed(1)}s before retry...`);
           await new Promise(resolve => setTimeout(resolve, backoffMs));
         }
       }
@@ -433,7 +361,6 @@ async function testYouTube() {
     console.log('\n✅ TEST PASSED');
     console.log(`📺 Title: ${data.title}`);
     console.log(`📊 Formats: ${data.formats.length}`);
-    console.log(`🎯 Source: ${data.source}`);
 
     return true;
   } catch (error) {
