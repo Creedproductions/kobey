@@ -56,22 +56,40 @@ class YouTubeDownloader {
     return url;
   }
 
-  /**
-   * Random delay to avoid bot detection
-   */
   async randomDelay() {
-    const ms = Math.floor(Math.random() * 1500) + 500; // 500-2000ms
+    const ms = Math.floor(Math.random() * 1500) + 500;
     await new Promise(resolve => setTimeout(resolve, ms));
   }
 
   /**
-   * OPTIMIZED: Prioritize ANDROID client which works most reliably
+   * BEST CLIENT ORDER FOR 2025:
+   * 1. WEB_EMBEDDED - Bypasses age/region restrictions
+   * 2. ANDROID - Most reliable for normal videos
+   * 3. ANDROID_TESTSUITE - Good fallback
+   * 4. IOS - Last resort
    */
   async fetchWithYouTubeApi(videoId, attempts = 1) {
     const url = `${this.youtubeBaseUrl}?key=${this.youtubeApiKey}`;
 
-    // CRITICAL: ANDROID client works most reliably - try it FIRST
     const clients = [
+      {
+        name: 'WEB_EMBEDDED',
+        clientName: 'WEB_EMBEDDED_PLAYER',
+        clientVersion: '1.20220731.00.00',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-YouTube-Client-Name': '56',
+          'X-YouTube-Client-Version': '1.20220731.00.00',
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+          'Referer': 'https://www.youtube.com/',
+          'Origin': 'https://www.youtube.com'
+        },
+        extraContext: {
+          thirdParty: {
+            embedUrl: 'https://www.youtube.com/'
+          }
+        }
+      },
       {
         name: 'ANDROID',
         clientName: 'ANDROID',
@@ -112,7 +130,6 @@ class YouTubeDownloader {
 
     for (const client of clients) {
       try {
-        // Add random delay to avoid pattern detection
         await this.randomDelay();
 
         const body = {
@@ -126,6 +143,11 @@ class YouTubeDownloader {
           },
           videoId: videoId
         };
+
+        // Add extra context for embedded player
+        if (client.extraContext) {
+          Object.assign(body.context, client.extraContext);
+        }
 
         if (client.androidSdkVersion) {
           body.context.client.androidSdkVersion = client.androidSdkVersion;
@@ -143,17 +165,15 @@ class YouTubeDownloader {
 
         const data = response.data;
 
-        // Check playability
-        if (data.playabilityStatus?.status === 'OK' && data.streamingData) {
-          const formats = data.streamingData.formats || [];
-          const adaptiveFormats = data.streamingData.adaptiveFormats || [];
+        // Check for valid playability and streaming data
+        const status = data.playabilityStatus?.status;
+        const hasStreamingData = data.streamingData &&
+            (data.streamingData.formats?.length > 0 || data.streamingData.adaptiveFormats?.length > 0);
 
+        if (status === 'OK' && hasStreamingData) {
           console.log(`✅ ${client.name} SUCCESS!`);
-          console.log(`   Combined: ${formats.length}, Adaptive: ${adaptiveFormats.length}`);
-
           return this.processYouTubeApiData(data, videoId);
         } else {
-          const status = data.playabilityStatus?.status || 'UNKNOWN';
           const reason = data.playabilityStatus?.reason || 'No reason provided';
           console.warn(`⚠️ ${client.name}: ${status} - ${reason}`);
         }
@@ -313,7 +333,6 @@ class YouTubeDownloader {
 
     console.log(`🎬 Processing YouTube video: ${videoId}`);
 
-    // Try up to 5 times with increasing delays
     let attempts = 0;
     const maxAttempts = 5;
     let lastError = null;
@@ -330,7 +349,6 @@ class YouTubeDownloader {
         console.error(`❌ Attempt ${attempts} failed:`, error.message);
 
         if (attempts < maxAttempts) {
-          // Exponential backoff with jitter
           const baseDelay = 1000 * Math.pow(2, attempts - 1);
           const jitter = Math.random() * 1000;
           const backoffMs = Math.min(baseDelay + jitter, 10000);
