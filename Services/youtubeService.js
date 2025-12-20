@@ -1,12 +1,9 @@
-const axios = require('axios');
+const axios = require("axios");
 
 class YouTubeDownloader {
   constructor() {
-    // Multiple API fallbacks for reliability
-    this.apis = [
-      { name: 'y2mate', url: 'https://www.y2mate.com/mates/analyzeV2/ajax' },
-      { name: 'ytdl-core-proxy', url: 'https://ytdl-core-proxy.onrender.com/api/info' }
-    ];
+    this.youtubeApiKey = 'AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8';
+    this.youtubeBaseUrl = 'https://youtubei.googleapis.com/youtubei/v1/player';
   }
 
   extractYouTubeId(url) {
@@ -24,10 +21,15 @@ class YouTubeDownloader {
         const id = pathname.split('shorts/')[1]?.split(/[?&/#]/)[0];
         if (id && id.length === 11) return id;
       }
+      if (pathname.includes('embed/')) {
+        const id = pathname.split('embed/')[1]?.split(/[?&/#]/)[0];
+        if (id && id.length === 11) return id;
+      }
 
       const regexPatterns = [
         /(?:v=|\/)([0-9A-Za-z_-]{11})/,
         /youtu\.be\/([0-9A-Za-z_-]{11})/,
+        /embed\/([0-9A-Za-z_-]{11})/,
         /shorts\/([0-9A-Za-z_-]{11})/
       ];
 
@@ -35,6 +37,7 @@ class YouTubeDownloader {
         const match = url.match(pattern);
         if (match && match[1]) return match[1];
       }
+
       return null;
     } catch (error) {
       console.error("URL parsing error:", error.message);
@@ -42,228 +45,322 @@ class YouTubeDownloader {
     }
   }
 
-  async tryY2Mate(videoId) {
-    try {
-      console.log('🔄 Trying Y2Mate API...');
-
-      const response = await axios.post(
-          'https://www.y2mate.com/mates/analyzeV2/ajax',
-          new URLSearchParams({
-            k_query: `https://www.youtube.com/watch?v=${videoId}`,
-            k_page: 'home',
-            hl: 'en',
-            q_auto: '0'
-          }),
-          {
-            headers: {
-              'Content-Type': 'application/x-www-form-urlencoded',
-              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            },
-            timeout: 15000
-          }
-      );
-
-      if (response.data && response.data.status === 'ok') {
-        console.log('✅ Y2Mate returned data');
-
-        // Parse the HTML response to get download links
-        const links = response.data.links;
-        if (!links || !links.mp4) {
-          throw new Error('No MP4 links found');
-        }
-
-        // Convert Y2Mate format data to our format
-        const qualities = [];
-
-        // Add video qualities (360p free, others premium)
-        for (const [quality, data] of Object.entries(links.mp4)) {
-          const qualityNum = parseInt(quality) || 360;
-
-          qualities.push({
-            quality: `${quality}p`,
-            qualityNum: qualityNum,
-            url: `Y2MATE:${videoId}:${quality}:mp4:${data.k}`,  // Special format for conversion
-            type: 'video/mp4',
-            extension: 'mp4',
-            filesize: data.size || 'unknown',
-            isPremium: qualityNum > 360,
-            hasAudio: true,
-            isVideoOnly: false,
-            isAudioOnly: false
-          });
-        }
-
-        // Add audio formats
-        if (links.mp3) {
-          for (const [quality, data] of Object.entries(links.mp3)) {
-            qualities.push({
-              quality: `audio (${quality}kbps)`,
-              qualityNum: 0,
-              url: `Y2MATE:${videoId}:${quality}:mp3:${data.k}`,
-              type: 'audio/mpeg',
-              extension: 'mp3',
-              filesize: data.size || 'unknown',
-              isPremium: false,
-              hasAudio: true,
-              isVideoOnly: false,
-              isAudioOnly: true
-            });
-          }
-        }
-
-        const defaultQuality = qualities.find(q => q.quality === '360p') || qualities[0];
-
-        return {
-          title: response.data.title || "YouTube Video",
-          thumbnail: `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`,
-          duration: response.data.t || 0,
-          description: '',
-          author: '',
-          viewCount: 0,
-          formats: qualities,
-          allFormats: qualities,
-          url: defaultQuality.url,
-          selectedQuality: defaultQuality,
-          audioGuaranteed: true,
-          videoId: videoId,
-          source: 'y2mate'
-        };
-      }
-
-      throw new Error('Y2Mate returned invalid response');
-    } catch (error) {
-      console.error('❌ Y2Mate failed:', error.message);
-      throw error;
+  normalizeYouTubeUrl(url) {
+    if (url.includes('youtu.be/')) {
+      const videoId = url.split('youtu.be/')[1].split('?')[0].split('&')[0];
+      return `https://www.youtube.com/watch?v=${videoId}`;
     }
+    if (url.includes('m.youtube.com')) {
+      return url.replace('m.youtube.com', 'www.youtube.com');
+    }
+    return url;
   }
 
-  async convertY2MateUrl(videoId, quality, format, k) {
-    try {
-      console.log(`🔄 Converting Y2Mate URL for ${quality}${format}...`);
+  extractQualityNumber(qualityLabel) {
+    if (!qualityLabel) return 0;
+    const match = qualityLabel.match(/(\d+)p/);
+    if (match) return parseInt(match[1]);
+    if (qualityLabel.includes('1440') || qualityLabel.includes('2k')) return 1440;
+    if (qualityLabel.includes('2160') || qualityLabel.includes('4k')) return 2160;
+    if (qualityLabel.includes('1080')) return 1080;
+    if (qualityLabel.includes('720')) return 720;
+    if (qualityLabel.includes('480')) return 480;
+    if (qualityLabel.includes('360')) return 360;
+    if (qualityLabel.includes('240')) return 240;
+    if (qualityLabel.includes('144')) return 144;
+    return 0;
+  }
 
-      const response = await axios.post(
-          'https://www.y2mate.com/mates/convertV2/index',
-          new URLSearchParams({
-            vid: videoId,
-            k: k
-          }),
-          {
-            headers: {
-              'Content-Type': 'application/x-www-form-urlencoded',
-              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            },
-            timeout: 30000
-          }
-      );
+  getExtensionFromType(mimeType) {
+    if (!mimeType) return 'mp4';
+    const typeMap = {
+      'video/mp4': 'mp4',
+      'video/webm': 'webm',
+      'audio/mp4': 'm4a',
+      'audio/mpeg': 'mp3',
+      'audio/webm': 'webm',
+      'audio/ogg': 'ogg'
+    };
+    for (const [type, ext] of Object.entries(typeMap)) {
+      if (mimeType.includes(type)) return ext;
+    }
+    return 'mp4';
+  }
 
-      if (response.data && response.data.status === 'ok') {
-        // Extract download URL from response
-        const dlink = response.data.dlink;
-        if (dlink) {
-          console.log('✅ Got direct download URL from Y2Mate');
-          return dlink;
+  /**
+   * FIXED: Fetch using YouTube's internal API with PROPER 2025 headers
+   */
+  async fetchWithYouTubeApi(videoId, attempts = 1) {
+    const url = `${this.youtubeBaseUrl}?key=${this.youtubeApiKey}`;
+
+    // CRITICAL: Use exact headers from working 2025 code
+    const clients = [
+      {
+        name: 'ANDROID',
+        clientName: 'ANDROID',
+        clientVersion: '19.17.34',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-YouTube-Client-Name': '3',
+          'X-YouTube-Client-Version': '19.17.34',
+          'User-Agent': 'com.google.android.youtube/19.17.34 (Linux; U; Android 13) gzip'
+        }
+      },
+      {
+        name: 'WEB',
+        clientName: 'WEB',
+        clientVersion: '2.20230728.00.00',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-YouTube-Client-Name': '1',
+          'X-YouTube-Client-Version': '2.20230728.00.00',
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+      },
+      {
+        name: 'IOS',
+        clientName: 'IOS',
+        clientVersion: '19.09.3',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-YouTube-Client-Name': '5',
+          'X-YouTube-Client-Version': '19.09.3',
+          'User-Agent': 'com.google.ios.youtube/19.09.3 (iPhone14,3; U; CPU iOS 15_6 like Mac OS X)'
         }
       }
+    ];
 
-      throw new Error('Failed to get download URL');
-    } catch (error) {
-      console.error('❌ Y2Mate conversion failed:', error.message);
-      throw error;
+    for (const client of clients) {
+      try {
+        const body = {
+          context: {
+            client: {
+              clientName: client.clientName,
+              clientVersion: client.clientVersion,
+              hl: 'en',
+              gl: 'US'
+            }
+          },
+          videoId: videoId
+        };
+
+        console.log(`🔄 Trying ${client.name} client (v${client.clientVersion})...`);
+
+        const response = await axios.post(url, body, {
+          headers: client.headers,
+          timeout: 30000
+        });
+
+        const data = response.data;
+
+        // Check for streaming data
+        if (data.streamingData) {
+          const hasCombinedFormats = data.streamingData.formats && data.streamingData.formats.length > 0;
+          const hasAdaptiveFormats = data.streamingData.adaptiveFormats && data.streamingData.adaptiveFormats.length > 0;
+
+          if (hasCombinedFormats || hasAdaptiveFormats) {
+            console.log(`✅ ${client.name} SUCCESS:`);
+            console.log(`   Combined: ${data.streamingData.formats?.length || 0}`);
+            console.log(`   Adaptive: ${data.streamingData.adaptiveFormats?.length || 0}`);
+            return this.processYouTubeApiData(data, videoId);
+          }
+        }
+
+        console.warn(`⚠️ ${client.name}: No streaming data in response`);
+      } catch (error) {
+        console.error(`❌ ${client.name} failed:`, error.message);
+        if (error.response) {
+          console.error(`   Status: ${error.response.status}`);
+          console.error(`   Data:`, JSON.stringify(error.response.data).substring(0, 200));
+        }
+        continue;
+      }
     }
+
+    throw new Error('All YouTube API clients failed');
+  }
+
+  processYouTubeApiData(data, videoId) {
+    const formats = [];
+
+    if (data.streamingData) {
+      if (data.streamingData.formats) formats.push(...data.streamingData.formats);
+      if (data.streamingData.adaptiveFormats) formats.push(...data.streamingData.adaptiveFormats);
+    }
+
+    const parsedFormats = formats.map(format => {
+      const hasVideo = format.mimeType?.includes('video');
+      const hasAudio = format.mimeType?.includes('audio');
+      const qualityLabel = format.qualityLabel || '';
+      const qualityNum = this.extractQualityNumber(qualityLabel);
+
+      return {
+        itag: format.itag,
+        label: qualityLabel || `${qualityNum}p` || 'unknown',
+        qualityNum: qualityNum,
+        url: format.url,
+        mimeType: format.mimeType,
+        type: format.mimeType?.includes('audio') ? 'audio only' :
+            format.mimeType?.includes('video') ? 'video only' : 'unknown',
+        filesize: format.contentLength,
+        bitrate: format.bitrate,
+        hasAudio: hasAudio && !hasVideo ? false : hasAudio,
+        hasVideo: hasVideo,
+        isVideoOnly: hasVideo && !hasAudio,
+        isAudioOnly: hasAudio && !hasVideo,
+        width: format.width,
+        height: format.height
+      };
+    }).filter(f => f.url);
+
+    // Group by quality
+    const qualityMap = new Map();
+    parsedFormats.forEach(format => {
+      const quality = format.qualityNum;
+      if (!qualityMap.has(quality)) {
+        qualityMap.set(quality, format);
+      } else {
+        const existing = qualityMap.get(quality);
+        if (!existing.hasAudio && format.hasAudio) {
+          qualityMap.set(quality, format);
+        } else if (existing.hasAudio && format.hasAudio && format.bitrate > existing.bitrate) {
+          qualityMap.set(quality, format);
+        }
+      }
+    });
+
+    const organizedFormats = Array.from(qualityMap.values()).sort((a, b) => a.qualityNum - b.qualityNum);
+    const audioFormats = parsedFormats.filter(f => f.isAudioOnly);
+
+    const qualityOptions = organizedFormats.map(format => {
+      const isPremium = format.qualityNum > 360;
+      return {
+        quality: format.label,
+        qualityNum: format.qualityNum,
+        url: format.url,
+        type: format.mimeType,
+        extension: this.getExtensionFromType(format.mimeType),
+        filesize: format.filesize || 'unknown',
+        isPremium: isPremium,
+        hasAudio: format.hasAudio,
+        isVideoOnly: format.isVideoOnly,
+        isAudioOnly: format.isAudioOnly,
+        bitrate: format.bitrate
+      };
+    });
+
+    audioFormats.forEach(audio => {
+      qualityOptions.push({
+        quality: audio.label,
+        qualityNum: 0,
+        url: audio.url,
+        type: audio.mimeType,
+        extension: this.getExtensionFromType(audio.mimeType),
+        filesize: audio.filesize || 'unknown',
+        isPremium: false,
+        hasAudio: true,
+        isVideoOnly: false,
+        isAudioOnly: true,
+        bitrate: audio.bitrate
+      });
+    });
+
+    let selectedFormat = qualityOptions.find(opt => !opt.isAudioOnly && opt.qualityNum === 360 && opt.hasAudio) ||
+        qualityOptions.find(opt => !opt.isAudioOnly && opt.hasAudio) ||
+        qualityOptions[0];
+
+    return {
+      title: data.videoDetails?.title || "YouTube Video",
+      thumbnail: data.videoDetails?.thumbnail?.thumbnails?.[0]?.url || `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`,
+      duration: data.videoDetails?.lengthSeconds || 0,
+      description: data.videoDetails?.shortDescription || '',
+      author: data.videoDetails?.author || '',
+      viewCount: data.videoDetails?.viewCount || 0,
+      formats: qualityOptions,
+      allFormats: qualityOptions,
+      url: selectedFormat?.url || null,
+      selectedQuality: selectedFormat,
+      audioGuaranteed: selectedFormat?.hasAudio || false,
+      videoId: videoId,
+      source: 'youtube_api'
+    };
   }
 
   async fetchYouTubeData(url) {
-    const videoId = this.extractYouTubeId(url);
+    const normalizedUrl = this.normalizeYouTubeUrl(url);
+    const videoId = this.extractYouTubeId(normalizedUrl);
+
     if (!videoId) {
       throw new Error('Invalid YouTube URL');
     }
 
     console.log(`🎬 Processing YouTube video: ${videoId}`);
 
-    try {
-      // Try Y2Mate first
-      return await this.tryY2Mate(videoId);
-    } catch (error) {
-      console.error('❌ All methods failed:', error.message);
+    // Try YouTube API with exponential backoff
+    let attempts = 0;
+    const maxAttempts = 3;
+    let lastError = null;
 
-      // Ultimate fallback: return structure that tells Flutter to open in browser
-      return {
-        title: "YouTube Video",
-        thumbnail: `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`,
-        duration: 0,
-        description: 'Unable to extract direct download link. Please use browser.',
-        author: '',
-        viewCount: 0,
-        formats: [{
-          quality: 'Browser',
-          qualityNum: 0,
-          url: `https://www.youtube.com/watch?v=${videoId}`,
-          type: 'video/mp4',
-          extension: 'mp4',
-          filesize: 'unknown',
-          isPremium: false,
-          hasAudio: true,
-          isVideoOnly: false,
-          isAudioOnly: false,
-          requiresBrowser: true
-        }],
-        allFormats: [{
-          quality: 'Browser',
-          qualityNum: 0,
-          url: `https://www.youtube.com/watch?v=${videoId}`,
-          type: 'video/mp4',
-          extension: 'mp4',
-          filesize: 'unknown',
-          isPremium: false,
-          hasAudio: true,
-          isVideoOnly: false,
-          isAudioOnly: false,
-          requiresBrowser: true
-        }],
-        url: `https://www.youtube.com/watch?v=${videoId}`,
-        selectedQuality: {
-          quality: 'Browser',
-          qualityNum: 0,
-          url: `https://www.youtube.com/watch?v=${videoId}`,
-          requiresBrowser: true
-        },
-        audioGuaranteed: false,
-        videoId: videoId,
-        source: 'fallback',
-        error: 'Please use browser to download'
-      };
-    }
-  }
+    while (attempts < maxAttempts) {
+      attempts++;
+      try {
+        console.log(`🔄 Attempt ${attempts}/${maxAttempts}...`);
+        const result = await this.fetchWithYouTubeApi(videoId, attempts);
+        console.log(`✅ SUCCESS with ${result.formats.length} formats`);
+        return result;
+      } catch (error) {
+        lastError = error;
+        console.error(`❌ Attempt ${attempts} failed:`, error.message);
 
-  // Endpoint to convert Y2Mate URLs
-  async getDownloadUrl(url) {
-    if (url.startsWith('Y2MATE:')) {
-      const parts = url.split(':');
-      // Format: Y2MATE:videoId:quality:format:k
-      const videoId = parts[1];
-      const quality = parts[2];
-      const format = parts[3];
-      const k = parts[4];
-
-      return await this.convertY2MateUrl(videoId, quality, format, k);
+        if (attempts < maxAttempts) {
+          const backoffMs = Math.min(1000 * Math.pow(2, attempts - 1), 8000);
+          console.log(`⏳ Waiting ${backoffMs/1000}s before retry...`);
+          await new Promise(resolve => setTimeout(resolve, backoffMs));
+        }
+      }
     }
 
-    return url; // Already a direct URL
+    throw new Error(`All ${maxAttempts} attempts failed: ${lastError?.message || 'Unknown error'}`);
   }
 }
 
+// Create singleton
 const youtubeDownloader = new YouTubeDownloader();
 
 async function fetchYouTubeData(url) {
   return youtubeDownloader.fetchYouTubeData(url);
 }
 
-async function getDownloadUrl(url) {
-  return youtubeDownloader.getDownloadUrl(url);
+// Test function
+async function testYouTube() {
+  try {
+    const testUrl = 'https://youtu.be/dQw4w9WgXcQ';
+    console.log(`\n🧪 Testing YouTube downloader with: ${testUrl}\n`);
+
+    const data = await fetchYouTubeData(testUrl);
+
+    console.log('\n✅ TEST PASSED');
+    console.log(`📺 Title: ${data.title}`);
+    console.log(`👤 Author: ${data.author}`);
+    console.log(`📊 Formats: ${data.formats.length}`);
+    console.log(`🎯 Source: ${data.source}`);
+
+    console.log('\n📋 Available formats:');
+    data.formats.forEach((format, index) => {
+      const audioIcon = format.hasAudio ? '🎵' : '🔇';
+      const premiumIcon = format.isPremium ? '💰' : '🆓';
+      console.log(`${index + 1}. ${format.quality} ${audioIcon} ${premiumIcon}`);
+    });
+
+    return true;
+  } catch (error) {
+    console.error('\n❌ TEST FAILED:', error.message);
+    return false;
+  }
 }
 
 module.exports = {
   fetchYouTubeData,
-  getDownloadUrl,
+  testYouTube,
   YouTubeDownloader
 };
