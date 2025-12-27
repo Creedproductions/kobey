@@ -1,4 +1,5 @@
 const { Innertube, UniversalCache } = require('youtubei.js');
+const { VM } = require('vm2');
 
 class YouTubeDownloader {
   constructor() {
@@ -19,9 +20,19 @@ class YouTubeDownloader {
     try {
       this.innertube = await Innertube.create({
         cache: new UniversalCache(false),
-        generate_session_locally: true
+        generate_session_locally: true,
+        // Add JavaScript evaluator to decipher YouTube URLs
+        evaluate: (code) => {
+          const vm = new VM({
+            timeout: 5000,
+            sandbox: {},
+            eval: false,
+            wasm: false
+          });
+          return vm.run(code);
+        }
       });
-      console.log('✅ YouTube Innertube initialized');
+      console.log('✅ YouTube Innertube initialized with URL deciphering');
     } catch (err) {
       console.error('❌ Failed to initialize Innertube:', err);
       throw err;
@@ -79,18 +90,41 @@ class YouTubeDownloader {
 
       const qualityOptions = [];
 
-      allFormatsRaw.forEach((f) => {
+      // Process all formats and decipher URLs
+      for (const f of allFormatsRaw) {
         // In Innertube, f.has_video / f.has_audio are properties
         const hasVideo = !!f.has_video || !!f.width;
         const hasAudio = !!f.has_audio || f.mime_type.includes('audio');
 
         const quality = f.quality_label || (hasAudio && !hasVideo ? 'Audio' : 'Unknown');
 
+        // Get URL - try direct URL first, then decipher if needed
+        let finalUrl = null;
+
+        try {
+          // Check if URL is already present (not encrypted)
+          if (f.url && f.url.startsWith('http')) {
+            finalUrl = f.url;
+          } else {
+            // URL needs deciphering - decipher() returns a Promise or string
+            const decipherResult = f.decipher(this.innertube.session.player);
+
+            // Handle both Promise and direct string return
+            if (decipherResult && typeof decipherResult.then === 'function') {
+              finalUrl = await decipherResult;
+            } else {
+              finalUrl = decipherResult;
+            }
+          }
+        } catch (decipherError) {
+          console.error(`⚠️  Failed to get URL for ${quality}:`, decipherError.message);
+          finalUrl = f.url || null;
+        }
+
         qualityOptions.push({
           quality: quality,
           qualityNum: f.height || 0,
-          // Use the signature decipher logic provided by the session
-          url: f.decipher(this.innertube.session.player),
+          url: finalUrl,
           type: f.mime_type,
           extension: f.mime_type.split(';')[0].split('/')[1] || 'mp4',
           filesize: f.content_length || 'unknown',
@@ -101,7 +135,7 @@ class YouTubeDownloader {
           needsMerge: hasVideo && !hasAudio,
           bitrate: f.bitrate,
         });
-      });
+      }
 
       // Filter out formats that failed to decipher (no URL)
       const validOptions = qualityOptions.filter(o => o.url);
