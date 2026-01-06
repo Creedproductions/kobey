@@ -12,7 +12,7 @@ const fetchLinkedinData = require('../Services/linkedinService');
 const facebookInsta = require('../Services/facebookInstaService');
 const { downloadTwmateData } = require('../Services/twitterService');
 const { fetchYouTubeData } = require('../Services/youtubeService');
-const VredenYouTubeDownloader = require('../Services/vredenYoutubeDownloader');
+// REMOVED: const VredenYouTubeDownloader = require('../Services/vredenYoutubeDownloader');
 
 const bitly = new BitlyClient(config.BITLY_ACCESS_TOKEN);
 
@@ -225,43 +225,68 @@ const platformDownloaders = {
     console.log('YouTube: Processing URL:', url);
 
     try {
-      const vredenDownloader = new VredenYouTubeDownloader();
-      const result = await downloadWithTimeout(() => vredenDownloader.downloadVideo(url), 40000);
+      // CRITICAL FIX: Increased timeout from 40s to 90s for YouTube deciphering
+      const result = await downloadWithTimeout(
+        () => fetchYouTubeData(url),
+        90000 // 90 seconds for YouTube
+      );
 
-      if (!result.success) {
-        throw new Error(result.error?.message || 'YouTube download failed');
+      if (!result || !result.url) {
+        throw new Error('No downloadable URL returned from YouTube service');
       }
 
-      console.log(`YouTube: Successfully fetched ${result.stats.totalFormats} formats`);
+      console.log(`✅ YouTube: Successfully fetched with ${result.formats?.length || 0} formats`);
+      console.log(`🎯 Selected: ${result.selectedQuality?.quality || 'Unknown'}`);
 
       return {
-        title: result.video.title,
-        thumbnail: result.video.thumbnail,
-        duration: result.video.duration,
-        isShorts: result.isShorts,
-        url: result.video.url,
-        formats: result.formats,
-        allFormats: result.formats,
+        title: result.title,
+        thumbnail: result.thumbnail,
+        duration: result.duration,
+        isShorts: result.isShorts || false,
+        url: result.url,
+        formats: result.formats || [],
+        allFormats: result.allFormats || result.formats || [],
         selectedQuality: result.selectedQuality,
-        recommended: result.recommended,
-        stats: result.stats,
-        metadata: result.metadata,
-        ffmpegRequired: false
+        recommended: result.recommended || {
+          best: result.formats?.[0] || null,
+          fastest: result.formats?.find(f => f.qualityNum === 360) || result.formats?.[0],
+          sd: result.formats?.find(f => f.qualityNum === 360) || result.formats?.[0]
+        },
+        stats: {
+          totalFormats: result.formats?.length || 0,
+          videoFormats: result.formats?.filter(f => !f.isAudioOnly).length || 0,
+          audioFormats: result.formats?.filter(f => f.isAudioOnly).length || 0,
+          withAudioFormats: result.formats?.filter(f => f.hasAudio && !f.isAudioOnly).length || 0,
+          directDownloads: result.formats?.filter(f => !f.needsMerge).length || 0,
+          mergeDownloads: result.formats?.filter(f => f.needsMerge).length || 0,
+          allDownloadable: result.formats?.length || 0
+        },
+        metadata: result.metadata || {
+          videoId: result.videoId,
+          author: result.author,
+        },
+        ffmpegRequired: false,
+        _debug: result._debug // Keep debug info for troubleshooting
       };
-    } catch (error) {
-      console.error(`YouTube download error: ${error.message}`);
 
+    } catch (error) {
+      console.error(`❌ YouTube download error: ${error.message}`);
+
+      // Better error categorization
       if (error.message.includes('not available') || error.message.includes('removed')) {
-        throw new Error('YouTube video not available (removed or private)');
+        throw new Error('This YouTube video is no longer available (removed or made private)');
       }
       if (error.message.includes('forbidden') || error.message.includes('region')) {
-        throw new Error('YouTube video access forbidden (age-restricted or region-locked)');
+        throw new Error('Cannot access this video (age-restricted or region-locked)');
       }
       if (error.message.includes('not found')) {
-        throw new Error('YouTube video not found (invalid URL or removed)');
+        throw new Error('YouTube video not found. Check if the URL is correct.');
       }
       if (error.message.includes('timeout')) {
-        throw new Error('YouTube download timed out - please try again');
+        throw new Error('YouTube is taking too long to respond. Please try again in a moment.');
+      }
+      if (error.message.includes('decipher') || error.message.includes('protection')) {
+        throw new Error('Unable to process this video. YouTube may have updated their protection.');
       }
 
       throw new Error(`YouTube download failed: ${error.message}`);
