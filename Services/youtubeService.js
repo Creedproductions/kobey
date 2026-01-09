@@ -1,5 +1,5 @@
 const { spawn } = require('child_process');
-
+console.log("🍪 Cookies path:", process.env.YTDLP_COOKIES);
 function runYtDlp(args, { timeoutMs = 30000 } = {}) {
   return new Promise((resolve, reject) => {
     const p = spawn('yt-dlp', args, { stdio: ['ignore', 'pipe', 'pipe'] });
