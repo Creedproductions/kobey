@@ -1,5 +1,7 @@
 const { spawn } = require('child_process');
+
 console.log("🍪 Cookies path:", process.env.YTDLP_COOKIES);
+
 function runYtDlp(args, { timeoutMs = 30000 } = {}) {
   return new Promise((resolve, reject) => {
     const p = spawn('yt-dlp', args, { stdio: ['ignore', 'pipe', 'pipe'] });
@@ -58,15 +60,14 @@ class YouTubeDownloader {
 
   async fetchYouTubeData(url) {
     const videoId = this.extractYouTubeId(url);
-    if (!videoId) {
-      throw new Error('Invalid YouTube URL');
-    }
+    if (!videoId) throw new Error('Invalid YouTube URL');
 
     console.log(`🎬 Processing YouTube video: ${videoId}`);
 
     try {
       const args = [
-        '--dump-json',
+        // ✅ more reliable single JSON output
+        '--dump-single-json',
         '--no-playlist',
         '--no-warnings',
 
@@ -78,11 +79,16 @@ class YouTubeDownloader {
         // IMPORTANT: try alternate YouTube clients (helps on server sometimes)
         '--extractor-args', 'youtube:player_client=android,web,mweb',
 
-        // Reduce bot triggers (doesn't require cookies)
+        // Reduce bot triggers
         '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36',
         '--add-header', 'Accept-Language:en-US,en;q=0.9',
         '--add-header', 'DNT:1',
         '--add-header', 'Connection:keep-alive',
+
+        // ✅ SAFE format selector (prevents "Requested format is not available")
+        // Prefer best video+audio, otherwise fall back to anything.
+        '-f', 'bv*+ba/b',
+        '--merge-output-format', 'mp4',
       ];
 
       // OPTIONAL: proxy support (set env YTDLP_PROXY)
@@ -91,7 +97,6 @@ class YouTubeDownloader {
       }
 
       // OPTIONAL: cookies support (set env YTDLP_COOKIES to a file path)
-      // If you cannot use cookies at all, leave this unset.
       if (process.env.YTDLP_COOKIES) {
         args.push('--cookies', process.env.YTDLP_COOKIES);
       }
@@ -125,7 +130,7 @@ class YouTubeDownloader {
       console.log(`🎥 Video+Audio formats: ${videoWithAudio.length}`);
       console.log(`🎵 Audio-only formats: ${audioOnly.length}`);
 
-      // BUILD VIDEO QUALITY OPTIONS (NO AUDIO MIXED IN)
+      // BUILD VIDEO QUALITY OPTIONS
       const videoQualities = [];
       const uniqueHeights = new Set();
 
@@ -133,8 +138,6 @@ class YouTubeDownloader {
         .sort((a, b) => (b.height || 0) - (a.height || 0))
         .forEach(format => {
           const height = format.height;
-
-          // Skip duplicates and very low quality
           if (uniqueHeights.has(height) || height < 144) return;
           uniqueHeights.add(height);
 
@@ -155,7 +158,7 @@ class YouTubeDownloader {
           });
         });
 
-      // BUILD AUDIO QUALITY OPTIONS (SEPARATE)
+      // BUILD AUDIO QUALITY OPTIONS
       const audioQualities = [];
 
       audioOnly
@@ -180,21 +183,15 @@ class YouTubeDownloader {
           });
         });
 
-      // COMBINE: Videos first (descending), then Audio
       const qualityOptions = [
         ...videoQualities.sort((a, b) => b.qualityNum - a.qualityNum),
         ...audioQualities
       ];
 
-      console.log(`✅ Video qualities: ${videoQualities.length}, Audio qualities: ${audioQualities.length}`);
-      console.log(`✅ Total quality options: ${qualityOptions.length}`);
-
-      // Select default: 360p video (mobile-friendly)
-      const defaultQuality = videoQualities.find(q => q.qualityNum === 360)
-        || videoQualities[0]
-        || qualityOptions[0];
-
-      console.log(`🎯 Default quality: ${defaultQuality?.quality || 'None'}`);
+      const defaultQuality =
+        videoQualities.find(q => q.qualityNum === 360) ||
+        videoQualities[0] ||
+        qualityOptions[0];
 
       if (!defaultQuality || qualityOptions.length === 0) {
         throw new Error('No download formats available');
@@ -240,24 +237,39 @@ class YouTubeDownloader {
     } catch (err) {
       console.error('❌ YouTube fetch error:', err.message);
 
-      // More precise messaging for your server issue
-      if (String(err.message).includes("Sign in to confirm you’re not a bot")) {
+      const msg = String(err.message || '');
+
+      // ✅ handle format selector issues correctly
+      if (msg.includes('Requested format is not available')) {
         throw new Error(
-          "YouTube blocked this server IP as suspicious. Try setting YTDLP_PROXY (residential egress). Cookies also work if available."
+          "YouTube: your format selection is too strict/invalid for this video. Use -f 'bv*+ba/b' (already applied) or run --list-formats to debug."
         );
       }
 
-      if (err.message.includes('ERROR: Video unavailable')) {
+      // ✅ bot check variations
+      if (
+        msg.includes("Sign in to confirm you’re not a bot") ||
+        msg.includes("Sign in to confirm you're not a bot") ||
+        msg.toLowerCase().includes('not a bot')
+      ) {
+        throw new Error(
+          "YouTube blocked this server IP as suspicious. Cookies may help, but often you need YTDLP_PROXY (residential/clean egress)."
+        );
+      }
+
+      if (msg.includes('ERROR: Video unavailable') || msg.toLowerCase().includes('video unavailable')) {
         throw new Error('Video not found or has been removed');
       }
-      if (err.message.includes('Private video')) {
+
+      if (msg.includes('Private video') || msg.toLowerCase().includes('private video')) {
         throw new Error('Video is private or age-restricted');
       }
-      if (err.message.includes('Request timeout')) {
+
+      if (msg.includes('Request timeout')) {
         throw new Error('Request timeout');
       }
 
-      throw new Error(`YouTube download failed: ${err.message}`);
+      throw new Error(`YouTube download failed: ${msg}`);
     }
   }
 }
