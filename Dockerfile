@@ -2,16 +2,19 @@ FROM node:20-slim
 
 WORKDIR /app
 
-# Install FFmpeg, Python, and yt-dlp in one layer
+# System deps: ffmpeg + curl + certs
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     ca-certificates \
     ffmpeg \
-    python3 \
-    python3-pip \
     curl && \
-    pip3 install --break-system-packages --no-cache-dir yt-dlp && \
     rm -rf /var/lib/apt/lists/*
+
+# Install yt-dlp binary (fast, no Python needed)
+RUN curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp \
+      -o /usr/local/bin/yt-dlp && \
+    chmod +x /usr/local/bin/yt-dlp && \
+    yt-dlp --version
 
 # Copy dependency files first (better layer cache)
 COPY package*.json ./
@@ -38,7 +41,6 @@ USER appuser
 ENV NODE_ENV=production
 EXPOSE 8000
 
-# Healthcheck
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
   CMD node -e "\
     const http=require('http'); \
