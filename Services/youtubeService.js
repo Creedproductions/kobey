@@ -1,10 +1,36 @@
-const { exec } = require('child_process');
-const { promisify } = require('util');
-const execAsync = promisify(exec);
+const { spawn } = require('child_process');
+
+function runYtDlp(args, { timeoutMs = 30000 } = {}) {
+  return new Promise((resolve, reject) => {
+    const p = spawn('yt-dlp', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+
+    let out = '';
+    let err = '';
+
+    const timer = setTimeout(() => {
+      p.kill('SIGKILL');
+      reject(new Error('Request timeout'));
+    }, timeoutMs);
+
+    p.stdout.on('data', d => (out += d.toString('utf8')));
+    p.stderr.on('data', d => (err += d.toString('utf8')));
+
+    p.on('error', (e) => {
+      clearTimeout(timer);
+      reject(e);
+    });
+
+    p.on('close', code => {
+      clearTimeout(timer);
+      if (code === 0) return resolve({ stdout: out, stderr: err });
+      reject(new Error(err.trim() || `yt-dlp exited with code ${code}`));
+    });
+  });
+}
 
 class YouTubeDownloader {
   constructor() {
-    this.maxBuffer = 50 * 1024 * 1024;
+    this.maxBuffer = 50 * 1024 * 1024; // kept for compatibility, not used by spawn
   }
 
   extractYouTubeId(url) {
@@ -39,13 +65,40 @@ class YouTubeDownloader {
     console.log(`🎬 Processing YouTube video: ${videoId}`);
 
     try {
-      const { stdout } = await execAsync(
-        `yt-dlp --dump-json --no-playlist --no-warnings "${url}"`,
-        {
-          maxBuffer: this.maxBuffer,
-          timeout: 30000
-        }
-      );
+      const args = [
+        '--dump-json',
+        '--no-playlist',
+        '--no-warnings',
+
+        // retry/network hardening
+        '--socket-timeout', '15',
+        '--retries', '2',
+        '--extractor-retries', '2',
+
+        // IMPORTANT: try alternate YouTube clients (helps on server sometimes)
+        '--extractor-args', 'youtube:player_client=android,web,mweb',
+
+        // Reduce bot triggers (doesn't require cookies)
+        '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36',
+        '--add-header', 'Accept-Language:en-US,en;q=0.9',
+        '--add-header', 'DNT:1',
+        '--add-header', 'Connection:keep-alive',
+      ];
+
+      // OPTIONAL: proxy support (set env YTDLP_PROXY)
+      if (process.env.YTDLP_PROXY) {
+        args.push('--proxy', process.env.YTDLP_PROXY);
+      }
+
+      // OPTIONAL: cookies support (set env YTDLP_COOKIES to a file path)
+      // If you cannot use cookies at all, leave this unset.
+      if (process.env.YTDLP_COOKIES) {
+        args.push('--cookies', process.env.YTDLP_COOKIES);
+      }
+
+      args.push(url);
+
+      const { stdout } = await runYtDlp(args, { timeoutMs: 30000 });
 
       const info = JSON.parse(stdout);
       const allFormats = info.formats || [];
@@ -155,11 +208,9 @@ class YouTubeDownloader {
         author: info.uploader || info.channel || 'Unknown',
         viewCount: parseInt(info.view_count) || 0,
 
-        // Return all formats
         formats: qualityOptions,
         allFormats: qualityOptions,
 
-        // Separate video and audio for UI
         videoFormats: videoQualities,
         audioFormats: audioQualities,
 
@@ -189,13 +240,20 @@ class YouTubeDownloader {
     } catch (err) {
       console.error('❌ YouTube fetch error:', err.message);
 
+      // More precise messaging for your server issue
+      if (String(err.message).includes("Sign in to confirm you’re not a bot")) {
+        throw new Error(
+          "YouTube blocked this server IP as suspicious. Try setting YTDLP_PROXY (residential egress). Cookies also work if available."
+        );
+      }
+
       if (err.message.includes('ERROR: Video unavailable')) {
         throw new Error('Video not found or has been removed');
       }
       if (err.message.includes('Private video')) {
         throw new Error('Video is private or age-restricted');
       }
-      if (err.killed || err.signal === 'SIGTERM') {
+      if (err.message.includes('Request timeout')) {
         throw new Error('Request timeout');
       }
 

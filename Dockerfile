@@ -9,7 +9,8 @@ RUN apt-get update && \
       ffmpeg \
       curl \
       python3 \
-      python3-venv && \
+      python3-venv \
+      tini && \
     rm -rf /var/lib/apt/lists/*
 
 # yt-dlp in venv (PEP 668 safe)
@@ -51,4 +52,5 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
     req.on('error', ()=>process.exit(1)); \
   "
 
+ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["node", "App.js"]
