@@ -272,10 +272,21 @@ const platformDownloaders = {
     } catch (error) {
       console.error(`❌ YouTube download error: ${error.message}`);
 
-      // Better error categorization
-      if (error.message.includes('not available') || error.message.includes('removed')) {
-        throw new Error('This YouTube video is no longer available (removed or made private)');
-      }
+    if (error.message.includes('Requested format is not available')) {
+      throw new Error('YouTube formats could not be resolved from the response (format selection issue).');
+    }
+
+    if (
+      error.message.toLowerCase().includes('video unavailable') ||
+      error.message.toLowerCase().includes('has been removed')
+    ) {
+      throw new Error('This YouTube video is no longer available (removed)');
+    }
+
+    if (error.message.toLowerCase().includes('private video')) {
+      throw new Error('This YouTube video is private');
+    }
+
       if (error.message.includes('forbidden') || error.message.includes('region')) {
         throw new Error('Cannot access this video (age-restricted or region-locked)');
       }

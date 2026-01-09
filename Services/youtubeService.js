@@ -70,9 +70,10 @@ class YouTubeDownloader {
     try {
       const args = [
         '--dump-single-json',
+        '--no-download',          // ✅ IMPORTANT: we only want metadata+formats (no format selection)
         '--no-playlist',
         '--no-warnings',
-        '--verbose', // ✅ TEMP: helps confirm cookies/proxy in logs
+        '--verbose',              // ✅ TEMP: helps confirm cookies/proxy in logs
 
         '--socket-timeout', '15',
         '--retries', '2',
@@ -85,10 +86,6 @@ class YouTubeDownloader {
         '--add-header', 'Accept-Language:en-US,en;q=0.9',
         '--add-header', 'DNT:1',
         '--add-header', 'Connection:keep-alive',
-
-        // ✅ prevent "Requested format is not available"
-        '-f', 'bv*+ba/b',
-        '--merge-output-format', 'mp4',
       ];
 
       if (process.env.YTDLP_PROXY) {
@@ -99,10 +96,11 @@ class YouTubeDownloader {
         args.push('--cookies', process.env.YTDLP_COOKIES);
       }
 
-      // ✅ log final args AFTER proxy/cookies were added
-      console.log('🧪 yt-dlp args:', args);
-
+      // Add URL last
       args.push(url);
+
+      // ✅ log final args INCLUDING url + cookies/proxy
+      console.log('🧪 yt-dlp args:', args);
 
       const { stdout } = await runYtDlp(args, { timeoutMs: 60000 });
 
@@ -111,6 +109,7 @@ class YouTubeDownloader {
 
       console.log(`📊 Found ${allFormats.length} total formats`);
 
+      // VIDEO FORMATS: Must have BOTH video AND audio
       const videoWithAudio = allFormats.filter(f =>
         f.vcodec && f.vcodec !== 'none' &&
         f.acodec && f.acodec !== 'none' &&
@@ -119,6 +118,7 @@ class YouTubeDownloader {
         !f.is_live
       );
 
+      // AUDIO FORMATS: Audio only, NO video
       const audioOnly = allFormats.filter(f =>
         (!f.vcodec || f.vcodec === 'none') &&
         f.acodec && f.acodec !== 'none' &&
@@ -236,9 +236,10 @@ class YouTubeDownloader {
 
       const msg = String(err.message || '');
 
+      // ✅ IMPORTANT: this is NOT "video removed/private"
       if (msg.includes('Requested format is not available')) {
         throw new Error(
-          "YouTube: format selection not available for this video. (We use -f 'bv*+ba/b' already)."
+          "YouTube returned formats but yt-dlp couldn't resolve a forced -f selection. (Fix: do not pass -f during JSON extraction.)"
         );
       }
 
@@ -252,7 +253,7 @@ class YouTubeDownloader {
         );
       }
 
-      if (msg.toLowerCase().includes('video unavailable')) {
+      if (msg.toLowerCase().includes('video unavailable') || msg.toLowerCase().includes('has been removed')) {
         throw new Error('Video not found or has been removed');
       }
 
