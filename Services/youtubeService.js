@@ -1,108 +1,29 @@
-const { Innertube, UniversalCache } = require('youtubei.js');
-const { VM } = require('vm2');
+const { exec } = require('child_process');
+const { promisify } = require('util');
+const execAsync = promisify(exec);
 
-/**
- * PRODUCTION-READY YouTube Downloader (2025)
- * Fixes:
- * - Proper URL deciphering with VM2
- * - Format selection that guarantees downloads
- * - Aggressive timeout handling
- * - Fallback quality selection
- * - Better error messages
- */
 class YouTubeDownloader {
   constructor() {
-    this.innertube = null;
-    this.isInitializing = false;
-    this.initRetries = 0;
-    this.maxInitRetries = 3;
-  }
-
-  async init() {
-    if (this.innertube) return;
-    
-    if (this.isInitializing) {
-      // Wait for ongoing initialization
-      await new Promise(resolve => {
-        const check = setInterval(() => {
-          if (!this.isInitializing) {
-            clearInterval(check);
-            resolve();
-          }
-        }, 100);
-      });
-      return;
-    }
-
-    this.isInitializing = true;
-    
-    try {
-      console.log('🚀 Initializing YouTube Innertube...');
-      
-      this.innertube = await Innertube.create({
-        cache: new UniversalCache(false),
-        generate_session_locally: true,
-        
-        // CRITICAL: Add JavaScript evaluator for URL deciphering
-        evaluate: (code) => {
-          try {
-            const vm = new VM({
-              timeout: 5000,
-              sandbox: {},
-              eval: false,
-              wasm: false
-            });
-            return vm.run(code);
-          } catch (error) {
-            console.error('❌ VM evaluation error:', error.message);
-            throw error;
-          }
-        }
-      });
-      
-      console.log('✅ YouTube Innertube initialized successfully');
-      this.initRetries = 0;
-      
-    } catch (err) {
-      console.error('❌ Failed to initialize Innertube:', err.message);
-      this.innertube = null;
-      this.initRetries++;
-      
-      if (this.initRetries < this.maxInitRetries) {
-        console.log(`🔄 Retrying initialization (${this.initRetries}/${this.maxInitRetries})...`);
-        await new Promise(resolve => setTimeout(resolve, 2000));
-        this.isInitializing = false;
-        return this.init();
-      }
-      
-      throw new Error(`Failed to initialize YouTube service after ${this.maxInitRetries} attempts`);
-    } finally {
-      this.isInitializing = false;
-    }
+    this.maxBuffer = 50 * 1024 * 1024;
   }
 
   extractYouTubeId(url) {
     try {
-      // Handle youtu.be short links
       if (url.includes('youtu.be/')) {
         return url.split('youtu.be/')[1]?.split(/[?&/#]/)[0];
       }
-      
+
       const urlObj = new URL(url);
-      
-      // Standard watch URL
       let videoId = urlObj.searchParams.get('v');
       if (videoId && videoId.length === 11) return videoId;
 
-      // Shorts or embed
       const pathname = urlObj.pathname;
       if (pathname.includes('/shorts/') || pathname.includes('/embed/')) {
         return pathname.split('/').pop()?.split(/[?&/#]/)[0];
       }
-      
+
       return null;
     } catch {
-      // Fallback regex
       const regex = /(?:v=|\/)([0-9A-Za-z_-]{11})/;
       const match = String(url).match(regex);
       return match ? match[1] : null;
@@ -110,171 +31,181 @@ class YouTubeDownloader {
   }
 
   async fetchYouTubeData(url) {
-    await this.init();
-    
     const videoId = this.extractYouTubeId(url);
     if (!videoId) {
-      throw new Error('Invalid YouTube URL - could not extract video ID');
+      throw new Error('Invalid YouTube URL');
     }
 
     console.log(`🎬 Processing YouTube video: ${videoId}`);
 
     try {
-      // Fetch video info with extended timeout
-      const info = await Promise.race([
-        this.innertube.getInfo(videoId),
-        new Promise((_, reject) => 
-          setTimeout(() => reject(new Error('YouTube info fetch timeout (60s)')), 60000)
-        )
-      ]);
-
-      // CRITICAL: Check streaming data exists
-      if (!info.streaming_data) {
-        throw new Error('No streaming data available. Video may be private, age-restricted, or region-locked.');
-      }
-
-      const basic = info.basic_info;
-      
-      // Get all available formats
-      const formats = info.streaming_data.formats || [];
-      const adaptiveFormats = info.streaming_data.adaptive_formats || [];
-      const allFormatsRaw = [...formats, ...adaptiveFormats];
-
-      console.log(`📊 Found ${allFormatsRaw.length} total formats`);
-
-      if (allFormatsRaw.length === 0) {
-        throw new Error('No download formats available for this video');
-      }
-
-      const qualityOptions = [];
-
-      // Process formats and decipher URLs
-      for (const f of allFormatsRaw) {
-        const hasVideo = !!f.has_video || !!f.width;
-        const hasAudio = !!f.has_audio || f.mime_type?.includes('audio');
-
-        const quality = f.quality_label || (hasAudio && !hasVideo ? 'Audio' : 'Unknown');
-
-        let finalUrl = null;
-
-        try {
-          // Check if URL is already present (not encrypted)
-          if (f.url && f.url.startsWith('http')) {
-            finalUrl = f.url;
-          } else {
-            // URL needs deciphering
-            console.log(`🔐 Deciphering URL for quality: ${quality}`);
-            
-            const decipherResult = await Promise.race([
-              f.decipher(this.innertube.session.player),
-              new Promise((_, reject) => 
-                setTimeout(() => reject(new Error('Decipher timeout')), 10000)
-              )
-            ]);
-
-            // Handle both Promise and direct string return
-            if (decipherResult && typeof decipherResult.then === 'function') {
-              finalUrl = await decipherResult;
-            } else {
-              finalUrl = decipherResult;
-            }
-          }
-        } catch (decipherError) {
-          console.warn(`⚠️  Failed to decipher ${quality}:`, decipherError.message);
-          // Try using the URL directly as fallback
-          finalUrl = f.url || null;
+      const { stdout } = await execAsync(
+        `yt-dlp --dump-json --no-playlist --no-warnings "${url}"`,
+        {
+          maxBuffer: this.maxBuffer,
+          timeout: 30000
         }
+      );
 
-        if (finalUrl) {
-          qualityOptions.push({
-            quality: quality,
-            qualityNum: f.height || 0,
-            url: finalUrl,
-            type: f.mime_type,
-            extension: f.mime_type?.split(';')[0]?.split('/')[1] || 'mp4',
-            filesize: f.content_length || 'unknown',
-            isPremium: (f.height || 0) > 360,
-            hasAudio: hasAudio,
-            isVideoOnly: hasVideo && !hasAudio,
-            isAudioOnly: hasAudio && !hasVideo,
-            needsMerge: hasVideo && !hasAudio,
-            bitrate: f.bitrate,
+      const info = JSON.parse(stdout);
+      const allFormats = info.formats || [];
+
+      console.log(`📊 Found ${allFormats.length} total formats`);
+
+      // VIDEO FORMATS: Must have BOTH video AND audio
+      const videoWithAudio = allFormats.filter(f =>
+        f.vcodec && f.vcodec !== 'none' &&
+        f.acodec && f.acodec !== 'none' &&
+        f.height &&
+        f.url &&
+        !f.is_live
+      );
+
+      // AUDIO FORMATS: Audio only, NO video
+      const audioOnly = allFormats.filter(f =>
+        (!f.vcodec || f.vcodec === 'none') &&
+        f.acodec && f.acodec !== 'none' &&
+        f.url &&
+        !f.is_live
+      );
+
+      console.log(`🎥 Video+Audio formats: ${videoWithAudio.length}`);
+      console.log(`🎵 Audio-only formats: ${audioOnly.length}`);
+
+      // BUILD VIDEO QUALITY OPTIONS (NO AUDIO MIXED IN)
+      const videoQualities = [];
+      const uniqueHeights = new Set();
+
+      videoWithAudio
+        .sort((a, b) => (b.height || 0) - (a.height || 0))
+        .forEach(format => {
+          const height = format.height;
+
+          // Skip duplicates and very low quality
+          if (uniqueHeights.has(height) || height < 144) return;
+          uniqueHeights.add(height);
+
+          videoQualities.push({
+            quality: `${height}p`,
+            qualityNum: height,
+            url: format.url,
+            type: format.ext || 'mp4',
+            extension: format.ext || 'mp4',
+            filesize: format.filesize || format.filesize_approx || 'unknown',
+            fps: format.fps || 30,
+            hasAudio: true,
+            hasVideo: true,
+            isAudioOnly: false,
+            isPremium: height > 360,
+            needsMerge: false,
+            bitrate: format.tbr || format.vbr || 0,
           });
-        }
+        });
+
+      // BUILD AUDIO QUALITY OPTIONS (SEPARATE)
+      const audioQualities = [];
+
+      audioOnly
+        .sort((a, b) => (b.abr || b.tbr || 0) - (a.abr || a.tbr || 0))
+        .slice(0, 3)
+        .forEach(format => {
+          const bitrate = Math.round(format.abr || format.tbr || 128);
+
+          audioQualities.push({
+            quality: `${bitrate}kbps Audio`,
+            qualityNum: 0,
+            url: format.url,
+            type: format.ext || 'm4a',
+            extension: format.ext || 'm4a',
+            filesize: format.filesize || format.filesize_approx || 'unknown',
+            hasAudio: true,
+            hasVideo: false,
+            isAudioOnly: true,
+            isPremium: bitrate > 128,
+            needsMerge: false,
+            bitrate: bitrate,
+          });
+        });
+
+      // COMBINE: Videos first (descending), then Audio
+      const qualityOptions = [
+        ...videoQualities.sort((a, b) => b.qualityNum - a.qualityNum),
+        ...audioQualities
+      ];
+
+      console.log(`✅ Video qualities: ${videoQualities.length}, Audio qualities: ${audioQualities.length}`);
+      console.log(`✅ Total quality options: ${qualityOptions.length}`);
+
+      // Select default: 360p video (mobile-friendly)
+      const defaultQuality = videoQualities.find(q => q.qualityNum === 360)
+        || videoQualities[0]
+        || qualityOptions[0];
+
+      console.log(`🎯 Default quality: ${defaultQuality?.quality || 'None'}`);
+
+      if (!defaultQuality || qualityOptions.length === 0) {
+        throw new Error('No download formats available');
       }
-
-      console.log(`✅ Successfully processed ${qualityOptions.length} formats with valid URLs`);
-
-      if (qualityOptions.length === 0) {
-        throw new Error('Failed to decipher any download URLs. YouTube may have updated their protection.');
-      }
-
-      // Sort: Audio last, then by quality descending
-      qualityOptions.sort((a, b) => {
-        if (a.isAudioOnly && !b.isAudioOnly) return 1;
-        if (!a.isAudioOnly && b.isAudioOnly) return -1;
-        return b.qualityNum - a.qualityNum;
-      });
-
-      // Smart format selection
-      const selectedFormat = 
-        // Try 360p with audio first (best for compatibility)
-        qualityOptions.find(o => o.qualityNum === 360 && o.hasAudio) ||
-        // Any format with audio
-        qualityOptions.find(o => o.hasAudio && !o.isAudioOnly) ||
-        // Any video format
-        qualityOptions.find(o => o.hasVideo) ||
-        // Last resort: first available
-        qualityOptions[0];
-
-      console.log(`🎯 Selected format: ${selectedFormat.quality} (Has audio: ${selectedFormat.hasAudio})`);
 
       return {
-        title: basic.title,
-        thumbnail: basic.thumbnail?.[0]?.url || `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`,
-        duration: basic.duration,
-        description: basic.short_description || '',
-        author: basic.author,
-        viewCount: basic.view_count,
+        title: info.title || 'Unknown',
+        thumbnail: info.thumbnail || `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`,
+        duration: parseInt(info.duration) || 0,
+        description: info.description || '',
+        author: info.uploader || info.channel || 'Unknown',
+        viewCount: parseInt(info.view_count) || 0,
+
+        // Return all formats
         formats: qualityOptions,
         allFormats: qualityOptions,
-        url: selectedFormat?.url || null,
-        selectedQuality: selectedFormat,
-        videoId,
-        source: 'innertube',
-        bestAudioUrl: qualityOptions.find(o => o.isAudioOnly)?.url,
-        
-        // Add metadata for debugging
+
+        // Separate video and audio for UI
+        videoFormats: videoQualities,
+        audioFormats: audioQualities,
+
+        url: defaultQuality.url,
+        selectedQuality: defaultQuality,
+
+        videoId: videoId,
+        isShorts: url.includes('/shorts/'),
+
+        metadata: {
+          videoId: videoId,
+          author: info.uploader || 'Unknown',
+          uploadDate: info.upload_date || null,
+          category: info.categories?.[0] || null,
+        },
+
         _debug: {
-          totalFormatsFound: allFormatsRaw.length,
-          validUrlsDeciphered: qualityOptions.length,
-          selectedQuality: selectedFormat.quality
+          totalFormats: allFormats.length,
+          videoWithAudio: videoWithAudio.length,
+          audioOnly: audioOnly.length,
+          videoQualities: videoQualities.length,
+          audioQualities: audioQualities.length,
+          defaultQuality: defaultQuality.quality,
         }
       };
 
     } catch (err) {
       console.error('❌ YouTube fetch error:', err.message);
-      
-      // Provide helpful error messages
-      if (err.message.includes('timeout')) {
-        throw new Error('YouTube request timeout. The video may be loading slowly or servers are overloaded.');
+
+      if (err.message.includes('ERROR: Video unavailable')) {
+        throw new Error('Video not found or has been removed');
       }
-      if (err.message.includes('private') || err.message.includes('restricted')) {
-        throw new Error('Video is private, age-restricted, or not available in your region.');
+      if (err.message.includes('Private video')) {
+        throw new Error('Video is private or age-restricted');
       }
-      if (err.message.includes('not found')) {
-        throw new Error('Video not found. It may have been deleted or made private.');
+      if (err.killed || err.signal === 'SIGTERM') {
+        throw new Error('Request timeout');
       }
-      
-      throw new Error(`YouTube extraction failed: ${err.message}`);
+
+      throw new Error(`YouTube download failed: ${err.message}`);
     }
   }
 }
 
-// Singleton instance
 const youtubeDownloader = new YouTubeDownloader();
 
-// Export as function for backward compatibility
 async function fetchYouTubeData(url) {
   return youtubeDownloader.fetchYouTubeData(url);
 }
