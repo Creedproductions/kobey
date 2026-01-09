@@ -2,20 +2,26 @@ FROM node:20.18.1-slim
 
 WORKDIR /app
 
-# Install ffmpeg + python + yt-dlp
+# System deps
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
       ca-certificates \
       ffmpeg \
+      curl \
       python3 \
-      python3-pip && \
-    pip3 install --no-cache-dir -U yt-dlp && \
-    rm -rf /var/lib/apt/lists/* && \
-    yt-dlp --version && \
-    ffmpeg -version
+      python3-venv && \
+    rm -rf /var/lib/apt/lists/*
 
+# yt-dlp in venv (PEP 668 safe)
+RUN python3 -m venv /opt/yt && \
+    /opt/yt/bin/pip install --no-cache-dir -U pip yt-dlp && \
+    ln -s /opt/yt/bin/yt-dlp /usr/local/bin/yt-dlp && \
+    yt-dlp --version
+
+# Copy dependency files first (better layer cache)
 COPY package*.json ./
 
+# Install production deps
 RUN if [ -f package-lock.json ]; then \
       npm ci --omit=dev; \
     else \
@@ -23,8 +29,10 @@ RUN if [ -f package-lock.json ]; then \
     fi && \
     npm cache clean --force
 
+# Copy the rest of the app
 COPY . .
 
+# Create non-root user and fix permissions
 RUN useradd -m -u 1001 appuser && \
     chown -R appuser:appuser /app && \
     mkdir -p /tmp/yt-merge && \
