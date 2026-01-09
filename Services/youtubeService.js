@@ -2,9 +2,12 @@ const { spawn } = require('child_process');
 
 console.log("🍪 Cookies path:", process.env.YTDLP_COOKIES);
 
-function runYtDlp(args, { timeoutMs = 30000 } = {}) {
+function runYtDlp(args, { timeoutMs = 60000 } = {}) {
   return new Promise((resolve, reject) => {
-    const p = spawn('yt-dlp', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    const p = spawn('yt-dlp', args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env }, // ✅ ensures YTDLP_COOKIES/YTDLP_PROXY are passed
+    });
 
     let out = '';
     let err = '';
@@ -66,51 +69,48 @@ class YouTubeDownloader {
 
     try {
       const args = [
-        // ✅ more reliable single JSON output
         '--dump-single-json',
         '--no-playlist',
         '--no-warnings',
+        '--verbose', // ✅ TEMP: helps confirm cookies/proxy in logs
 
-        // retry/network hardening
         '--socket-timeout', '15',
         '--retries', '2',
         '--extractor-retries', '2',
 
-        // IMPORTANT: try alternate YouTube clients (helps on server sometimes)
         '--extractor-args', 'youtube:player_client=android,web,mweb',
 
-        // Reduce bot triggers
-        '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36',
+        '--user-agent',
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36',
         '--add-header', 'Accept-Language:en-US,en;q=0.9',
         '--add-header', 'DNT:1',
         '--add-header', 'Connection:keep-alive',
 
-        // ✅ SAFE format selector (prevents "Requested format is not available")
-        // Prefer best video+audio, otherwise fall back to anything.
+        // ✅ prevent "Requested format is not available"
         '-f', 'bv*+ba/b',
         '--merge-output-format', 'mp4',
       ];
 
-      // OPTIONAL: proxy support (set env YTDLP_PROXY)
       if (process.env.YTDLP_PROXY) {
         args.push('--proxy', process.env.YTDLP_PROXY);
       }
 
-      // OPTIONAL: cookies support (set env YTDLP_COOKIES to a file path)
       if (process.env.YTDLP_COOKIES) {
         args.push('--cookies', process.env.YTDLP_COOKIES);
       }
 
+      // ✅ log final args AFTER proxy/cookies were added
+      console.log('🧪 yt-dlp args:', args);
+
       args.push(url);
 
-      const { stdout } = await runYtDlp(args, { timeoutMs: 30000 });
+      const { stdout } = await runYtDlp(args, { timeoutMs: 60000 });
 
       const info = JSON.parse(stdout);
       const allFormats = info.formats || [];
 
       console.log(`📊 Found ${allFormats.length} total formats`);
 
-      // VIDEO FORMATS: Must have BOTH video AND audio
       const videoWithAudio = allFormats.filter(f =>
         f.vcodec && f.vcodec !== 'none' &&
         f.acodec && f.acodec !== 'none' &&
@@ -119,7 +119,6 @@ class YouTubeDownloader {
         !f.is_live
       );
 
-      // AUDIO FORMATS: Audio only, NO video
       const audioOnly = allFormats.filter(f =>
         (!f.vcodec || f.vcodec === 'none') &&
         f.acodec && f.acodec !== 'none' &&
@@ -130,7 +129,6 @@ class YouTubeDownloader {
       console.log(`🎥 Video+Audio formats: ${videoWithAudio.length}`);
       console.log(`🎵 Audio-only formats: ${audioOnly.length}`);
 
-      // BUILD VIDEO QUALITY OPTIONS
       const videoQualities = [];
       const uniqueHeights = new Set();
 
@@ -158,7 +156,6 @@ class YouTubeDownloader {
           });
         });
 
-      // BUILD AUDIO QUALITY OPTIONS
       const audioQualities = [];
 
       audioOnly
@@ -239,14 +236,12 @@ class YouTubeDownloader {
 
       const msg = String(err.message || '');
 
-      // ✅ handle format selector issues correctly
       if (msg.includes('Requested format is not available')) {
         throw new Error(
-          "YouTube: your format selection is too strict/invalid for this video. Use -f 'bv*+ba/b' (already applied) or run --list-formats to debug."
+          "YouTube: format selection not available for this video. (We use -f 'bv*+ba/b' already)."
         );
       }
 
-      // ✅ bot check variations
       if (
         msg.includes("Sign in to confirm you’re not a bot") ||
         msg.includes("Sign in to confirm you're not a bot") ||
@@ -257,11 +252,11 @@ class YouTubeDownloader {
         );
       }
 
-      if (msg.includes('ERROR: Video unavailable') || msg.toLowerCase().includes('video unavailable')) {
+      if (msg.toLowerCase().includes('video unavailable')) {
         throw new Error('Video not found or has been removed');
       }
 
-      if (msg.includes('Private video') || msg.toLowerCase().includes('private video')) {
+      if (msg.toLowerCase().includes('private video')) {
         throw new Error('Video is private or age-restricted');
       }
 
