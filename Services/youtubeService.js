@@ -3,9 +3,10 @@
 /**
  * youtubeService.js — Robust YouTube player-only extractor (no /next parsing)
  *
- * Why this works better:
- * - Avoids Innertube /next parsing, which is what is crashing in your logs.
- * - Uses /player response (streamingData + videoDetails) only.
+ * Fixes:
+ * - Removes duplicate "const yt" declaration (your current crash).
+ * - Avoids /next parsing (which is what is breaking in your logs).
+ * - Calls /player only and builds formats from streamingData.
  * - Deciphers signatureCipher/cipher via yt.session.player.decipher().
  *
  * If you see LOGIN_REQUIRED ("confirm you're not a bot"), set YT_COOKIE env var.
@@ -16,6 +17,7 @@ const { Innertube, UniversalCache } = require('youtubei.js');
 const CACHE_DIR = process.env.YTJS_CACHE_DIR || '/tmp/ytjs-cache';
 let _yt = null;
 
+// Client names that actually exist (youtubei.js is picky)
 const CLIENTS = {
   TV_EMBEDDED: 'TVHTML5_SIMPLY_EMBEDDED_PLAYER',
   IOS: 'iOS',
@@ -35,17 +37,16 @@ const CLIENT_ORDER = [
 async function getYT() {
   if (_yt) return _yt;
 
-  // Optional: pass cookies to reduce bot-check/login-required blocks
-  const cookie = process.env.YT_COOKIE && process.env.YT_COOKIE.trim().length > 0
-    ? process.env.YT_COOKIE.trim()
-    : undefined;
+  const cookie =
+    process.env.YT_COOKIE && process.env.YT_COOKIE.trim().length > 0
+      ? process.env.YT_COOKIE.trim()
+      : undefined;
 
   _yt = await Innertube.create({
     cache: new UniversalCache(true, CACHE_DIR),
     generate_session_locally: true,
-    // Keep player retrieval enabled so deciphering works
-    retrieve_player: true,
-    lang: 'en',
+    retrieve_player: true, // needed for decipher
+    lang: process.env.YT_LANG || 'en',
     location: process.env.YT_LOCATION || 'US',
     cookie
   });
@@ -79,7 +80,6 @@ function extractVideoId(url) {
   }
 }
 
-// ─── Helpers ────────────────────────────────────────────────────────────────
 function toInt(x, fallback = 0) {
   const n = Number(x);
   return Number.isFinite(n) ? n : fallback;
@@ -87,10 +87,7 @@ function toInt(x, fallback = 0) {
 
 function pickBestThumb(thumbnails, videoId) {
   const arr = Array.isArray(thumbnails) ? thumbnails : (thumbnails?.thumbnails || []);
-  if (arr.length > 0) {
-    // highest res usually last
-    return arr[arr.length - 1]?.url || arr[0]?.url;
-  }
+  if (arr.length > 0) return arr[arr.length - 1]?.url || arr[0]?.url;
   return `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`;
 }
 
@@ -109,7 +106,6 @@ async function decipherUrl(yt, fmt, nsigCache) {
   const player = yt?.session?.player;
   if (!player || typeof player.decipher !== 'function') return null;
 
-  // YouTube can send either signatureCipher or cipher
   if (fmt.signatureCipher) {
     return await player.decipher(undefined, fmt.signatureCipher, undefined, nsigCache);
   }
@@ -119,12 +115,11 @@ async function decipherUrl(yt, fmt, nsigCache) {
   return null;
 }
 
-// Build format lists from streamingData (muxed + adaptive)
 async function buildFormats(yt, streamingData) {
   const muxed = Array.isArray(streamingData?.formats) ? streamingData.formats : [];
   const adaptive = Array.isArray(streamingData?.adaptiveFormats) ? streamingData.adaptiveFormats : [];
 
-  const nsigCache = new Map(); // improves performance per response
+  const nsigCache = new Map();
 
   const videoFormats = [];
   const audioFormats = [];
@@ -134,7 +129,6 @@ async function buildFormats(yt, streamingData) {
     const height = toInt(f.height, 0);
     const hasVideo = !!height;
     const hasAudio = toInt(f.audioChannels, 0) > 0 || !!f.audioQuality;
-
     if (!hasVideo || !hasAudio) continue;
 
     const url = await decipherUrl(yt, f, nsigCache);
@@ -158,7 +152,7 @@ async function buildFormats(yt, streamingData) {
     });
   }
 
-  // Adaptive video-only + audio-only
+  // Adaptive
   for (const f of adaptive) {
     const height = toInt(f.height, 0);
     const hasVideo = !!height;
@@ -186,7 +180,6 @@ async function buildFormats(yt, streamingData) {
         itag: f.itag
       });
     } else if (hasVideo && !hasAudio) {
-      // Video-only (best qualities usually require merge)
       videoFormats.push({
         quality: f.qualityLabel || `${height}p`,
         qualityNum: height,
@@ -205,23 +198,39 @@ async function buildFormats(yt, streamingData) {
     }
   }
 
-  // Sort best-first
   videoFormats.sort((a, b) => (b.qualityNum || 0) - (a.qualityNum || 0));
   audioFormats.sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
 
   return { videoFormats, audioFormats };
 }
 
-// Call /player with a specific client (no parser heavy stuff)
+/**
+ * /player call in a version-tolerant way for youtubei.js v16+
+ * Different versions accept options differently, so we try a few shapes.
+ */
 async function playerResponse(yt, videoId, client) {
-  // parse:false => raw response (avoids parser breakage)
-  const res = await yt.actions.execute('/player', {
-    videoId,
-    client,
-    parse: false
-  });
+  // Try: execute(path, payload, options)
+  try {
+    const res = await yt.actions.execute(
+      '/player',
+      { videoId },
+      { client, parse: false }
+    );
+    return res?.data || res;
+  } catch (_) {}
 
-  // Different youtubei.js versions may return { data } or raw object
+  // Try: execute(path, payloadWithClient, options)
+  try {
+    const res = await yt.actions.execute(
+      '/player',
+      { videoId, client },
+      { parse: false }
+    );
+    return res?.data || res;
+  } catch (_) {}
+
+  // Try: execute(path, payloadOnly) and accept parsed
+  const res = await yt.actions.execute('/player', { videoId, client });
   return res?.data || res;
 }
 
@@ -246,8 +255,10 @@ async function tryClient(videoId, client) {
       return { ok: false, client, status: 'NO_STREAMING_DATA', reason: 'No streamingData in /player response' };
     }
 
-    const yt = await getYT();
-    const { videoFormats, audioFormats } = await buildFormats(yt, streamingData);
+    // ✅ FIX: reuse the same yt (no redeclare)
+    const fmts = await buildFormats(yt, streamingData);
+    const videoFormats = fmts.videoFormats;
+    const audioFormats = fmts.audioFormats;
 
     if (videoFormats.length === 0 && audioFormats.length === 0) {
       return { ok: false, client, status: 'NO_USABLE_FORMATS', reason: '0 usable formats after decipher' };
@@ -294,12 +305,8 @@ async function fetchYouTubeData(url) {
     const r = await tryClient(videoId, client);
 
     if (r.ok) {
-      const allFormats = [
-        ...r.videoFormats,
-        ...r.audioFormats
-      ];
+      const allFormats = [...r.videoFormats, ...r.audioFormats];
 
-      // Prefer muxed 360p (no merge) if present, else best muxed, else audio
       const muxedNoMerge = r.videoFormats.filter(f => f.hasAudio && f.hasVideo && !f.needsMerge);
       const defaultQuality =
         muxedNoMerge.find(f => f.qualityNum === 360) ||
@@ -346,7 +353,6 @@ async function fetchYouTubeData(url) {
     }
   }
 
-  // If we end here, all clients failed
   const msg =
     lastError?.status === 'LOGIN_REQUIRED'
       ? 'YouTube is requiring sign-in (bot check). Set YT_COOKIE env var (Cookie header string).'
