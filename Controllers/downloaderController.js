@@ -12,7 +12,6 @@ const fetchLinkedinData = require('../Services/linkedinService');
 const facebookInsta = require('../Services/facebookInstaService');
 const { downloadTwmateData } = require('../Services/twitterService');
 const { fetchYouTubeData } = require('../Services/youtubeService');
-// REMOVED: const VredenYouTubeDownloader = require('../Services/vredenYoutubeDownloader');
 
 const bitly = new BitlyClient(config.BITLY_ACCESS_TOKEN);
 
@@ -24,6 +23,7 @@ const SUPPORTED_PLATFORMS = [
 
 const PLACEHOLDER_THUMBNAIL = 'https://via.placeholder.com/300x150';
 const DOWNLOAD_TIMEOUT = 45000;
+const YOUTUBE_TIMEOUT = 90000; // Increased timeout for YouTube
 
 // ===== UTILITY FUNCTIONS =====
 
@@ -155,14 +155,6 @@ const downloadWithTimeout = (downloadFunction, timeout = DOWNLOAD_TIMEOUT) => {
   ]);
 };
 
-// Helper function to get server base URL
-function getServerBaseUrl(req) {
-  // Use the request host or environment variable
-  const host = req.get('host');
-  const protocol = req.secure ? 'https' : 'http';
-  return process.env.SERVER_BASE_URL || `${protocol}://${host}`;
-}
-
 // ===== PLATFORM-SPECIFIC DOWNLOADERS =====
 
 const platformDownloaders = {
@@ -225,10 +217,10 @@ const platformDownloaders = {
     console.log('YouTube: Processing URL:', url);
 
     try {
-      // CRITICAL FIX: Increased timeout from 40s to 90s for YouTube deciphering
+      // Use play-dl service with increased timeout
       const result = await downloadWithTimeout(
         () => fetchYouTubeData(url),
-        90000 // 90 seconds for YouTube
+        YOUTUBE_TIMEOUT
       );
 
       if (!result || !result.url) {
@@ -242,6 +234,7 @@ const platformDownloaders = {
         title: result.title,
         thumbnail: result.thumbnail,
         duration: result.duration,
+        durationFormatted: result.durationFormatted,
         isShorts: result.isShorts || false,
         url: result.url,
         formats: result.formats || [],
@@ -252,7 +245,7 @@ const platformDownloaders = {
           fastest: result.formats?.find(f => f.qualityNum === 360) || result.formats?.[0],
           sd: result.formats?.find(f => f.qualityNum === 360) || result.formats?.[0]
         },
-        stats: {
+        stats: result.stats || {
           totalFormats: result.formats?.length || 0,
           videoFormats: result.formats?.filter(f => !f.isAudioOnly).length || 0,
           audioFormats: result.formats?.filter(f => f.isAudioOnly).length || 0,
@@ -265,37 +258,40 @@ const platformDownloaders = {
           videoId: result.videoId,
           author: result.author,
         },
-        ffmpegRequired: false,
-        _debug: result._debug // Keep debug info for troubleshooting
+        ffmpegRequired: result.ffmpegRequired || false,
+        _debug: result._debug
       };
 
     } catch (error) {
       console.error(`❌ YouTube download error: ${error.message}`);
 
-    if (error.message.includes('Requested format is not available')) {
-      throw new Error('YouTube formats could not be resolved from the response (format selection issue).');
-    }
+      if (error.message.includes('Requested format is not available')) {
+        throw new Error('YouTube formats could not be resolved from the response (format selection issue).');
+      }
 
-    if (
-      error.message.toLowerCase().includes('video unavailable') ||
-      error.message.toLowerCase().includes('has been removed')
-    ) {
-      throw new Error('This YouTube video is no longer available (removed)');
-    }
+      if (
+        error.message.toLowerCase().includes('video unavailable') ||
+        error.message.toLowerCase().includes('has been removed')
+      ) {
+        throw new Error('This YouTube video is no longer available (removed)');
+      }
 
-    if (error.message.toLowerCase().includes('private video')) {
-      throw new Error('This YouTube video is private');
-    }
+      if (error.message.toLowerCase().includes('private video')) {
+        throw new Error('This YouTube video is private');
+      }
 
       if (error.message.includes('forbidden') || error.message.includes('region')) {
         throw new Error('Cannot access this video (age-restricted or region-locked)');
       }
+      
       if (error.message.includes('not found')) {
         throw new Error('YouTube video not found. Check if the URL is correct.');
       }
+      
       if (error.message.includes('timeout')) {
         throw new Error('YouTube is taking too long to respond. Please try again in a moment.');
       }
+      
       if (error.message.includes('decipher') || error.message.includes('protection')) {
         throw new Error('Unable to process this video. YouTube may have updated their protection.');
       }
@@ -481,8 +477,8 @@ const dataFormatters = {
     }
 
     const qualityOptions = data.formats || data.allFormats || [];
-    const directDownloadFormats = qualityOptions.filter(f => !f.requiresFFmpeg);
-    const mergeFormats = qualityOptions.filter(f => f.requiresFFmpeg);
+    const directDownloadFormats = qualityOptions.filter(f => !f.needsMerge);
+    const mergeFormats = qualityOptions.filter(f => f.needsMerge);
     const selectedQuality = qualityOptions[0];
     const defaultUrl = data.url || selectedQuality?.url || null;
 
@@ -494,6 +490,7 @@ const dataFormatters = {
       thumbnail: data.thumbnail || PLACEHOLDER_THUMBNAIL,
       sizes: qualityOptions.map(f => f.quality || f.resolution),
       duration: data.duration || 'unknown',
+      durationFormatted: data.durationFormatted || '',
       source: 'youtube',
       formats: qualityOptions,
       allFormats: qualityOptions,
@@ -501,7 +498,7 @@ const dataFormatters = {
       recommended: data.recommended || {
         best: qualityOptions[0] || null,
         fastest: directDownloadFormats[directDownloadFormats.length - 1] || qualityOptions[qualityOptions.length - 1],
-        sd: qualityOptions.find(f => f.qualityNumber === 360) || directDownloadFormats[directDownloadFormats.length - 1]
+        sd: qualityOptions.find(f => f.qualityNum === 360) || directDownloadFormats[directDownloadFormats.length - 1]
       },
       stats: data.stats || {
         totalFormats: qualityOptions.length,
@@ -518,6 +515,7 @@ const dataFormatters = {
 
     return result;
   },
+  
   threads(data) {
     console.log("Processing advanced Threads data...");
     return {
@@ -560,7 +558,6 @@ const formatData = async (platform, data, req) => {
     };
   }
 
-  // Pass the request object to YouTube formatter for URL conversion
   if (platform === 'youtube') {
     return formatter(data, req);
   }
@@ -609,7 +606,6 @@ const downloadMedia = async (req, res) => {
       throw new Error(`No downloader available for platform: ${platform}`);
     }
 
-    // Pass the request object to YouTube downloader for URL conversion
     const data = platform === 'youtube'
         ? await downloader(processedUrl, req)
         : await downloader(processedUrl);
@@ -649,18 +645,11 @@ const downloadMedia = async (req, res) => {
     console.log(`Formats count: ${formattedData.formats?.length || 0}`);
     console.log(`AllFormats count: ${formattedData.allFormats?.length || 0}`);
 
-    // Log merge URLs for debugging
-    if (platform === 'youtube' && formattedData.formats) {
-      const mergeFormats = formattedData.formats.filter(f => f.url && f.url.includes('/api/merge-audio'));
-      console.log(`🎵 Merge formats available: ${mergeFormats.length}`);
-    }
-
     console.info("Download Media: Media successfully downloaded and formatted.");
 
-    // ENSURE THE RESPONSE INCLUDES ALL DATA
     res.status(200).json({
       success: true,
-      data: formattedData, // This must include formats and allFormats
+      data: formattedData,
       platform: platform,
       timestamp: new Date().toISOString(),
       debug: {
@@ -713,6 +702,10 @@ const getErrorSuggestions = (errorMessage, platform) => {
     if (errorMessage.includes('timeout')) {
       suggestions.push('YouTube videos may take longer to process - the API is working but needs time');
       suggestions.push('Check your frontend code to ensure it waits for the full response');
+    }
+    if (errorMessage.includes('private') || errorMessage.includes('age')) {
+      suggestions.push('This video requires authentication or age verification');
+      suggestions.push('Try a different public video');
     }
   }
 
