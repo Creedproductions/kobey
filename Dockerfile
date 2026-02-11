@@ -2,7 +2,7 @@ FROM node:20.18.1-slim
 
 WORKDIR /app
 
-# System deps
+# Install system dependencies with additional useful packages
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
       ca-certificates \
@@ -10,46 +10,76 @@ RUN apt-get update && \
       curl \
       python3 \
       python3-venv \
-      tini && \
+      python3-pip \
+      tini \
+      # Additional useful packages
+      git \
+      build-essential \
+      && \
     rm -rf /var/lib/apt/lists/*
 
-# yt-dlp in venv (PEP 668 safe)
+# Create virtual environment and install yt-dlp with all dependencies
 RUN python3 -m venv /opt/yt && \
-    /opt/yt/bin/pip install --no-cache-dir -U pip yt-dlp && \
+    /opt/yt/bin/pip install --no-cache-dir -U pip setuptools wheel && \
+    /opt/yt/bin/pip install --no-cache-dir -U yt-dlp && \
+    # Create symlink
     ln -s /opt/yt/bin/yt-dlp /usr/local/bin/yt-dlp && \
-    yt-dlp --version
+    # Verify installation
+    yt-dlp --version && \
+    # Update yt-dlp to latest (optional but recommended)
+    yt-dlp -U || true
 
-# Copy dependency files first (better layer cache)
+# Copy dependency files
 COPY package*.json ./
 
-# Install production deps
-RUN if [ -f package-lock.json ]; then \
-      npm ci --omit=dev; \
-    else \
-      npm install --omit=dev; \
-    fi && \
+# Install production dependencies
+RUN npm ci --omit=dev --ignore-scripts && \
     npm cache clean --force
 
-# Copy the rest of the app
+# Copy application code
 COPY . .
 
-# Create non-root user and fix permissions
-RUN useradd -m -u 1001 appuser && \
-    chown -R appuser:appuser /app && \
-    mkdir -p /tmp/yt-merge && \
-    chown -R appuser:appuser /tmp/yt-merge
+# Create necessary directories with proper permissions
+RUN mkdir -p /tmp/yt-dlp /tmp/yt-merge /tmp/yt-cache && \
+    chmod 1777 /tmp/yt-dlp /tmp/yt-merge /tmp/yt-cache
 
+# Create non-root user with home directory
+RUN useradd -m -u 1001 -s /bin/bash appuser && \
+    chown -R appuser:appuser /app && \
+    chown -R appuser:appuser /tmp/yt-dlp /tmp/yt-merge /tmp/yt-cache
+
+# Switch to non-root user
 USER appuser
 
-ENV NODE_ENV=production
+# Environment variables for yt-dlp optimization
+ENV NODE_ENV=production \
+    YT_DLP_CACHE_DIR=/tmp/yt-cache \
+    YT_DLP_CONFIG=/app/yt-dlp.conf
+
+# Create yt-dlp config file for optimal performance
+RUN echo "# yt-dlp configuration\n\
+--no-playlist\n\
+--no-warnings\n\
+--no-check-certificate\n\
+--extractor-args youtube:player-client=android\n\
+--concurrent-fragments 5\n\
+--cache-dir /tmp/yt-cache\n\
+--no-cache-dir\n" > /app/yt-dlp.conf
+
 EXPOSE 8000
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
   CMD node -e "\
     const http=require('http'); \
-    const req=http.get('http://127.0.0.1:8000/health', r=>process.exit(r.statusCode===200?0:1)); \
-    req.setTimeout(5000, ()=>{req.destroy(); process.exit(1)}); \
-    req.on('error', ()=>process.exit(1)); \
+    const options={ \
+      hostname:'127.0.0.1', \
+      port:8000, \
+      path:'/health', \
+      timeout:5000 \
+    }; \
+    const req=http.get(options, r=>process.exit(r.statusCode===200?0:1)); \
+    req.on('error',()=>process.exit(1)); \
+    req.end(); \
   "
 
 ENTRYPOINT ["/usr/bin/tini", "--"]

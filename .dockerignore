@@ -1,0 +1,27 @@
+# .dockerignore
+node_modules
+npm-debug.log
+.git
+.gitignore
+README.md
+.DS_Store
+*.log
+.env
+.env.local
+.env.production
+.env.development
+coverage
+.nyc_output
+dist
+build
+*.pid
+*.seed
+*.pid.lock
+logs
+tmp
+temp
+.vscode
+.idea
+*.swp
+*.swo
+*~
