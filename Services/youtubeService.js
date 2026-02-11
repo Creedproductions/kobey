@@ -1,352 +1,561 @@
 // Controllers/youtubeService.js
-const { exec } = require('child_process');
-const util = require('util');
-const fs = require('fs').promises;
-const path = require('path');
-const os = require('os');
-const execPromise = util.promisify(exec);
-const audioMergerService = require("./audioMergerService");
+const axios = require('axios');
+const audioMergerService = require('./audioMergerService');
 
-// Path for cookies file
-const COOKIES_PATH = path.join(os.tmpdir(), 'youtube-cookies.txt');
+// ========================================
+// CONFIGURATION
+// ========================================
+const CONFIG = {
+  PIPED_INSTANCES: [
+    'https://pipedapi.kavin.rocks',
+    'https://pipedapi.smnz.de',
+    'https://api.piped.video',
+    'https://pipedapi.usepiped.com',
+    'https://pipedapi.r4fo.com',
+    'https://piped.moomoo.me'
+  ],
+  REQUEST_TIMEOUT: 10000,
+  USER_AGENT: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+  STANDARD_RESOLUTIONS: [144, 240, 360, 480, 720, 1080, 1440, 2160],
+  FREE_TIER_MAX: 360,
+  MAX_AUDIO_BITRATE: 128000
+};
 
-/**
- * Fetches YouTube video data using yt-dlp with cookie support
- */
+// ========================================
+// MAIN EXPORT FUNCTION
+// ========================================
 async function fetchYouTubeData(url) {
-  const normalizedUrl = normalizeYouTubeUrl(url);
-  console.log(`🔍 Fetching YouTube data with yt-dlp for: ${normalizedUrl}`);
+  console.log(`🔍 Fetching YouTube data for: ${url}`);
 
   try {
-    // Try with cookies first
-    return await fetchWithYtDlp(normalizedUrl, true);
-  } catch (err) {
-    console.error('❌ yt-dlp with cookies error:', err.message);
+    const normalizedUrl = normalizeYouTubeUrl(url);
+    const videoId = extractVideoId(normalizedUrl);
 
-    // Try without cookies as fallback
+    if (!videoId) {
+      throw new Error('Could not extract video ID from URL');
+    }
+
+    console.log(`📺 Video ID: ${videoId}`);
+
+    // Try Piped API first (currently working)
     try {
-      console.log('⚠️ Trying without cookies...');
-      return await fetchWithYtDlp(normalizedUrl, false);
-    } catch (err2) {
-      console.error('❌ yt-dlp without cookies error:', err2.message);
+      return await fetchFromPiped(videoId, normalizedUrl);
+    } catch (pipedError) {
+      console.log(`⚠️ Piped API failed: ${pipedError.message}`);
 
-      // Final fallback to vidfly.ai
-      console.log('⚠️ Falling back to vidfly.ai...');
-      return fetchWithVidFlyApi(normalizedUrl, 1);
+      // Fallback to alternative API
+      return await fetchFromInvidious(videoId, normalizedUrl);
     }
+
+  } catch (error) {
+    console.error('❌ All YouTube services failed:', error.message);
+    throw new Error(`YouTube download failed: ${error.message}`);
   }
 }
 
-/**
- * Create a basic cookies file for YouTube
- * This helps with the "Sign in to confirm you're not a bot" error
- */
-async function createBasicCookiesFile() {
-  try {
-    // Check if cookies file already exists
-    await fs.access(COOKIES_PATH);
-    return COOKIES_PATH;
-  } catch {
-    // Create basic cookies file with CONSENT cookie
-    // This often helps with the bot detection
-    const cookieContent = `# Netscape HTTP Cookie File
-.youtube.com	TRUE	/	FALSE	1735689600	CONSENT	YES+cb.20250305-11-p0.en+FX+424
-`;
-    await fs.writeFile(COOKIES_PATH, cookieContent);
-    console.log('✅ Created basic cookies file');
-    return COOKIES_PATH;
+// ========================================
+// PIPED API IMPLEMENTATION (PRIMARY)
+// ========================================
+async function fetchFromPiped(videoId, originalUrl) {
+  console.log(`📥 Fetching from Piped API: ${videoId}`);
+
+  let lastError = null;
+
+  // Try each Piped instance until one works
+  for (const instance of CONFIG.PIPED_INSTANCES) {
+    try {
+      const response = await axios.get(`${instance}/streams/${videoId}`, {
+        timeout: CONFIG.REQUEST_TIMEOUT,
+        headers: {
+          'User-Agent': CONFIG.USER_AGENT,
+          'Accept': 'application/json'
+        }
+      });
+
+      const data = response.data;
+
+      if (!data || !data.videoStreams) {
+        throw new Error('Invalid response from Piped API');
+      }
+
+      console.log(`✅ Piped instance working: ${instance}`);
+      console.log(`📹 Video: ${data.title}`);
+
+      // Transform Piped data to our format
+      const formats = transformPipedFormats(data);
+
+      const videoData = {
+        title: data.title,
+        thumbnail: data.thumbnailUrl || `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`,
+        duration: data.duration || 0,
+        uploader: data.uploader || 'Unknown',
+        uploaderUrl: data.uploaderUrl,
+        uploaderAvatar: data.uploaderAvatar,
+        uploadDate: data.uploadDate,
+        description: data.description,
+        views: data.views,
+        likes: data.likes,
+        formats: formats
+      };
+
+      return processYouTubeData(videoData, originalUrl);
+
+    } catch (error) {
+      lastError = error;
+      console.log(`⚠️ Instance ${instance} failed: ${error.message}`);
+      continue;
+    }
   }
+
+  throw new Error(`All Piped instances failed: ${lastError?.message}`);
 }
 
-/**
- * Primary API implementation using yt-dlp
- */
-async function fetchWithYtDlp(url, useCookies = true) {
-  try {
-    console.log(`📥 Running yt-dlp for: ${url} (cookies: ${useCookies})`);
+// ========================================
+// INVIDIOUS API IMPLEMENTATION (FALLBACK)
+// ========================================
+async function fetchFromInvidious(videoId, originalUrl) {
+  console.log(`📥 Fetching from Invidious API: ${videoId}`);
 
-    let cookiesOption = '';
-    if (useCookies) {
-      const cookiesPath = await createBasicCookiesFile();
-      cookiesOption = `--cookies "${cookiesPath}"`;
+  const instances = [
+    'https://invidious.projectsegfau.lt',
+    'https://inv.riverside.rocks',
+    'https://yewtu.be',
+    'https://invidious.jing.rocks',
+    'https://invidious.snopyta.org'
+  ];
+
+  for (const instance of instances) {
+    try {
+      const response = await axios.get(`${instance}/api/v1/videos/${videoId}`, {
+        timeout: 8000,
+        headers: { 'User-Agent': CONFIG.USER_AGENT }
+      });
+
+      const data = response.data;
+
+      console.log(`✅ Invidious instance working: ${instance}`);
+
+      const formats = transformInvidiousFormats(data);
+
+      const videoData = {
+        title: data.title,
+        thumbnail: data.videoThumbnails?.find(t => t.quality === 'maxres')?.url ||
+                   data.videoThumbnails?.[0]?.url ||
+                   `https://img.youtube.com/vi/${videoId}/hqdefault.jpg`,
+        duration: data.lengthSeconds || 0,
+        uploader: data.author || 'Unknown',
+        uploaderUrl: data.authorUrl,
+        uploaderAvatar: data.authorThumbnails?.slice(-1)[0]?.url,
+        uploadDate: data.published,
+        description: data.description,
+        views: data.viewCount,
+        likes: data.likeCount,
+        formats: formats
+      };
+
+      return processYouTubeData(videoData, originalUrl);
+
+    } catch (error) {
+      console.log(`⚠️ Invidious instance ${instance} failed: ${error.message}`);
+      continue;
     }
+  }
 
-    // Build command with multiple fallback clients
-    const command = `yt-dlp \
-      --no-playlist \
-      --no-check-certificate \
-      --no-warnings \
-      --extractor-args "youtube:player_client=android,mweb" \
-      --geo-bypass \
-      ${cookiesOption} \
-      --add-header "Accept-Language: en-US,en;q=0.9" \
-      --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
-      -J \
-      "${url}"`;
+  throw new Error('All Invidious instances failed');
+}
 
-    const { stdout } = await execPromise(command, {
-      timeout: 60000,
-      maxBuffer: 10 * 1024 * 1024
+// ========================================
+// FORMAT TRANSFORMERS
+// ========================================
+function transformPipedFormats(data) {
+  const formats = [];
+
+  // Add video formats (with audio)
+  if (data.videoStreams) {
+    data.videoStreams.forEach(stream => {
+      if (!stream.videoOnly) {
+        formats.push({
+          url: stream.url,
+          label: `${stream.quality}`,
+          type: 'video/mp4',
+          ext: 'mp4',
+          filesize: stream.contentLength || 0,
+          quality: parseInt(stream.quality) || 0,
+          hasVideo: true,
+          hasAudio: true,
+          isVideoOnly: false,
+          isAudioOnly: false
+        });
+      }
     });
-
-    const info = JSON.parse(stdout);
-    console.log(`✅ yt-dlp fetched: "${info.title}"`);
-
-    return processYouTubeData(info, url);
-
-  } catch (err) {
-    console.error('❌ yt-dlp execution error:', err.message);
-    throw new Error(`yt-dlp failed: ${err.message}`);
   }
+
+  // Add video-only formats (for premium/merging)
+  if (data.videoStreams) {
+    data.videoStreams.forEach(stream => {
+      if (stream.videoOnly) {
+        formats.push({
+          url: stream.url,
+          label: `${stream.quality} (video only)`,
+          type: 'video/mp4',
+          ext: 'mp4',
+          filesize: stream.contentLength || 0,
+          quality: parseInt(stream.quality) || 0,
+          hasVideo: true,
+          hasAudio: false,
+          isVideoOnly: true,
+          isAudioOnly: false
+        });
+      }
+    });
+  }
+
+  // Add audio formats
+  if (data.audioStreams) {
+    data.audioStreams.forEach(stream => {
+      const bitrate = stream.bitrate || 128000;
+      formats.push({
+        url: stream.url,
+        label: `${Math.round(bitrate / 1000)}kbps`,
+        type: 'audio/mp4',
+        ext: 'm4a',
+        filesize: stream.contentLength || 0,
+        quality: bitrate,
+        hasVideo: false,
+        hasAudio: true,
+        isVideoOnly: false,
+        isAudioOnly: true
+      });
+    });
+  }
+
+  return formats;
 }
 
-/**
- * Normalizes various YouTube URL formats
- */
+function transformInvidiousFormats(data) {
+  const formats = [];
+
+  // Add regular video formats (with audio)
+  if (data.formatStreams) {
+    data.formatStreams.forEach(stream => {
+      formats.push({
+        url: stream.url,
+        label: stream.qualityLabel,
+        type: 'video/mp4',
+        ext: 'mp4',
+        filesize: stream.clen || 0,
+        quality: parseInt(stream.qualityLabel) || 0,
+        hasVideo: true,
+        hasAudio: true,
+        isVideoOnly: false,
+        isAudioOnly: false
+      });
+    });
+  }
+
+  // Add adaptive video formats (video only)
+  if (data.adaptiveFormats) {
+    data.adaptiveFormats.forEach(stream => {
+      if (stream.type?.includes('video')) {
+        formats.push({
+          url: stream.url,
+          label: `${stream.qualityLabel} (video only)`,
+          type: 'video/mp4',
+          ext: 'mp4',
+          filesize: stream.clen || 0,
+          quality: parseInt(stream.qualityLabel) || 0,
+          hasVideo: true,
+          hasAudio: false,
+          isVideoOnly: true,
+          isAudioOnly: false
+        });
+      }
+
+      if (stream.type?.includes('audio')) {
+        formats.push({
+          url: stream.url,
+          label: `${Math.round(stream.bitrate / 1000)}kbps`,
+          type: 'audio/mp4',
+          ext: 'm4a',
+          filesize: stream.clen || 0,
+          quality: stream.bitrate || 128000,
+          hasVideo: false,
+          hasAudio: true,
+          isVideoOnly: false,
+          isAudioOnly: true
+        });
+      }
+    });
+  }
+
+  return formats;
+}
+
+// ========================================
+// URL HELPERS
+// ========================================
 function normalizeYouTubeUrl(url) {
+  if (!url) return url;
+
+  // Convert youtu.be to youtube.com
   if (url.includes('youtu.be/')) {
     const videoId = url.split('youtu.be/')[1].split('?')[0].split('&')[0];
     return `https://www.youtube.com/watch?v=${videoId}`;
   }
+
+  // Convert m.youtube to www.youtube
   if (url.includes('m.youtube.com')) {
     return url.replace('m.youtube.com', 'www.youtube.com');
   }
+
+  // Handle shorts
   if (url.includes('/shorts/')) {
     return url;
   }
+
+  // Ensure www prefix
   if (url.includes('youtube.com/watch') && !url.includes('www.youtube.com')) {
     return url.replace('youtube.com', 'www.youtube.com');
   }
+
   return url;
 }
 
-/**
- * Process YouTube data with clean format organization
- */
-function processYouTubeData(info, url) {
-  const isShorts = url.includes('/shorts/');
-  const formats = info.formats || [];
+function extractVideoId(url) {
+  const patterns = [
+    /v=([^&]+)/,
+    /youtu\.be\/([^?]+)/,
+    /shorts\/([^?]+)/,
+    /embed\/([^?]+)/
+  ];
 
-  console.log(`📊 YouTube: Found ${formats.length} total formats, cleaning...`);
+  for (const pattern of patterns) {
+    const match = url.match(pattern);
+    if (match) return match[1];
+  }
+
+  return null;
+}
+
+// ========================================
+// QUALITY PROCESSING
+// ========================================
+function processYouTubeData(data, url) {
+  const isShorts = url.includes('/shorts/');
+  console.log(`📊 Processing ${data.formats.length} total formats...`);
 
   // ========================================
   // STEP 1: FILTER VALID FORMATS
   // ========================================
-  let items = formats
-    .filter(f => f.url) // Must have URL
+  let validFormats = data.formats
+    .filter(f => f && f.url)
     .filter(f => {
-      // Skip HLS/m3u8 formats
-      if (f.protocol?.includes('m3u8')) return false;
-      if (f.url?.includes('.m3u8')) return false;
-
-      // Skip very low quality video (< 144p)
-      if (f.height && f.height < 144) return false;
-
-      // Skip audio bitrates that are too low/high
-      if (f.abr && (f.abr < 32 || f.abr > 320)) return false;
-
+      // Skip very low quality video
+      if (f.quality && f.quality < 144 && !f.isAudioOnly) return false;
       return true;
     });
 
-  console.log(`✅ After filtering: ${items.length} valid formats`);
+  console.log(`✅ After filtering: ${validFormats.length} valid formats`);
 
   // ========================================
-  // STEP 2: ORGANIZE BY CATEGORY
-  // ========================================
-  const videoFormats = [];
-  const audioFormats = [];
-
-  items.forEach(format => {
-    const hasVideo = format.vcodec !== 'none';
-    const hasAudio = format.acodec !== 'none';
-
-    if (!hasVideo && hasAudio) {
-      // Audio only
-      audioFormats.push({
-        url: format.url,
-        label: format.abr ? `${Math.round(format.abr)}kbps` : 'Audio',
-        type: 'audio/mp4',
-        ext: 'm4a',
-        filesize: format.filesize || format.filesize_approx || 0,
-        quality: format.abr || 128,
-        isAudioOnly: true,
-        isVideoOnly: false,
-        hasAudio: true,
-        hasVideo: false
-      });
-    }
-    else if (hasVideo) {
-      // Video (with or without audio)
-      let quality = format.height || 0;
-      let label = `${quality}p`;
-
-      // Add quality indicators
-      if (format.fps && format.fps >= 60) label += ` ${format.fps}fps`;
-      if (format.vcodec?.includes('av1')) label += ' 🔸';
-      else if (format.vcodec?.includes('vp9')) label += ' 🔹';
-
-      videoFormats.push({
-        url: format.url,
-        label: label,
-        type: 'video/mp4',
-        ext: 'mp4',
-        filesize: format.filesize || format.filesize_approx || 0,
-        quality: quality,
-        fps: format.fps || 30,
-        hasVideo: true,
-        hasAudio: hasAudio,
-        isVideoOnly: !hasAudio,
-        isAudioOnly: false
-      });
-    }
-  });
-
-  // ========================================
-  // STEP 3: DEDUPLICATE - KEEP BEST OF EACH QUALITY
+  // STEP 2: DEDUPLICATE BY QUALITY
   // ========================================
   const uniqueVideos = new Map();
+  const audioFormats = [];
 
-  videoFormats.forEach(format => {
-    const key = `${format.quality}_${format.hasAudio}`;
-
-    if (!uniqueVideos.has(key)) {
-      uniqueVideos.set(key, format);
+  validFormats.forEach(format => {
+    if (format.isAudioOnly) {
+      audioFormats.push(format);
     } else {
-      // Keep higher FPS
-      const existing = uniqueVideos.get(key);
-      if (format.fps > existing.fps) {
-        uniqueVideos.set(key, format);
+      const qualityNum = format.quality || extractQualityNumber(format.label);
+      const key = `${qualityNum}_${format.hasAudio}`;
+
+      if (!uniqueVideos.has(key)) {
+        uniqueVideos.set(key, { ...format, qualityNum });
+      } else {
+        // Keep higher bitrate/fps
+        const existing = uniqueVideos.get(key);
+        if (format.filesize > existing.filesize) {
+          uniqueVideos.set(key, { ...format, qualityNum });
+        }
       }
     }
   });
 
-  // ========================================
-  // STEP 4: KEEP ONLY STANDARD RESOLUTIONS
-  // ========================================
-  const standardResolutions = [144, 240, 360, 480, 720, 1080, 1440, 2160];
-  const finalVideos = Array.from(uniqueVideos.values())
-    .filter(f => standardResolutions.includes(f.quality))
-    .sort((a, b) => a.quality - b.quality);
+  let dedupedFormats = Array.from(uniqueVideos.values());
+  console.log(`🔄 After deduplication: ${dedupedFormats.length} unique video formats`);
 
-  // Keep best audio format only
-  const bestAudio = audioFormats.length > 0
-    ? [audioFormats.sort((a, b) => b.quality - a.quality)[0]]
-    : [];
+  // ========================================
+  // STEP 3: KEEP ONLY STANDARD RESOLUTIONS
+  // ========================================
+  dedupedFormats = dedupedFormats
+    .filter(f => {
+      if (f.isAudioOnly) return true;
+      return CONFIG.STANDARD_RESOLUTIONS.includes(f.qualityNum);
+    })
+    .sort((a, b) => a.qualityNum - b.qualityNum);
 
-  // Combine final formats
-  const allFormats = [...finalVideos, ...bestAudio];
+  // Keep only best audio format
+  const bestAudio = audioFormats
+    .sort((a, b) => (b.quality || 0) - (a.quality || 0))
+    .slice(0, 1);
+
+  // Combine formats
+  let allFormats = [...dedupedFormats, ...bestAudio];
 
   console.log(`🎬 Final formats: ${allFormats.length}`);
   allFormats.forEach(f => {
-    console.log(`   ${f.label} - ${f.isAudioOnly ? '🎵 Audio' : f.isVideoOnly ? '📹 Video Only' : '🎬 Video+Audio'}`);
+    const type = f.isAudioOnly ? '🎵 Audio' :
+                 f.isVideoOnly ? '📹 Video Only' :
+                 '🎬 Video+Audio';
+    console.log(`   ${f.label} - ${type}`);
   });
 
   // ========================================
-  // STEP 5: CREATE QUALITY OPTIONS WITH PREMIUM FLAGS
+  // STEP 4: CREATE QUALITY OPTIONS WITH PREMIUM FLAGS
   // ========================================
   const qualityOptions = allFormats.map(format => {
-    const isPremium = !format.isAudioOnly && format.quality > 360;
+    const qualityNum = format.qualityNum || extractQualityNumber(format.label);
+    const isPremium = !format.isAudioOnly && qualityNum > CONFIG.FREE_TIER_MAX;
 
     return {
       quality: format.label,
-      qualityNum: format.quality,
+      qualityNum: qualityNum,
       url: format.url,
-      type: format.type,
-      extension: format.ext,
+      type: format.type || 'video/mp4',
+      extension: format.ext || 'mp4',
       filesize: format.filesize || 'unknown',
       isPremium: isPremium,
       hasAudio: format.hasAudio || false,
       isVideoOnly: format.isVideoOnly || false,
-      isAudioOnly: format.isAudioOnly || false
+      isAudioOnly: format.isAudioOnly || false,
+      isMergedFormat: false
     };
   });
 
-  // ========================================
-  // STEP 6: SET DEFAULT TO 360P (FREE)
-  // ========================================
-  const defaultFormat = qualityOptions.find(f =>
-    !f.isAudioOnly && f.qualityNum === 360
-  ) || qualityOptions.find(f => !f.isAudioOnly) || qualityOptions[0];
+  // Sort: lower quality first, audio at end
+  qualityOptions.sort((a, b) => {
+    if (a.isAudioOnly && !b.isAudioOnly) return 1;
+    if (!a.isAudioOnly && b.isAudioOnly) return -1;
+    return a.qualityNum - b.qualityNum;
+  });
 
-  // Build result
+  // ========================================
+  // STEP 5: AUDIO MERGING FOR VIDEO-ONLY FORMATS
+  // ========================================
+  const mergedFormats = [];
+  const availableAudio = qualityOptions.filter(f => f.isAudioOnly);
+
+  qualityOptions.forEach(format => {
+    if (format.isVideoOnly && availableAudio.length > 0) {
+      // Find compatible audio
+      const compatibleAudio = audioMergerService.findCompatibleAudio(format, availableAudio);
+
+      if (compatibleAudio) {
+        console.log(`🎵 Creating merged format for ${format.quality}`);
+
+        const mergedFormat = {
+          ...format,
+          url: `MERGE:${format.url}:${compatibleAudio.url}`,
+          hasAudio: true,
+          isVideoOnly: false,
+          isMergedFormat: true,
+          originalVideoUrl: format.url,
+          audioUrl: compatibleAudio.url,
+          audioQuality: compatibleAudio.quality,
+          isPremium: format.isPremium // Keep premium status
+        };
+
+        mergedFormats.push(mergedFormat);
+      } else {
+        mergedFormats.push(format);
+      }
+    } else {
+      mergedFormats.push(format);
+    }
+  });
+
+  // ========================================
+  // STEP 6: SELECT DEFAULT (360p FREE)
+  // ========================================
+  const defaultFormat = mergedFormats.find(f =>
+    !f.isAudioOnly && f.qualityNum === CONFIG.FREE_TIER_MAX
+  ) || mergedFormats.find(f => !f.isAudioOnly) || mergedFormats[0];
+
+  // ========================================
+  // STEP 7: BUILD FINAL RESULT
+  // ========================================
   const result = {
-    title: info.title,
-    thumbnail: info.thumbnail,
-    duration: info.duration,
+    success: true,
+    platform: 'youtube',
+    title: data.title || 'YouTube Video',
+    thumbnail: data.thumbnail || `https://img.youtube.com/vi/${extractVideoId(url)}/hqdefault.jpg`,
+    duration: data.duration || 0,
+    uploader: data.uploader,
+    uploaderUrl: data.uploaderUrl,
+    uploaderAvatar: data.uploaderAvatar,
+    uploadDate: data.uploadDate,
+    description: data.description,
+    views: data.views,
+    likes: data.likes,
     isShorts: isShorts,
-    formats: qualityOptions,
-    allFormats: qualityOptions,
+    formats: mergedFormats,
+    allFormats: mergedFormats,
     url: defaultFormat.url,
     selectedQuality: defaultFormat,
-    audioGuaranteed: defaultFormat.hasAudio
+    audioGuaranteed: defaultFormat.hasAudio || defaultFormat.isMergedFormat
   };
 
-  console.log(`✅ YouTube service completed with ${qualityOptions.length} quality options`);
-  console.log(`🎯 Default quality: ${defaultFormat.quality} (${defaultFormat.isPremium ? '💰 Premium' : '✅ Free'})`);
+  console.log(`✅ YouTube service completed successfully`);
+  console.log(`🎯 Default: ${defaultFormat.quality} (${defaultFormat.isPremium ? '💰 Premium' : '✅ Free'})`);
 
   return result;
 }
 
-/**
- * Fallback: vidfly.ai API
- */
-async function fetchWithVidFlyApi(url, attemptNum) {
-  try {
-    const axios = require("axios");
-    const timeout = 30000;
+// ========================================
+// HELPER FUNCTIONS
+// ========================================
+function extractQualityNumber(label) {
+  if (!label) return 0;
 
-    const res = await axios.get(
-      "https://api.vidfly.ai/api/media/youtube/download",
-      {
-        params: { url },
-        headers: {
-          accept: "*/*",
-          "content-type": "application/json",
-          "x-app-name": "vidfly-web",
-          "User-Agent": getRandomUserAgent(),
-        },
-        timeout: timeout,
-      }
-    );
+  // Match patterns like "1080p", "720p60", etc.
+  const match = label.match(/(\d{3,4})p/);
+  if (match) return parseInt(match[1]);
 
-    const data = res.data?.data;
-    if (!data || !data.items || !data.title) {
-      throw new Error("Invalid response from YouTube downloader API");
-    }
+  // Handle 4K, 2K
+  if (label.includes('2160') || label.includes('4K')) return 2160;
+  if (label.includes('1440') || label.includes('2K')) return 1440;
+  if (label.includes('1080')) return 1080;
+  if (label.includes('720')) return 720;
+  if (label.includes('480')) return 480;
+  if (label.includes('360')) return 360;
+  if (label.includes('240')) return 240;
+  if (label.includes('144')) return 144;
 
-    // Transform vidfly data to match our structure
-    const transformedInfo = {
-      title: data.title,
-      thumbnail: data.cover,
-      duration: data.duration,
-      formats: data.items.map(item => ({
-        url: item.url,
-        height: parseInt(item.label) || 0,
-        format_note: item.label,
-        ext: item.ext || 'mp4',
-        filesize: item.filesize,
-        vcodec: item.label?.includes('video only') ? 'avc1' : 'avc1',
-        acodec: item.label?.includes('audio only') ? 'none' : 'mp4a'
-      }))
-    };
-
-    return processYouTubeData(transformedInfo, url);
-  } catch (err) {
-    console.error(`❌ Vidfly API error:`, err.message);
-    throw new Error(`YouTube download failed: ${err.message}`);
+  // Audio formats
+  if (label.includes('kbps') || label.includes('Audio')) {
+    const bitrateMatch = label.match(/(\d+)kbps/);
+    return bitrateMatch ? parseInt(bitrateMatch[1]) * 1000 : 99999;
   }
+
+  return 0;
 }
 
-/**
- * Get random user agent
- */
 function getRandomUserAgent() {
-  const userAgents = [
+  const agents = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Safari/605.1.15',
-    'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15',
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
   ];
-  return userAgents[Math.floor(Math.random() * userAgents.length)];
+  return agents[Math.floor(Math.random() * agents.length)];
 }
 
-module.exports = { fetchYouTubeData };
+// ========================================
+// EXPORTS
+// ========================================
+module.exports = {
+  fetchYouTubeData,
+  // Exported for testing
+  extractVideoId,
+  normalizeYouTubeUrl
+};
