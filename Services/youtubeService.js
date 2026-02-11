@@ -1,282 +1,222 @@
-const { spawn } = require('child_process');
+'use strict';
 
-console.log("🍪 Cookies path:", process.env.YTDLP_COOKIES);
+const { Innertube, UniversalCache } = require('youtubei.js');
 
-function runYtDlp(args, { timeoutMs = 60000 } = {}) {
-  return new Promise((resolve, reject) => {
-    const p = spawn('yt-dlp', args, {
-      stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env }, // ✅ ensures YTDLP_COOKIES/YTDLP_PROXY are passed
-    });
+// ─── Singleton: create once and reuse across requests ────────────────────────
+let _innertube = null;
 
-    let out = '';
-    let err = '';
+async function getInnertube() {
+  if (_innertube) return _innertube;
 
-    const timer = setTimeout(() => {
-      p.kill('SIGKILL');
-      reject(new Error('Request timeout'));
-    }, timeoutMs);
+  _innertube = await Innertube.create({
+    cache: new UniversalCache(true, '/tmp/youtubei-cache'),
 
-    p.stdout.on('data', d => (out += d.toString('utf8')));
-    p.stderr.on('data', d => (err += d.toString('utf8')));
-
-    p.on('error', (e) => {
-      clearTimeout(timer);
-      reject(e);
-    });
-
-    p.on('close', code => {
-      clearTimeout(timer);
-      if (code === 0) return resolve({ stdout: out, stderr: err });
-      reject(new Error(err.trim() || `yt-dlp exited with code ${code}`));
-    });
+    client_type: 'ANDROID',
+    generate_session_locally: true,
   });
+
+  return _innertube;
 }
 
-class YouTubeDownloader {
-  constructor() {
-    this.maxBuffer = 50 * 1024 * 1024; // kept for compatibility, not used by spawn
-  }
-
-  extractYouTubeId(url) {
-    try {
-      if (url.includes('youtu.be/')) {
-        return url.split('youtu.be/')[1]?.split(/[?&/#]/)[0];
-      }
-
-      const urlObj = new URL(url);
-      let videoId = urlObj.searchParams.get('v');
-      if (videoId && videoId.length === 11) return videoId;
-
-      const pathname = urlObj.pathname;
-      if (pathname.includes('/shorts/') || pathname.includes('/embed/')) {
-        return pathname.split('/').pop()?.split(/[?&/#]/)[0];
-      }
-
-      return null;
-    } catch {
-      const regex = /(?:v=|\/)([0-9A-Za-z_-]{11})/;
-      const match = String(url).match(regex);
-      return match ? match[1] : null;
+// ─── ID extractor (unchanged from your original) ─────────────────────────────
+function extractVideoId(url) {
+  try {
+    if (url.includes('youtu.be/')) {
+      return url.split('youtu.be/')[1]?.split(/[?&/#]/)[0];
     }
-  }
-
-  async fetchYouTubeData(url) {
-    const videoId = this.extractYouTubeId(url);
-    if (!videoId) throw new Error('Invalid YouTube URL');
-
-    console.log(`🎬 Processing YouTube video: ${videoId}`);
-
-    try {
-      const args = [
-        '--dump-single-json',
-        '--no-download',          // ✅ IMPORTANT: we only want metadata+formats (no format selection)
-        '--no-playlist',
-        '--no-warnings',
-        '--verbose',              // ✅ TEMP: helps confirm cookies/proxy in logs
-
-        '--socket-timeout', '15',
-        '--retries', '2',
-        '--extractor-retries', '2',
-
-        '--extractor-args', 'youtube:player_client=android,web,mweb',
-
-        '--user-agent',
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36',
-        '--add-header', 'Accept-Language:en-US,en;q=0.9',
-        '--add-header', 'DNT:1',
-        '--add-header', 'Connection:keep-alive',
-      ];
-
-      if (process.env.YTDLP_PROXY) {
-        args.push('--proxy', process.env.YTDLP_PROXY);
-      }
-
-      if (process.env.YTDLP_COOKIES) {
-        args.push('--cookies', process.env.YTDLP_COOKIES);
-      }
-
-      // Add URL last
-      args.push(url);
-
-      // ✅ log final args INCLUDING url + cookies/proxy
-      console.log('🧪 yt-dlp args:', args);
-
-      const { stdout } = await runYtDlp(args, { timeoutMs: 60000 });
-
-      const info = JSON.parse(stdout);
-      const allFormats = info.formats || [];
-
-      console.log(`📊 Found ${allFormats.length} total formats`);
-
-      // VIDEO FORMATS: Must have BOTH video AND audio
-      const videoWithAudio = allFormats.filter(f =>
-        f.vcodec && f.vcodec !== 'none' &&
-        f.acodec && f.acodec !== 'none' &&
-        f.height &&
-        f.url &&
-        !f.is_live
-      );
-
-      // AUDIO FORMATS: Audio only, NO video
-      const audioOnly = allFormats.filter(f =>
-        (!f.vcodec || f.vcodec === 'none') &&
-        f.acodec && f.acodec !== 'none' &&
-        f.url &&
-        !f.is_live
-      );
-
-      console.log(`🎥 Video+Audio formats: ${videoWithAudio.length}`);
-      console.log(`🎵 Audio-only formats: ${audioOnly.length}`);
-
-      const videoQualities = [];
-      const uniqueHeights = new Set();
-
-      videoWithAudio
-        .sort((a, b) => (b.height || 0) - (a.height || 0))
-        .forEach(format => {
-          const height = format.height;
-          if (uniqueHeights.has(height) || height < 144) return;
-          uniqueHeights.add(height);
-
-          videoQualities.push({
-            quality: `${height}p`,
-            qualityNum: height,
-            url: format.url,
-            type: format.ext || 'mp4',
-            extension: format.ext || 'mp4',
-            filesize: format.filesize || format.filesize_approx || 'unknown',
-            fps: format.fps || 30,
-            hasAudio: true,
-            hasVideo: true,
-            isAudioOnly: false,
-            isPremium: height > 360,
-            needsMerge: false,
-            bitrate: format.tbr || format.vbr || 0,
-          });
-        });
-
-      const audioQualities = [];
-
-      audioOnly
-        .sort((a, b) => (b.abr || b.tbr || 0) - (a.abr || a.tbr || 0))
-        .slice(0, 3)
-        .forEach(format => {
-          const bitrate = Math.round(format.abr || format.tbr || 128);
-
-          audioQualities.push({
-            quality: `${bitrate}kbps Audio`,
-            qualityNum: 0,
-            url: format.url,
-            type: format.ext || 'm4a',
-            extension: format.ext || 'm4a',
-            filesize: format.filesize || format.filesize_approx || 'unknown',
-            hasAudio: true,
-            hasVideo: false,
-            isAudioOnly: true,
-            isPremium: bitrate > 128,
-            needsMerge: false,
-            bitrate: bitrate,
-          });
-        });
-
-      const qualityOptions = [
-        ...videoQualities.sort((a, b) => b.qualityNum - a.qualityNum),
-        ...audioQualities
-      ];
-
-      const defaultQuality =
-        videoQualities.find(q => q.qualityNum === 360) ||
-        videoQualities[0] ||
-        qualityOptions[0];
-
-      if (!defaultQuality || qualityOptions.length === 0) {
-        throw new Error('No download formats available');
-      }
-
-      return {
-        title: info.title || 'Unknown',
-        thumbnail: info.thumbnail || `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`,
-        duration: parseInt(info.duration) || 0,
-        description: info.description || '',
-        author: info.uploader || info.channel || 'Unknown',
-        viewCount: parseInt(info.view_count) || 0,
-
-        formats: qualityOptions,
-        allFormats: qualityOptions,
-
-        videoFormats: videoQualities,
-        audioFormats: audioQualities,
-
-        url: defaultQuality.url,
-        selectedQuality: defaultQuality,
-
-        videoId: videoId,
-        isShorts: url.includes('/shorts/'),
-
-        metadata: {
-          videoId: videoId,
-          author: info.uploader || 'Unknown',
-          uploadDate: info.upload_date || null,
-          category: info.categories?.[0] || null,
-        },
-
-        _debug: {
-          totalFormats: allFormats.length,
-          videoWithAudio: videoWithAudio.length,
-          audioOnly: audioOnly.length,
-          videoQualities: videoQualities.length,
-          audioQualities: audioQualities.length,
-          defaultQuality: defaultQuality.quality,
-        }
-      };
-
-    } catch (err) {
-      console.error('❌ YouTube fetch error:', err.message);
-
-      const msg = String(err.message || '');
-
-      // ✅ IMPORTANT: this is NOT "video removed/private"
-      if (msg.includes('Requested format is not available')) {
-        throw new Error(
-          "YouTube returned formats but yt-dlp couldn't resolve a forced -f selection. (Fix: do not pass -f during JSON extraction.)"
-        );
-      }
-
-      if (
-        msg.includes("Sign in to confirm you’re not a bot") ||
-        msg.includes("Sign in to confirm you're not a bot") ||
-        msg.toLowerCase().includes('not a bot')
-      ) {
-        throw new Error(
-          "YouTube blocked this server IP as suspicious. Cookies may help, but often you need YTDLP_PROXY (residential/clean egress)."
-        );
-      }
-
-      if (msg.toLowerCase().includes('video unavailable') || msg.toLowerCase().includes('has been removed')) {
-        throw new Error('Video not found or has been removed');
-      }
-
-      if (msg.toLowerCase().includes('private video')) {
-        throw new Error('Video is private or age-restricted');
-      }
-
-      if (msg.includes('Request timeout')) {
-        throw new Error('Request timeout');
-      }
-
-      throw new Error(`YouTube download failed: ${msg}`);
+    const urlObj = new URL(url);
+    const v = urlObj.searchParams.get('v');
+    if (v && v.length === 11) return v;
+    const p = urlObj.pathname;
+    if (p.includes('/shorts/') || p.includes('/embed/')) {
+      return p.split('/').pop()?.split(/[?&/#]/)[0];
     }
+  } catch {
+    const m = String(url).match(/(?:v=|\/)([0-9A-Za-z_-]{11})/);
+    return m ? m[1] : null;
   }
+  return null;
 }
 
-const youtubeDownloader = new YouTubeDownloader();
+// ─── Format helpers ───────────────────────────────────────────────────────────
+
+/**
+ * InnerTube returns two arrays:
+ *   formats          → muxed (video+audio together), usually up to 360p
+ *   adaptive_formats → separate video-only OR audio-only streams
+ *
+ * For a downloader that returns direct URLs we want:
+ *   1. Muxed streams  → ready to download immediately, no merge needed
+ *   2. Audio-only     → for music downloads
+ *
+ * We intentionally skip video-only adaptive streams because merging requires
+ * FFmpeg on the server. If you add FFmpeg later, uncomment the video-only block.
+ */
+function buildQualityOptions(streamingData) {
+  const videoQualities = [];
+  const audioQualities = [];
+  const seenHeights = new Set();
+
+  // ── 1. Muxed streams (have both video+audio, direct download) ─────────────
+  const muxed = streamingData.formats ?? [];
+
+  muxed
+    .filter(f => f.url && f.has_video && f.has_audio && f.height)
+    .sort((a, b) => (b.height ?? 0) - (a.height ?? 0))
+    .forEach(f => {
+      const h = f.height;
+      if (seenHeights.has(h) || h < 144) return;
+      seenHeights.add(h);
+
+      videoQualities.push({
+        quality:      `${h}p`,
+        qualityNum:   h,
+        url:          f.url,
+        type:         f.mime_type?.split(';')[0]?.split('/')[1] || 'mp4',
+        extension:    'mp4',
+        filesize:     f.content_length ? Number(f.content_length) : 'unknown',
+        fps:          f.fps ?? 30,
+        hasAudio:     true,
+        hasVideo:     true,
+        isAudioOnly:  false,
+        needsMerge:   false,
+        bitrate:      f.bitrate ?? 0,
+        itag:         f.itag,
+      });
+    });
+
+  // ── 2. Audio-only adaptive streams ────────────────────────────────────────
+  const adaptive = streamingData.adaptive_formats ?? [];
+
+  adaptive
+    .filter(f => f.url && !f.has_video && f.has_audio)
+    .sort((a, b) => (b.audio_quality === 'AUDIO_QUALITY_HIGH' ? 1 : 0) -
+                    (a.audio_quality === 'AUDIO_QUALITY_HIGH' ? 1 : 0) ||
+                    (b.bitrate ?? 0) - (a.bitrate ?? 0))
+    .slice(0, 3)
+    .forEach(f => {
+      const kbps = Math.round((f.bitrate ?? 128000) / 1000);
+      const ext  = f.mime_type?.includes('webm') ? 'webm' : 'm4a';
+
+      audioQualities.push({
+        quality:      `${kbps}kbps Audio`,
+        qualityNum:   0,
+        url:          f.url,
+        type:         ext,
+        extension:    ext,
+        filesize:     f.content_length ? Number(f.content_length) : 'unknown',
+        hasAudio:     true,
+        hasVideo:     false,
+        isAudioOnly:  true,
+        needsMerge:   false,
+        bitrate:      kbps,
+        itag:         f.itag,
+      });
+    });
+
+  return { videoQualities, audioQualities };
+}
+
+// ─── Main export (same signature as your old service) ────────────────────────
 
 async function fetchYouTubeData(url) {
-  return youtubeDownloader.fetchYouTubeData(url);
+  const videoId = extractVideoId(url);
+  if (!videoId) throw new Error('Invalid YouTube URL');
+
+  console.log(`🎬 [youtubei.js] Processing: ${videoId}`);
+
+  let yt;
+  try {
+    yt = await getInnertube();
+  } catch (e) {
+    throw new Error(`Failed to initialise InnerTube session: ${e.message}`);
+  }
+
+  let info;
+  try {
+    // getBasicInfo is faster than getInfo (skips recommendations/comments)
+    info = await yt.getBasicInfo(videoId, 'ANDROID');
+  } catch (e) {
+    const msg = String(e.message ?? e);
+    console.error('❌ [youtubei.js] getBasicInfo error:', msg);
+
+    if (msg.toLowerCase().includes('private') || msg.includes('LOGIN_REQUIRED')) {
+      throw new Error('Video is private or age-restricted');
+    }
+    if (msg.toLowerCase().includes('unavailable') || msg.includes('removed')) {
+      throw new Error('Video not found or has been removed');
+    }
+    if (msg.includes('429') || msg.toLowerCase().includes('too many requests')) {
+      throw new Error('YouTube rate limit hit. Try again in a moment.');
+    }
+
+    throw new Error(`YouTube fetch failed: ${msg}`);
+  }
+
+  const streamingData = info.streaming_data;
+  if (!streamingData) {
+    throw new Error('No streaming data returned — video may be restricted or region-locked');
+  }
+
+  const details = info.basic_info;
+
+  const { videoQualities, audioQualities } = buildQualityOptions(streamingData);
+
+  console.log(`🎥 Video (muxed): ${videoQualities.length}  🎵 Audio-only: ${audioQualities.length}`);
+
+  if (videoQualities.length === 0 && audioQualities.length === 0) {
+    throw new Error('No downloadable formats found for this video');
+  }
+
+  const qualityOptions = [
+    ...videoQualities.sort((a, b) => b.qualityNum - a.qualityNum),
+    ...audioQualities,
+  ];
+
+  const defaultQuality =
+    videoQualities.find(q => q.qualityNum === 360) ||
+    videoQualities[0] ||
+    audioQualities[0];
+
+  const thumbnail =
+    details.thumbnail?.[0]?.url ||
+    `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`;
+
+  return {
+    title:           details.title   || 'Unknown',
+    thumbnail,
+    duration:        details.duration ?? 0,
+    description:     details.short_description || '',
+    author:          details.author || 'Unknown',
+    viewCount:       details.view_count ?? 0,
+
+    formats:         qualityOptions,
+    allFormats:      qualityOptions,
+    videoFormats:    videoQualities,
+    audioFormats:    audioQualities,
+
+    url:             defaultQuality.url,
+    selectedQuality: defaultQuality,
+
+    videoId,
+    isShorts: url.includes('/shorts/'),
+
+    metadata: {
+      videoId,
+      author:  details.author || 'Unknown',
+    },
+
+    _debug: {
+      totalMuxed:     (streamingData.formats ?? []).length,
+      totalAdaptive:  (streamingData.adaptive_formats ?? []).length,
+      videoQualities: videoQualities.length,
+      audioQualities: audioQualities.length,
+      defaultQuality: defaultQuality.quality,
+      client:         'ANDROID (InnerTube)',
+    },
+  };
 }
 
 module.exports = {
   fetchYouTubeData,
-  YouTubeDownloader,
 };
