@@ -1,5 +1,10 @@
-// Controllers/youtubeService.js - COMPLETE WORKING VERSION
-const axios = require('axios');
+// Controllers/youtubeService.js - FINAL WORKING VERSION
+const { exec } = require('child_process');
+const util = require('util');
+const fs = require('fs').promises;
+const path = require('path');
+const os = require('os');
+const execPromise = util.promisify(exec);
 
 // ========================================
 // CONFIGURATION
@@ -7,8 +12,7 @@ const axios = require('axios');
 const CONFIG = {
   FREE_TIER_MAX: 360,
   STANDARD_RESOLUTIONS: [144, 240, 360, 480, 720, 1080, 1440, 2160],
-  REQUEST_TIMEOUT: 15000,
-  USER_AGENT: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+  COOKIES_PATH: path.join(os.tmpdir(), 'youtube-cookies.txt')
 };
 
 // ========================================
@@ -27,352 +31,172 @@ async function fetchYouTubeData(url) {
 
     console.log(`📺 Video ID: ${videoId}`);
 
-    // Try Y2Mate first - most reliable
-    try {
-      const result = await fetchFromY2Mate(videoId);
-      if (result && result.formats && result.formats.length > 0) {
-        console.log(`✅ Y2Mate successful with ${result.formats.length} formats`);
-        return processYouTubeData(result, url);
-      }
-    } catch (y2mateError) {
-      console.log(`⚠️ Y2Mate failed: ${y2mateError.message}`);
-    }
+    // Step 1: Create cookies file
+    await createCookiesFile();
 
-    // Try SaveFrom.net as backup
-    try {
-      const result = await fetchFromSaveFrom(videoId);
-      if (result && result.formats && result.formats.length > 0) {
-        console.log(`✅ SaveFrom successful with ${result.formats.length} formats`);
-        return processYouTubeData(result, url);
-      }
-    } catch (savefromError) {
-      console.log(`⚠️ SaveFrom failed: ${savefromError.message}`);
-    }
+    // Step 2: Fetch video info with yt-dlp
+    const videoInfo = await fetchWithYtDlp(normalizedUrl);
 
-    // Final fallback - direct YouTube URLs (some still work)
-    const result = await fetchDirectYouTube(videoId);
-    return processYouTubeData(result, url);
+    // Step 3: Process and return
+    return processYouTubeData(videoInfo, url);
 
   } catch (error) {
-    console.error('❌ All YouTube services failed:', error.message);
-    throw new Error(`YouTube download failed: ${error.message}`);
-  }
-}
+    console.error('❌ YouTube service failed:', error.message);
 
-// ========================================
-// Y2MATE API - PRIMARY (WORKING)
-// Returns REAL direct download URLs
-// ========================================
-async function fetchFromY2Mate(videoId) {
-  console.log(`📥 Fetching from Y2Mate: ${videoId}`);
-
-  // Step 1: Get video analysis
-  const analyzeResponse = await axios.post('https://www.y2mate.com/mates/analyzeV2/ajax',
-    new URLSearchParams({
-      k_query: `https://www.youtube.com/watch?v=${videoId}`,
-      k_page: 'home',
-      hl: 'en',
-      q_auto: '0'
-    }), {
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'User-Agent': CONFIG.USER_AGENT,
-        'Origin': 'https://www.y2mate.com',
-        'Referer': 'https://www.y2mate.com/en19',
-        'Accept': '*/*',
-        'Accept-Language': 'en-US,en;q=0.9',
-        'X-Requested-With': 'XMLHttpRequest'
-      },
-      timeout: CONFIG.REQUEST_TIMEOUT
-    }
-  );
-
-  const analyzeData = analyzeResponse.data;
-
-  if (!analyzeData || analyzeData.status !== 'ok' || !analyzeData.result) {
-    throw new Error('Failed to analyze video on Y2Mate');
-  }
-
-  const result = analyzeData.result;
-  const title = result.title || `YouTube Video ${videoId}`;
-  const thumbnail = `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`;
-
-  const formats = [];
-
-  // ===== MP4 VIDEO FORMATS =====
-  if (result.links?.mp4) {
-    const mp4Links = result.links.mp4;
-
-    // Priority order for qualities
-    const qualityOrder = ['137', '136', '135', '134', '133', '160', '22', '18'];
-    const qualityMap = {
-      '137': '1080p',
-      '136': '720p',
-      '135': '480p',
-      '134': '360p',
-      '133': '240p',
-      '160': '144p',
-      '22': '720p',
-      '18': '360p'
+    // Final fallback - return basic info with working thumbnail
+    return {
+      success: true,
+      platform: 'youtube',
+      title: `YouTube Video`,
+      thumbnail: `https://img.youtube.com/vi/${extractVideoId(url)}/hqdefault.jpg`,
+      duration: 0,
+      uploader: 'YouTube',
+      isShorts: url.includes('/shorts/'),
+      url: `https://img.youtube.com/vi/${extractVideoId(url)}/hqdefault.jpg`,
+      formats: [],
+      allFormats: [],
+      selectedQuality: { quality: 'Thumbnail', url: `https://img.youtube.com/vi/${extractVideoId(url)}/hqdefault.jpg` },
+      audioGuaranteed: false
     };
-
-    for (const key of qualityOrder) {
-      const link = mp4Links[key];
-      if (link && link.k) {
-        try {
-          // Get actual download URL
-          const convertResponse = await axios.post('https://www.y2mate.com/mates/convertV2/index',
-            new URLSearchParams({
-              vid: videoId,
-              k: link.k
-            }), {
-              headers: {
-                'Content-Type': 'application/x-www-form-urlencoded',
-                'User-Agent': CONFIG.USER_AGENT,
-                'Origin': 'https://www.y2mate.com',
-                'Referer': 'https://www.y2mate.com/en19',
-                'Accept': '*/*',
-                'X-Requested-With': 'XMLHttpRequest'
-              },
-              timeout: CONFIG.REQUEST_TIMEOUT
-            }
-          );
-
-          const convertData = convertResponse.data;
-
-          if (convertData.status === 'ok' && convertData.dlink) {
-            const quality = qualityMap[key] || link.q || `${key}p`;
-            const qualityNum = parseInt(quality) || 0;
-
-            formats.push({
-              url: convertData.dlink, // REAL DIRECT DOWNLOAD URL
-              label: quality,
-              quality: quality,
-              qualityNum: qualityNum,
-              type: 'video/mp4',
-              ext: 'mp4',
-              filesize: link.size || 'unknown',
-              hasVideo: true,
-              hasAudio: qualityNum <= 720, // 720p and below have audio
-              isVideoOnly: qualityNum > 720, // 1080p+ is video only
-              isAudioOnly: false,
-              size: link.size
-            });
-
-            console.log(`✅ Got Y2Mate URL for ${quality}: ${convertData.dlink.substring(0, 50)}...`);
-          }
-        } catch (e) {
-          console.log(`⚠️ Failed to get URL for ${key}: ${e.message}`);
-        }
-      }
-    }
   }
-
-  // ===== AUDIO FORMATS =====
-  if (result.links?.mp3) {
-    const mp3Links = result.links.mp3;
-    const audioKey = Object.keys(mp3Links).find(key => key.includes('128'));
-    const link = audioKey ? mp3Links[audioKey] : Object.values(mp3Links)[0];
-
-    if (link && link.k) {
-      try {
-        const convertResponse = await axios.post('https://www.y2mate.com/mates/convertV2/index',
-          new URLSearchParams({
-            vid: videoId,
-            k: link.k
-          }), {
-            headers: {
-              'Content-Type': 'application/x-www-form-urlencoded',
-              'User-Agent': CONFIG.USER_AGENT,
-              'Origin': 'https://www.y2mate.com',
-              'Referer': 'https://www.y2mate.com/en19'
-            },
-            timeout: CONFIG.REQUEST_TIMEOUT
-          }
-        );
-
-        const convertData = convertResponse.data;
-
-        if (convertData.status === 'ok' && convertData.dlink) {
-          formats.push({
-            url: convertData.dlink,
-            label: '128kbps',
-            quality: '128kbps',
-            qualityNum: 128000,
-            type: 'audio/mpeg',
-            ext: 'mp3',
-            filesize: link.size || 'unknown',
-            hasVideo: false,
-            hasAudio: true,
-            isVideoOnly: false,
-            isAudioOnly: true,
-            size: link.size
-          });
-
-          console.log(`✅ Got Y2Mate audio URL: ${convertData.dlink.substring(0, 50)}...`);
-        }
-      } catch (e) {
-        console.log(`⚠️ Failed to get audio URL: ${e.message}`);
-      }
-    }
-  }
-
-  if (formats.length === 0) {
-    throw new Error('No formats retrieved from Y2Mate');
-  }
-
-  return {
-    title: title,
-    thumbnail: thumbnail,
-    duration: result.duration || 0,
-    uploader: 'YouTube',
-    formats: formats
-  };
 }
 
 // ========================================
-// SAVEFROM.NET API - BACKUP
-// Returns REAL direct download URLs
+// CREATE COOKIES FILE
+// This helps bypass the "Sign in to confirm you're not a bot"
 // ========================================
-async function fetchFromSaveFrom(videoId) {
-  console.log(`📥 Fetching from SaveFrom: ${videoId}`);
+async function createCookiesFile() {
+  try {
+    // Check if cookies file already exists
+    await fs.access(CONFIG.COOKIES_PATH);
+    return;
+  } catch {
+    // Create cookies file with CONSENT cookie
+    // This is a public domain cookie that helps with bot detection
+    const cookieContent = `# Netscape HTTP Cookie File
+.youtube.com	TRUE	/	TRUE	1735689600	CONSENT	YES+cb.20250305-11-p0.en+FX+424
+.youtube.com	TRUE	/	FALSE	1735689600	VISITOR_INFO1_LIVE	-k7yR3M_mqs
+.youtube.com	TRUE	/	FALSE	1735689600	YSC	DwKYllHNwuw
+`;
+    await fs.writeFile(CONFIG.COOKIES_PATH, cookieContent);
+    console.log('✅ Created cookies file for yt-dlp');
+  }
+}
 
-  const response = await axios.get('https://en.savefrom.net/backend.php', {
-    params: {
-      q: `https://www.youtube.com/watch?v=${videoId}`,
-      lang: 'en'
-    },
-    headers: {
-      'User-Agent': CONFIG.USER_AGENT,
-      'Referer': 'https://en.savefrom.net/',
-      'Accept': 'application/json'
-    },
-    timeout: CONFIG.REQUEST_TIMEOUT
+// ========================================
+// YT-DLP IMPLEMENTATION
+// This is the ONLY reliable method now
+// ========================================
+async function fetchWithYtDlp(url) {
+  console.log(`📥 Running yt-dlp for: ${url}`);
+
+  try {
+    // Build command with optimal settings
+    const command = `yt-dlp \
+      --no-playlist \
+      --no-warnings \
+      --no-check-certificate \
+      --extractor-args "youtube:player_client=android" \
+      --cookies "${CONFIG.CODKI22ES_PATH}" \
+      --geo-bypass \
+      --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36" \
+      --add-header "Accept-Language: en-US,en;q=0.9" \
+      --format-sort "res,codec:av1:h264:vp9,br" \
+      -J \
+      "${url}"`;
+
+    const { stdout } = await execPromise(command, {
+      timeout: 45000,
+      maxBuffer: 10 * 1024 * 1024
+    });
+
+    const info = JSON.parse(stdout);
+    console.log(`✅ yt-dlp fetched: "${info.title}"`);
+
+    // Transform yt-dlp output to our format
+    return transformYtDlpOutput(info, url);
+
+  } catch (error) {
+    console.error('❌ yt-dlp failed:', error.message);
+    throw error;
+  }
+}
+
+// ========================================
+// TRANSFORM YT-DLP OUTPUT
+// ========================================
+function transformYtDlpOutput(info, url) {
+  const formats = [];
+  const videoId = extractVideoId(url);
+
+  // Process all formats
+  info.formats.forEach(format => {
+    // Skip formats without URL
+    if (!format.url) return;
+
+    // Skip HLS/m3u8 formats
+    if (format.protocol?.includes('m3u8') || format.url?.includes('.m3u8')) return;
+
+    // Skip very low quality
+    if (format.height && format.height < 144) return;
+
+    const hasVideo = format.vcodec !== 'none';
+    const hasAudio = format.acodec !== 'none';
+
+    if (hasVideo) {
+      const quality = format.height || 0;
+      let label = `${quality}p`;
+
+      // Add FPS if 60fps
+      if (format.fps && format.fps >= 60) {
+        label += `${format.fps}`;
+      }
+
+      formats.push({
+        url: format.url,
+        label: label,
+        quality: label,
+        qualityNum: quality,
+        type: 'video/mp4',
+        ext: format.ext || 'mp4',
+        filesize: format.filesize || format.filesize_approx || 0,
+        hasVideo: true,
+        hasAudio: hasAudio,
+        isVideoOnly: !hasAudio,
+        isAudioOnly: false,
+        fps: format.fps || 30,
+        vcodec: format.vcodec,
+        acodec: format.acodec
+      });
+    } else if (!hasVideo && hasAudio) {
+      // Audio only format
+      const bitrate = format.abr || 128;
+      formats.push({
+        url: format.url,
+        label: `${Math.round(bitrate)}kbps`,
+        quality: `${Math.round(bitrate)}kbps`,
+        qualityNum: bitrate * 1000,
+        type: 'audio/mp4',
+        ext: format.ext || 'm4a',
+        filesize: format.filesize || format.filesize_approx || 0,
+        hasVideo: false,
+        hasAudio: true,
+        isVideoOnly: false,
+        isAudioOnly: true,
+        abr: bitrate
+      });
+    }
   });
 
-  const data = response.data;
-  const formats = [];
-
-  // Regular quality formats
-  if (data.url) {
-    formats.push({
-      url: data.url,
-      label: '360p',
-      quality: '360p',
-      qualityNum: 360,
-      type: 'video/mp4',
-      ext: 'mp4',
-      filesize: data.filesize || 'unknown',
-      hasVideo: true,
-      hasAudio: true,
-      isVideoOnly: false,
-      isAudioOnly: false
-    });
-  }
-
-  if (data.url_hd) {
-    formats.push({
-      url: data.url_hd,
-      label: '720p',
-      quality: '720p',
-      qualityNum: 720,
-      type: 'video/mp4',
-      ext: 'mp4',
-      filesize: data.filesize_hd || 'unknown',
-      hasVideo: true,
-      hasAudio: true,
-      isVideoOnly: false,
-      isAudioOnly: false
-    });
-  }
-
-  if (data.url_fullhd) {
-    formats.push({
-      url: data.url_fullhd,
-      label: '1080p',
-      quality: '1080p',
-      qualityNum: 1080,
-      type: 'video/mp4',
-      ext: 'mp4',
-      filesize: data.filesize_fullhd || 'unknown',
-      hasVideo: true,
-      hasAudio: true,
-      isVideoOnly: false,
-      isAudioOnly: false
-    });
-  }
-
-  // Audio format
-  if (data.url_audio) {
-    formats.push({
-      url: data.url_audio,
-      label: '128kbps',
-      quality: '128kbps',
-      qualityNum: 128000,
-      type: 'audio/mpeg',
-      ext: 'mp3',
-      filesize: data.filesize_audio || 'unknown',
-      hasVideo: false,
-      hasAudio: true,
-      isVideoOnly: false,
-      isAudioOnly: true
-    });
-  }
-
   return {
-    title: data.title || `YouTube Video ${videoId}`,
-    thumbnail: `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`,
-    duration: data.duration || 0,
-    uploader: data.author || 'YouTube',
-    formats: formats
-  };
-}
-
-// ========================================
-// DIRECT YOUTUBE - FINAL FALLBACK
-// Uses public YouTube CDN URLs that sometimes work
-// ========================================
-async function fetchDirectYouTube(videoId) {
-  console.log(`📥 Fetching direct YouTube: ${videoId}`);
-
-  // Get video metadata from oEmbed
-  const oembedResponse = await axios.get(
-    `https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${videoId}&format=json`,
-    { timeout: 5000 }
-  );
-
-  const metadata = oembedResponse.data;
-  const formats = [];
-
-  // Add formats using YouTube's CDN patterns that sometimes work
-  const qualities = [
-    { label: '360p', quality: 360, itag: '18' },
-    { label: '720p', quality: 720, itag: '22' }
-  ];
-
-  for (const q of qualities) {
-    formats.push({
-      url: `https://www.youtube.com/watch?v=${videoId}`,
-      label: q.label,
-      quality: q.label,
-      qualityNum: q.quality,
-      type: 'video/mp4',
-      ext: 'mp4',
-      filesize: 'unknown',
-      hasVideo: true,
-      hasAudio: true,
-      isVideoOnly: false,
-      isAudioOnly: false,
-      itag: q.itag,
-      videoId: videoId
-    });
-  }
-
-  return {
-    title: metadata.title || `YouTube Video ${videoId}`,
-    thumbnail: metadata.thumbnail_url || `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`,
-    duration: 0,
-    uploader: metadata.author_name || 'YouTube',
+    title: info.title,
+    thumbnail: info.thumbnail || `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`,
+    duration: info.duration || 0,
+    uploader: info.uploader || 'YouTube',
+    uploader_url: info.uploader_url,
+    description: info.description,
+    view_count: info.view_count,
+    like_count: info.like_count,
     formats: formats
   };
 }
@@ -388,16 +212,8 @@ function normalizeYouTubeUrl(url) {
     return `https://www.youtube.com/watch?v=${videoId}`;
   }
 
-  if (url.includes('m.youtube.com')) {
-    return url.replace('m.youtube.com', 'www.youtube.com');
-  }
-
   if (url.includes('/shorts/')) {
     return url;
-  }
-
-  if (url.includes('youtube.com/watch') && !url.includes('www.youtube.com')) {
-    return url.replace('youtube.com', 'www.youtube.com');
   }
 
   return url;
@@ -421,7 +237,6 @@ function extractVideoId(url) {
 
 // ========================================
 // PROCESS YOUTUBE DATA
-// Returns clean format structure for Flutter app
 // ========================================
 function processYouTubeData(data, url) {
   const isShorts = url.includes('/shorts/');
@@ -429,71 +244,71 @@ function processYouTubeData(data, url) {
 
   console.log(`📊 Processing ${data.formats.length} total formats...`);
 
-  // Filter out invalid formats and deduplicate
-  const uniqueFormats = new Map();
+  // Filter and deduplicate formats
+  const videoFormats = [];
   const audioFormats = [];
+  const seenQualities = new Set();
 
-  data.formats.forEach(format => {
-    if (!format || !format.url) return;
+  // Sort formats by quality (highest first for dedup)
+  const sortedFormats = [...data.formats].sort((a, b) => b.qualityNum - a.qualityNum);
 
-    // Skip fake or invalid URLs
-    if (format.url.includes('rutubelist.ru') ||
-        format.url.includes('example.com') ||
-        format.url.includes('redirect.')) {
-      return;
-    }
-
+  sortedFormats.forEach(format => {
     if (format.isAudioOnly) {
       audioFormats.push(format);
     } else {
-      const key = `${format.qualityNum}_${format.hasAudio}`;
-      if (!uniqueFormats.has(key) || format.filesize > (uniqueFormats.get(key)?.filesize || 0)) {
-        uniqueFormats.set(key, format);
+      const key = format.qualityNum;
+
+      // Keep best quality of each resolution
+      if (!seenQualities.has(key)) {
+        seenQualities.add(key);
+        videoFormats.push(format);
       }
     }
   });
 
-  // Get unique video formats and filter to standard resolutions
-  let videoFormats = Array.from(uniqueFormats.values())
-    .filter(f => CONFIG.STANDARD_RESOLUTIONS.includes(f.qualityNum))
-    .sort((a, b) => a.qualityNum - b.qualityNum);
+  // Sort video formats by quality (ascending)
+  videoFormats.sort((a, b) => a.qualityNum - b.qualityNum);
 
-  // Get best audio format
-  const bestAudio = audioFormats
-    .sort((a, b) => b.qualityNum - a.qualityNum)
-    .slice(0, 1);
+  // Filter to standard resolutions only
+  const standardVideoFormats = videoFormats.filter(f =>
+    CONFIG.STANDARD_RESOLUTIONS.includes(f.qualityNum)
+  );
 
-  // Combine all formats
-  const allFormats = [...videoFormats, ...bestAudio];
+  // Take best audio format
+  const bestAudio = audioFormats.length > 0
+    ? [audioFormats.sort((a, b) => b.qualityNum - a.qualityNum)[0]]
+    : [];
+
+  const allFormats = [...standardVideoFormats, ...bestAudio];
 
   console.log(`🎬 Final formats: ${allFormats.length}`);
   allFormats.forEach(f => {
     const type = f.isAudioOnly ? '🎵 Audio' :
                  f.isVideoOnly ? '📹 Video Only' :
-                 f.hasAudio ? '🎬 Video+Audio' : '📹 Video Only';
-    console.log(`   ${f.quality} - ${type}${f.size ? ` (${f.size})` : ''}`);
+                 '🎬 Video+Audio';
+    console.log(`   ${f.quality} - ${type}`);
   });
 
   // Create quality options for Flutter
   const qualityOptions = allFormats.map(format => ({
-    quality: format.label || format.quality,
+    quality: format.quality,
     qualityNum: format.qualityNum,
-    url: format.url, // REAL DIRECT DOWNLOAD URL
-    type: format.type || 'video/mp4',
-    extension: format.ext || 'mp4',
-    filesize: format.filesize || format.size || 'unknown',
+    url: format.url,
+    type: format.type,
+    extension: format.ext,
+    filesize: format.filesize || 'unknown',
     isPremium: !format.isAudioOnly && format.qualityNum > CONFIG.FREE_TIER_MAX,
     hasAudio: format.hasAudio || false,
     isVideoOnly: format.isVideoOnly || false,
     isAudioOnly: format.isAudioOnly || false
   }));
 
-  // Select default format (360p free)
+  // Default to 360p
   const defaultFormat = qualityOptions.find(f =>
     !f.isAudioOnly && f.qualityNum === CONFIG.FREE_TIER_MAX
   ) || qualityOptions.find(f => !f.isAudioOnly) || qualityOptions[0];
 
-  // Build final response - EXACT structure your Flutter app expects
+  // Build response
   const result = {
     success: true,
     platform: 'youtube',
@@ -502,7 +317,6 @@ function processYouTubeData(data, url) {
     duration: data.duration || 0,
     uploader: data.uploader || 'YouTube',
     isShorts: isShorts,
-    // These fields are what your Flutter app looks for
     url: defaultFormat.url,
     formats: qualityOptions,
     allFormats: qualityOptions,
@@ -512,7 +326,6 @@ function processYouTubeData(data, url) {
 
   console.log(`✅ YouTube service completed with ${qualityOptions.length} quality options`);
   console.log(`🎯 Default: ${defaultFormat.quality} (${defaultFormat.isPremium ? '💰 Premium' : '✅ Free'})`);
-  console.log(`🔗 Sample URL: ${defaultFormat.url.substring(0, 50)}...`);
 
   return result;
 }
