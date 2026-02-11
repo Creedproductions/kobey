@@ -2,102 +2,82 @@
 
 /**
  * youtubeService.js — youtubei.js InnerTube API with multi-client fallback
- * 
- * Added support for:
- * - Cookie authentication to bypass age-restriction
- * - Better error handling for restricted content
- * - iOS client with cookies for age-restricted videos
+ *
+ * Fixes:
+ *  - Uses getInfo() correctly (getBasicInfo second arg is options, not client type)
+ *  - Handles ciphered formats (signatureCipher/cipher) by deciphering via session player
+ *  - Avoids empty location; uses proper default (US) and supports env overrides
+ *  - Adds optional cookie / visitor_data / po_token support via env (if you run authenticated)
+ *
+ * Env (optional):
+ *  - YT_LANG          (default: en)
+ *  - YT_LOCATION      (default: US)
+ *  - YT_VISITOR_DATA  (optional)
+ *  - YT_PO_TOKEN      (optional; session-bound attestation token)
+ *  - YT_COOKIE / YT_COOKIES (optional; auth cookies)
  */
 
 const { Innertube, UniversalCache } = require('youtubei.js');
-const fs = require('fs').promises;
-const path = require('path');
 
-// ─── Configuration ───────────────────────────────────────────
-const COOKIES_PATH = process.env.YT_COOKIES_PATH || '/tmp/yt-cookies.json';
-const CLIENT_ORDER = ['IOS', 'TV_EMBEDDED', 'ANDROID', 'WEB']; // Added WEB as last resort
+// ─── Singleton pool — one instance per client type ───────────────────────────
+const _pool = Object.create(null);
 
-// ─── Singleton pool — one instance per client type ──────────
-const _pool = {};
+const ENV = {
+  LANG: (process.env.YT_LANG || 'en').trim() || 'en',
+  LOCATION: (process.env.YT_LOCATION || 'US').trim() || 'US',
+  VISITOR_DATA: (process.env.YT_VISITOR_DATA || '').trim() || undefined,
+  PO_TOKEN: (process.env.YT_PO_TOKEN || '').trim() || undefined,
+  COOKIE: (process.env.YT_COOKIE || process.env.YT_COOKIES || '').trim() || undefined,
+};
 
-/**
- * Load cookies from file if they exist
- */
-async function loadCookies() {
-  try {
-    if (process.env.YT_COOKIES) {
-      // Direct cookie string from env
-      return JSON.parse(process.env.YT_COOKIES);
-    }
-    
-    const cookieFile = await fs.readFile(COOKIES_PATH, 'utf8');
-    return JSON.parse(cookieFile);
-  } catch (e) {
-    return null;
-  }
-}
+async function getClient(clientType = 'IOS') {
+  if (_pool[clientType]) return _pool[clientType];
 
-/**
- * Create InnerTube client with optional cookies
- */
-async function createInnerTubeClient(clientType, useCookies = false) {
-  const clientConfig = {
-    cache: new UniversalCache(true, `/tmp/ytjs-cache-${clientType}`),
+  console.log(`🔧 [youtubei] Creating InnerTube client: ${clientType}`);
+
+  // UniversalCache supports an optional path in newer versions; safe to pass. :contentReference[oaicite:3]{index=3}
+  const cacheDir = `/tmp/ytjs-cache-${clientType}`;
+
+  _pool[clientType] = await Innertube.create({
+    cache: new UniversalCache(true, cacheDir),
+
+    // Session config (docs defaults are sensible; don’t pass empty strings). :contentReference[oaicite:4]{index=4}
     client_type: clientType,
-    generate_session_locally: true,
-    location: '',
-    lang: 'en',
-  };
+    lang: ENV.LANG,
+    location: ENV.LOCATION,
+    visitor_data: ENV.VISITOR_DATA,
+    po_token: ENV.PO_TOKEN,
+    cookie: ENV.COOKIE,
 
-  // Add cookies if requested and available
-  if (useCookies) {
-    const cookies = await loadCookies();
-    if (cookies) {
-      console.log(`🍪 [youtubei] Using cookies for ${clientType}`);
-      clientConfig.cookie = cookies;
-      
-      // Also try to set authorization header if we have SAPISID
-      if (cookies.SAPISID) {
-        const timestamp = Math.floor(Date.now() / 1000);
-        const hash = require('crypto')
-          .createHash('sha1')
-          .update(`${timestamp} ${cookies.SAPISID} ${cookies.ORIGIN || 'https://www.youtube.com'}`)
-          .digest('hex');
-        
-        clientConfig.headers = {
-          'Authorization': `SAPISIDHASH ${timestamp}_${hash}`,
-          'X-Origin': 'https://www.youtube.com',
-        };
-      }
-    }
-  }
+    // Keep player retrieval ON so deciphering is possible. :contentReference[oaicite:5]{index=5}
+    retrieve_player: true,
+    enable_safety_mode: false,
 
-  return await Innertube.create(clientConfig);
+    // More reliable than local generation for tougher videos; keep caching on. :contentReference[oaicite:6]{index=6}
+    generate_session_locally: false,
+    enable_session_cache: true,
+  });
+
+  return _pool[clientType];
 }
 
-async function getClient(clientType = 'IOS', useCookies = false) {
-  const cacheKey = `${clientType}-${useCookies ? 'auth' : 'anon'}`;
-  
-  if (_pool[cacheKey]) return _pool[cacheKey];
-
-  console.log(`🔧 [youtubei] Creating InnerTube client: ${clientType}${useCookies ? ' (with cookies)' : ''}`);
-
-  _pool[cacheKey] = await createInnerTubeClient(clientType, useCookies);
-  return _pool[cacheKey];
-}
-
-// ─── Video ID extractor ─────────────────────────────────────
+// ─── Video ID extractor ───────────────────────────────────────────────────────
 function extractVideoId(url) {
   try {
-    if (url.includes('youtu.be/')) {
-      return url.split('youtu.be/')[1]?.split(/[?&/#]/)[0];
+    const s = String(url);
+
+    if (s.includes('youtu.be/')) {
+      return s.split('youtu.be/')[1]?.split(/[?&/#]/)[0] || null;
     }
-    const u = new URL(url);
+
+    const u = new URL(s);
     const v = u.searchParams.get('v');
     if (v && v.length === 11) return v;
-    const p = u.pathname;
+
+    const p = u.pathname || '';
     if (p.includes('/shorts/') || p.includes('/embed/')) {
-      return p.split('/').pop()?.split(/[?&/#]/)[0];
+      const id = p.split('/').pop()?.split(/[?&/#]/)[0];
+      return id && id.length === 11 ? id : null;
     }
   } catch {
     const m = String(url).match(/(?:v=|\/)([0-9A-Za-z_-]{11})/);
@@ -106,187 +86,211 @@ function extractVideoId(url) {
   return null;
 }
 
-// ─── Format builder ─────────────────────────────────────────
-function buildQualityOptions(streamingData) {
-  const videoQualities = [];
-  const audioQualities = [];
-  const seenHeights = new Set();
+// ─── Cipher/url resolver ──────────────────────────────────────────────────────
+async function resolveFormatUrl(format, player, nsigCache) {
+  // Direct URL present
+  if (format?.url) return format.url;
 
-  // Muxed (video + audio in one stream)
-  const muxed = streamingData.formats ?? [];
+  // youtubei.js may expose either camelCase or snake_case depending on version
+  const signatureCipher = format?.signature_cipher || format?.signatureCipher;
+  const cipher = format?.cipher;
 
-  muxed
-    .filter(f => f.url && f.has_video && f.has_audio && f.height)
-    .sort((a, b) => (b.height ?? 0) - (a.height ?? 0))
-    .forEach(f => {
-      const h = f.height;
-      if (seenHeights.has(h) || h < 144) return;
-      seenHeights.add(h);
+  // If no cipher fields, nothing to do
+  if (!signatureCipher && !cipher) return null;
 
-      videoQualities.push({
-        quality:     `${h}p`,
-        qualityNum:  h,
-        url:         f.url,
-        type:        'mp4',
-        extension:   'mp4',
-        filesize:    f.content_length ? Number(f.content_length) : 'unknown',
-        fps:         f.fps ?? 30,
-        hasAudio:    true,
-        hasVideo:    true,
-        isAudioOnly: false,
-        needsMerge:  false,
-        bitrate:     f.bitrate ?? 0,
-        itag:        f.itag,
-      });
-    });
+  // Decipher via player if available. :contentReference[oaicite:7]{index=7}
+  if (!player || typeof player.decipher !== 'function') return null;
 
-  // Audio-only adaptive streams
-  const adaptive = streamingData.adaptive_formats ?? [];
-
-  adaptive
-    .filter(f => f.url && !f.has_video && f.has_audio)
-    .sort((a, b) => (b.bitrate ?? 0) - (a.bitrate ?? 0))
-    .slice(0, 3)
-    .forEach(f => {
-      const kbps = Math.round((f.bitrate ?? 128000) / 1000);
-      const ext  = f.mime_type?.includes('webm') ? 'webm' : 'm4a';
-
-      audioQualities.push({
-        quality:     `${kbps}kbps Audio`,
-        qualityNum:  0,
-        url:         f.url,
-        type:        ext,
-        extension:   ext,
-        filesize:    f.content_length ? Number(f.content_length) : 'unknown',
-        hasAudio:    true,
-        hasVideo:    false,
-        isAudioOnly: true,
-        needsMerge:  false,
-        bitrate:     kbps,
-        itag:        f.itag,
-      });
-    });
-
-  return { videoQualities, audioQualities };
-}
-
-/**
- * Check if error indicates age-restriction
- */
-function isAgeRestrictedError(error) {
-  const msg = String(error.message || error).toLowerCase();
-  return msg.includes('age') || 
-         msg.includes('restricted') || 
-         msg.includes('sign in') ||
-         msg.includes('login') ||
-         msg.includes('confirm your age');
-}
-
-/**
- * Try one client, return null on soft failures
- */
-async function tryClient(videoId, clientType, useCookies = false) {
-  console.log(`   → trying client: ${clientType}${useCookies ? ' (with cookies)' : ''}`);
-  
   try {
-    const yt = await getClient(clientType, useCookies);
-    const info = await yt.getInfo(videoId); // Use getInfo instead of getBasicInfo for more data
-
-    if (!info?.streaming_data) {
-      // Check if it's age-restricted but we don't have cookies
-      if (isAgeRestrictedError(info?.playability_status?.reason) && !useCookies) {
-        console.warn(`   ✗ ${clientType}: age-restricted - retry with cookies`);
-        return { ageRestricted: true };
-      }
-      console.warn(`   ✗ ${clientType}: no streaming_data`);
-      return null;
-    }
-
-    const { videoQualities, audioQualities } = buildQualityOptions(info.streaming_data);
-
-    if (videoQualities.length === 0 && audioQualities.length === 0) {
-      console.warn(`   ✗ ${clientType}: 0 usable formats`);
-      return null;
-    }
-
-    console.log(`   ✓ ${clientType}: ${videoQualities.length}v + ${audioQualities.length}a formats`);
-    return { 
-      info, 
-      videoQualities, 
-      audioQualities, 
-      clientType,
-      playabilityStatus: info.playability_status
-    };
-
-  } catch (e) {
-    const msg = String(e.message ?? e);
-    
-    // Check for age-restriction in error
-    if (isAgeRestrictedError(e) && !useCookies) {
-      console.warn(`   ✗ ${clientType}: age-restricted error - should retry with cookies`);
-      return { ageRestricted: true };
-    }
-    
-    // Invalidate cached client on transient errors
-    const isSoft = msg.includes('429') || 
-                   msg.toLowerCase().includes('timeout') ||
-                   msg.includes('ECONNRESET');
-    if (isSoft) {
-      const cacheKey = `${clientType}-${useCookies ? 'auth' : 'anon'}`;
-      delete _pool[cacheKey];
-    }
-    
-    console.warn(`   ✗ ${clientType} error: ${msg.slice(0, 120)}`);
+    return await player.decipher(undefined, signatureCipher, cipher, nsigCache);
+  } catch {
     return null;
   }
 }
 
-// ─── Main export ────────────────────────────────────────────
+// ─── Format builder (muxed + audio-only) ──────────────────────────────────────
+async function buildQualityOptions(yt, streamingData) {
+  const videoQualities = [];
+  const audioQualities = [];
+
+  const seenHeights = new Set();
+  const nsigCache = new Map();
+  const player = yt?.session?.player;
+
+  // youtubei.js versions vary: formats/adaptive_formats vs formats/adaptiveFormats
+  const muxed = streamingData?.formats ?? [];
+  const adaptive = streamingData?.adaptive_formats ?? streamingData?.adaptiveFormats ?? [];
+
+  // Muxed (video + audio in one stream) — ready to download, no merge needed
+  const muxedSorted = muxed
+    .filter(f => f && f.has_video && f.has_audio && f.height)
+    .sort((a, b) => (b.height ?? 0) - (a.height ?? 0));
+
+  for (const f of muxedSorted) {
+    const h = f.height;
+    if (!h || seenHeights.has(h) || h < 144) continue;
+
+    const url = await resolveFormatUrl(f, player, nsigCache);
+    if (!url) continue;
+
+    seenHeights.add(h);
+
+    videoQualities.push({
+      quality: `${h}p`,
+      qualityNum: h,
+      url,
+      type: 'mp4',
+      extension: 'mp4',
+      filesize: f.content_length ? Number(f.content_length) : 'unknown',
+      fps: f.fps ?? 30,
+      hasAudio: true,
+      hasVideo: true,
+      isAudioOnly: false,
+      needsMerge: false,
+      bitrate: f.bitrate ?? 0,
+      itag: f.itag,
+    });
+  }
+
+  // Audio-only adaptive streams
+  const audioOnlySorted = adaptive
+    .filter(f => f && !f.has_video && f.has_audio)
+    .sort((a, b) => (b.bitrate ?? 0) - (a.bitrate ?? 0))
+    .slice(0, 3);
+
+  for (const f of audioOnlySorted) {
+    const url = await resolveFormatUrl(f, player, nsigCache);
+    if (!url) continue;
+
+    const kbps = Math.round((f.bitrate ?? 128000) / 1000);
+    const ext = f.mime_type?.includes('webm') ? 'webm' : 'm4a';
+
+    audioQualities.push({
+      quality: `${kbps}kbps Audio`,
+      qualityNum: 0,
+      url,
+      type: ext,
+      extension: ext,
+      filesize: f.content_length ? Number(f.content_length) : 'unknown',
+      hasAudio: true,
+      hasVideo: false,
+      isAudioOnly: true,
+      needsMerge: false,
+      bitrate: kbps,
+      itag: f.itag,
+    });
+  }
+
+  return { videoQualities, audioQualities };
+}
+
+// ─── Try one client, return null on soft failures ─────────────────────────────
+async function tryClient(videoId, clientType) {
+  console.log(`   → trying client: ${clientType}`);
+
+  try {
+    const yt = await getClient(clientType);
+
+    // Correct usage: getInfo(target, options?) :contentReference[oaicite:8]{index=8}
+    const info = await yt.getInfo(videoId, {
+      client: clientType,
+      po_token: ENV.PO_TOKEN,
+    });
+
+    // If playability says no, treat as soft fail and let other clients try.
+    const ps = info?.playability_status;
+    const status = ps?.status;
+    const reason = ps?.reason || ps?.error_screen?.player_error_message_renderer?.reason?.simpleText;
+
+    if (status && status !== 'OK') {
+      console.warn(`   ✗ ${clientType}: playability=${status}${reason ? ` (${String(reason).slice(0, 120)})` : ''}`);
+      return { softFail: true, status, reason, clientType };
+    }
+
+    const streamingData = info?.streaming_data || info?.streamingData;
+    if (!streamingData) {
+      console.warn(`   ✗ ${clientType}: no streaming_data`);
+      return { softFail: true, status: 'NO_STREAMING_DATA', reason: 'No streaming data', clientType };
+    }
+
+    const { videoQualities, audioQualities } = await buildQualityOptions(yt, streamingData);
+
+    if (videoQualities.length === 0 && audioQualities.length === 0) {
+      console.warn(`   ✗ ${clientType}: 0 usable formats (urls may be ciphered + player/decipher unavailable)`);
+      return { softFail: true, status: 'NO_USABLE_FORMATS', reason: 'No usable formats', clientType };
+    }
+
+    console.log(`   ✓ ${clientType}: ${videoQualities.length}v + ${audioQualities.length}a formats`);
+    return { info, videoQualities, audioQualities, clientType };
+
+  } catch (e) {
+    const msg = String(e?.message ?? e);
+
+    // Invalidate cached client on transient errors so it gets rebuilt
+    const lower = msg.toLowerCase();
+    const isSoft =
+      msg.includes('429') ||
+      lower.includes('timeout') ||
+      lower.includes('fetch failed') ||
+      lower.includes('ecconnreset') ||
+      lower.includes('socket') ||
+      lower.includes('temporarily');
+
+    if (isSoft) delete _pool[clientType];
+
+    console.warn(`   ✗ ${clientType} error: ${msg.slice(0, 160)}`);
+    return { softFail: true, status: 'CLIENT_ERROR', reason: msg, clientType };
+  }
+}
+
+// ─── Main export ──────────────────────────────────────────────────────────────
 async function fetchYouTubeData(url) {
   const videoId = extractVideoId(url);
   if (!videoId) throw new Error('Invalid YouTube URL');
 
   console.log(`🎬 [youtubei] Fetching: ${videoId}`);
 
-  let result = null;
-  let ageRestricted = false;
+  // Server-friendly client order
+  const CLIENT_ORDER = ['IOS', 'TV_EMBEDDED', 'TV', 'WEB_EMBEDDED', 'ANDROID', 'WEB'];
 
-  // First try: Standard clients without cookies
+  let best = null;
+  let lastSoft = null;
+
   for (const clientType of CLIENT_ORDER) {
-    const response = await tryClient(videoId, clientType, false);
-    if (response?.ageRestricted) {
-      ageRestricted = true;
-      continue;
-    }
-    if (response) {
-      result = response;
+    const res = await tryClient(videoId, clientType);
+
+    if (res && res.info) {
+      best = res;
       break;
     }
+
+    // keep the last soft fail for better error messages
+    if (res?.softFail) lastSoft = res;
   }
 
-  // If age-restricted detected, try with cookies
-  if (!result && ageRestricted) {
-    console.log(`🔒 Age-restricted video detected, attempting with cookies...`);
-    
-    for (const clientType of ['IOS', 'WEB']) { // iOS and WEB work best with auth
-      const response = await tryClient(videoId, clientType, true);
-      if (response && !response.ageRestricted) {
-        result = response;
-        break;
-      }
+  if (!best) {
+    // Give a more accurate message based on playability when possible
+    if (lastSoft?.status && lastSoft.status !== 'CLIENT_ERROR') {
+      const msg =
+        lastSoft.status === 'LOGIN_REQUIRED'
+          ? 'Cannot access this video: sign-in required.'
+          : lastSoft.status === 'UNPLAYABLE'
+          ? 'Cannot access this video: unavailable in this region or restricted.'
+          : lastSoft.status === 'CONTENT_CHECK_REQUIRED'
+          ? 'Cannot access this video: content check required.'
+          : `Cannot access this video: ${lastSoft.status}.`;
+
+      throw new Error(`${msg}${lastSoft.reason ? ` (${String(lastSoft.reason).slice(0, 160)})` : ''}`);
     }
-  }
 
-  if (!result) {
     throw new Error(
-      'Cannot access this video (age-restricted or region-locked). ' +
-      'To access age-restricted videos, please provide YouTube cookies. ' +
-      'Set YT_COOKIES env var or place cookies in /tmp/yt-cookies.json'
+      'YouTube blocked all client types on this server IP or no decipherable formats were returned. ' +
+      'If the video requires sign-in, run the service with authenticated cookies.'
     );
   }
 
-  const { info, videoQualities, audioQualities, clientType: usedClient } = result;
-  const details = info.basic_info;
+  const { info, videoQualities, audioQualities, clientType: usedClient } = best;
+  const details = info.basic_info || {};
 
   const qualityOptions = [
     ...videoQualities.sort((a, b) => b.qualityNum - a.qualityNum),
@@ -298,50 +302,53 @@ async function fetchYouTubeData(url) {
     videoQualities[0] ||
     audioQualities[0];
 
-  // Get thumbnail
+  // Thumbnail shapes vary by version
   const thumbArr = Array.isArray(details.thumbnail)
     ? details.thumbnail
     : details.thumbnail?.thumbnails ?? [];
+
   const thumbnail =
-    thumbArr[0]?.url ||
+    thumbArr?.[0]?.url ||
     `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`;
 
   console.log(`✅ [youtubei] Done via ${usedClient}: "${details.title}" — ${qualityOptions.length} formats`);
 
   return {
-    title:        details.title             || 'Unknown',
+    title: details.title || 'Unknown',
     thumbnail,
-    duration:     details.duration          ?? 0,
-    description:  details.short_description || '',
-    author:       details.author            || 'Unknown',
-    viewCount:    details.view_count        ?? 0,
+    duration: details.duration ?? 0,
+    description: details.short_description || '',
+    author: details.author || 'Unknown',
+    viewCount: details.view_count ?? 0,
 
-    formats:      qualityOptions,
-    allFormats:   qualityOptions,
+    formats: qualityOptions,
+    allFormats: qualityOptions,
     videoFormats: videoQualities,
     audioFormats: audioQualities,
 
-    url:             defaultQuality.url,
+    url: defaultQuality?.url,
     selectedQuality: defaultQuality,
 
     videoId,
-    isShorts: url.includes('/shorts/'),
+    isShorts: String(url).includes('/shorts/'),
 
     metadata: {
       videoId,
       author: details.author || 'Unknown',
-      isAgeRestricted: ageRestricted,
     },
 
     _debug: {
       usedClient,
-      usedCookies: result.playabilityStatus?.status === 'OK',
-      totalMuxed:     (info.streaming_data?.formats ?? []).length,
-      totalAdaptive:  (info.streaming_data?.adaptive_formats ?? []).length,
+      location: ENV.LOCATION,
+      hasCookie: Boolean(ENV.COOKIE),
+      hasPoToken: Boolean(ENV.PO_TOKEN),
+      totalMuxed: (info.streaming_data?.formats ?? info.streamingData?.formats ?? []).length,
+      totalAdaptive: (info.streaming_data?.adaptive_formats ?? info.streamingData?.adaptiveFormats ?? []).length,
       videoQualities: videoQualities.length,
       audioQualities: audioQualities.length,
-      defaultQuality: defaultQuality.quality,
-      playabilityStatus: info.playability_status?.status,
+      defaultQuality: defaultQuality?.quality,
+      playability: info.playability_status?.status,
+      playabilityReason: info.playability_status?.reason,
     },
   };
 }
