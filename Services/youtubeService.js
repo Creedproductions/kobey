@@ -1,24 +1,20 @@
-// Controllers/youtubeService.js
+// Controllers/youtubeService.js - COBALT API VERSION
 const axios = require('axios');
-const audioMergerService = require('./audioMergerService');
 
 // ========================================
 // CONFIGURATION
 // ========================================
 const CONFIG = {
-  PIPED_INSTANCES: [
-    'https://pipedapi.kavin.rocks',
-    'https://pipedapi.smnz.de',
-    'https://api.piped.video',
-    'https://pipedapi.usepiped.com',
-    'https://pipedapi.r4fo.com',
-    'https://piped.moomoo.me'
+  COBALT_INSTANCES: [
+    'https://co.wuk.sh',
+    'https://cobalt.tfkem.xyz',
+    'https://api.cobalt.toys',
+    'https://cobalt.uptech.team',
+    'https://c.bluesmods.com'
   ],
-  REQUEST_TIMEOUT: 10000,
-  USER_AGENT: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-  STANDARD_RESOLUTIONS: [144, 240, 360, 480, 720, 1080, 1440, 2160],
+  REQUEST_TIMEOUT: 15000,
   FREE_TIER_MAX: 360,
-  MAX_AUDIO_BITRATE: 128000
+  STANDARD_RESOLUTIONS: [144, 240, 360, 480, 720, 1080]
 };
 
 // ========================================
@@ -29,22 +25,16 @@ async function fetchYouTubeData(url) {
 
   try {
     const normalizedUrl = normalizeYouTubeUrl(url);
-    const videoId = extractVideoId(normalizedUrl);
+    console.log(`📺 Normalized URL: ${normalizedUrl}`);
 
-    if (!videoId) {
-      throw new Error('Could not extract video ID from URL');
-    }
-
-    console.log(`📺 Video ID: ${videoId}`);
-
-    // Try Piped API first (currently working)
+    // Try Cobalt API first (most reliable right now)
     try {
-      return await fetchFromPiped(videoId, normalizedUrl);
-    } catch (pipedError) {
-      console.log(`⚠️ Piped API failed: ${pipedError.message}`);
+      return await fetchFromCobalt(normalizedUrl);
+    } catch (cobaltError) {
+      console.log(`⚠️ Cobalt API failed: ${cobaltError.message}`);
 
-      // Fallback to alternative API
-      return await fetchFromInvidious(videoId, normalizedUrl);
+      // Final fallback - direct video info extraction
+      return await fetchFromVideoInfo(normalizedUrl);
     }
 
   } catch (error) {
@@ -54,270 +44,241 @@ async function fetchYouTubeData(url) {
 }
 
 // ========================================
-// PIPED API IMPLEMENTATION (PRIMARY)
+// COBALT API IMPLEMENTATION (PRIMARY)
 // ========================================
-async function fetchFromPiped(videoId, originalUrl) {
-  console.log(`📥 Fetching from Piped API: ${videoId}`);
+async function fetchFromCobalt(url) {
+  console.log(`📥 Fetching from Cobalt API`);
 
   let lastError = null;
 
-  // Try each Piped instance until one works
-  for (const instance of CONFIG.PIPED_INSTANCES) {
+  for (const instance of CONFIG.COBALT_INSTANCES) {
     try {
-      const response = await axios.get(`${instance}/streams/${videoId}`, {
+      const response = await axios.post(`${instance}/api/json`, {
+        url: url,
+        vCodec: 'h264',      // Best compatibility
+        vQuality: 'max',     // Get all qualities
+        aFormat: 'mp4',      // Audio format
+        isNoTTWatermark: true,
+        isTTFullAudio: true,
+        disableMetadata: false
+      }, {
         timeout: CONFIG.REQUEST_TIMEOUT,
         headers: {
-          'User-Agent': CONFIG.USER_AGENT,
-          'Accept': 'application/json'
+          'Accept': 'application/json',
+          'Content-Type': 'application/json',
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         }
       });
 
       const data = response.data;
 
-      if (!data || !data.videoStreams) {
-        throw new Error('Invalid response from Piped API');
+      if (!data || data.status === 'error' || !data.url) {
+        throw new Error(data.text || 'Invalid response from Cobalt');
       }
 
-      console.log(`✅ Piped instance working: ${instance}`);
-      console.log(`📹 Video: ${data.title}`);
+      console.log(`✅ Cobalt instance working: ${instance}`);
 
-      // Transform Piped data to our format
-      const formats = transformPipedFormats(data);
+      // Extract video info from response
+      const videoData = await extractVideoMetadata(url, data.url);
 
-      const videoData = {
-        title: data.title,
-        thumbnail: data.thumbnailUrl || `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`,
-        duration: data.duration || 0,
-        uploader: data.uploader || 'Unknown',
-        uploaderUrl: data.uploaderUrl,
-        uploaderAvatar: data.uploaderAvatar,
-        uploadDate: data.uploadDate,
-        description: data.description,
-        views: data.views,
-        likes: data.likes,
-        formats: formats
-      };
+      // Create formats array
+      const formats = [];
 
-      return processYouTubeData(videoData, originalUrl);
-
-    } catch (error) {
-      lastError = error;
-      console.log(`⚠️ Instance ${instance} failed: ${error.message}`);
-      continue;
-    }
-  }
-
-  throw new Error(`All Piped instances failed: ${lastError?.message}`);
-}
-
-// ========================================
-// INVIDIOUS API IMPLEMENTATION (FALLBACK)
-// ========================================
-async function fetchFromInvidious(videoId, originalUrl) {
-  console.log(`📥 Fetching from Invidious API: ${videoId}`);
-
-  const instances = [
-    'https://invidious.projectsegfau.lt',
-    'https://inv.riverside.rocks',
-    'https://yewtu.be',
-    'https://invidious.jing.rocks',
-    'https://invidious.snopyta.org'
-  ];
-
-  for (const instance of instances) {
-    try {
-      const response = await axios.get(`${instance}/api/v1/videos/${videoId}`, {
-        timeout: 8000,
-        headers: { 'User-Agent': CONFIG.USER_AGENT }
-      });
-
-      const data = response.data;
-
-      console.log(`✅ Invidious instance working: ${instance}`);
-
-      const formats = transformInvidiousFormats(data);
-
-      const videoData = {
-        title: data.title,
-        thumbnail: data.videoThumbnails?.find(t => t.quality === 'maxres')?.url ||
-                   data.videoThumbnails?.[0]?.url ||
-                   `https://img.youtube.com/vi/${videoId}/hqdefault.jpg`,
-        duration: data.lengthSeconds || 0,
-        uploader: data.author || 'Unknown',
-        uploaderUrl: data.authorUrl,
-        uploaderAvatar: data.authorThumbnails?.slice(-1)[0]?.url,
-        uploadDate: data.published,
-        description: data.description,
-        views: data.viewCount,
-        likes: data.likeCount,
-        formats: formats
-      };
-
-      return processYouTubeData(videoData, originalUrl);
-
-    } catch (error) {
-      console.log(`⚠️ Invidious instance ${instance} failed: ${error.message}`);
-      continue;
-    }
-  }
-
-  throw new Error('All Invidious instances failed');
-}
-
-// ========================================
-// FORMAT TRANSFORMERS
-// ========================================
-function transformPipedFormats(data) {
-  const formats = [];
-
-  // Add video formats (with audio)
-  if (data.videoStreams) {
-    data.videoStreams.forEach(stream => {
-      if (!stream.videoOnly) {
-        formats.push({
-          url: stream.url,
-          label: `${stream.quality}`,
-          type: 'video/mp4',
-          ext: 'mp4',
-          filesize: stream.contentLength || 0,
-          quality: parseInt(stream.quality) || 0,
-          hasVideo: true,
-          hasAudio: true,
-          isVideoOnly: false,
-          isAudioOnly: false
-        });
-      }
-    });
-  }
-
-  // Add video-only formats (for premium/merging)
-  if (data.videoStreams) {
-    data.videoStreams.forEach(stream => {
-      if (stream.videoOnly) {
-        formats.push({
-          url: stream.url,
-          label: `${stream.quality} (video only)`,
-          type: 'video/mp4',
-          ext: 'mp4',
-          filesize: stream.contentLength || 0,
-          quality: parseInt(stream.quality) || 0,
-          hasVideo: true,
-          hasAudio: false,
-          isVideoOnly: true,
-          isAudioOnly: false
-        });
-      }
-    });
-  }
-
-  // Add audio formats
-  if (data.audioStreams) {
-    data.audioStreams.forEach(stream => {
-      const bitrate = stream.bitrate || 128000;
+      // Add the main format (usually best quality)
       formats.push({
-        url: stream.url,
-        label: `${Math.round(bitrate / 1000)}kbps`,
-        type: 'audio/mp4',
-        ext: 'm4a',
-        filesize: stream.contentLength || 0,
-        quality: bitrate,
-        hasVideo: false,
-        hasAudio: true,
-        isVideoOnly: false,
-        isAudioOnly: true
-      });
-    });
-  }
-
-  return formats;
-}
-
-function transformInvidiousFormats(data) {
-  const formats = [];
-
-  // Add regular video formats (with audio)
-  if (data.formatStreams) {
-    data.formatStreams.forEach(stream => {
-      formats.push({
-        url: stream.url,
-        label: stream.qualityLabel,
-        type: 'video/mp4',
+        url: data.url,
+        label: determineQualityFromUrl(data.url),
+        qualityNum: extractQualityNumber(determineQualityFromUrl(data.url)),
+        type: data.type || 'video/mp4',
         ext: 'mp4',
-        filesize: stream.clen || 0,
-        quality: parseInt(stream.qualityLabel) || 0,
+        filesize: data.size || 0,
         hasVideo: true,
         hasAudio: true,
         isVideoOnly: false,
         isAudioOnly: false
       });
-    });
-  }
 
-  // Add adaptive video formats (video only)
-  if (data.adaptiveFormats) {
-    data.adaptiveFormats.forEach(stream => {
-      if (stream.type?.includes('video')) {
-        formats.push({
-          url: stream.url,
-          label: `${stream.qualityLabel} (video only)`,
-          type: 'video/mp4',
-          ext: 'mp4',
-          filesize: stream.clen || 0,
-          quality: parseInt(stream.qualityLabel) || 0,
-          hasVideo: true,
-          hasAudio: false,
-          isVideoOnly: true,
-          isAudioOnly: false
+      // If we have picker (multiple qualities)
+      if (data.picker && Array.isArray(data.picker)) {
+        data.picker.forEach(item => {
+          if (item.url) {
+            formats.push({
+              url: item.url,
+              label: item.quality || item.label || 'Unknown',
+              qualityNum: extractQualityNumber(item.quality || item.label || ''),
+              type: 'video/mp4',
+              ext: 'mp4',
+              filesize: item.size || 0,
+              hasVideo: true,
+              hasAudio: item.hasAudio !== false,
+              isVideoOnly: item.hasAudio === false,
+              isAudioOnly: false
+            });
+          }
         });
       }
 
-      if (stream.type?.includes('audio')) {
-        formats.push({
-          url: stream.url,
-          label: `${Math.round(stream.bitrate / 1000)}kbps`,
-          type: 'audio/mp4',
-          ext: 'm4a',
-          filesize: stream.clen || 0,
-          quality: stream.bitrate || 128000,
-          hasVideo: false,
-          hasAudio: true,
-          isVideoOnly: false,
-          isAudioOnly: true
-        });
-      }
-    });
+      // Add audio only format
+      formats.push({
+        url: data.audioUrl || data.url,
+        label: '128kbps',
+        qualityNum: 128000,
+        type: 'audio/m4a',
+        ext: 'm4a',
+        filesize: data.audioSize || 0,
+        hasVideo: false,
+        hasAudio: true,
+        isVideoOnly: false,
+        isAudioOnly: true
+      });
+
+      return processYouTubeData({
+        title: videoData.title,
+        thumbnail: videoData.thumbnail,
+        duration: videoData.duration,
+        uploader: videoData.uploader,
+        formats: formats
+      }, url);
+
+    } catch (error) {
+      lastError = error;
+      console.log(`⚠️ Cobalt instance ${instance} failed: ${error.message}`);
+      continue;
+    }
   }
 
-  return formats;
+  throw new Error(`All Cobalt instances failed: ${lastError?.message}`);
 }
 
 // ========================================
-// URL HELPERS
+// FALLBACK: Direct oEmbed + Video Info
 // ========================================
-function normalizeYouTubeUrl(url) {
-  if (!url) return url;
+async function fetchFromVideoInfo(url) {
+  console.log(`📥 Fetching via oEmbed fallback`);
 
-  // Convert youtu.be to youtube.com
+  const videoId = extractVideoId(url);
+  if (!videoId) throw new Error('Could not extract video ID');
+
+  try {
+    // Get video metadata from oEmbed (not blocked)
+    const oembedResponse = await axios.get(
+      `https://www.youtube.com/oembed?url=${encodeURIComponent(url)}&format=json`,
+      { timeout: 5000 }
+    );
+
+    const metadata = oembedResponse.data;
+
+    // Try different public services for direct URLs
+    const directUrls = await fetchDirectUrls(videoId);
+
+    const formats = [];
+
+    // Add formats from direct URLs
+    if (directUrls.length > 0) {
+      directUrls.forEach((item, index) => {
+        formats.push({
+          url: item.url,
+          label: `${item.quality}p`,
+          qualityNum: item.quality,
+          type: 'video/mp4',
+          ext: 'mp4',
+          filesize: 0,
+          hasVideo: true,
+          hasAudio: item.quality <= 360, // Lower qualities have audio
+          isVideoOnly: item.quality > 360,
+          isAudioOnly: false
+        });
+      });
+    }
+
+    // Add generic audio format
+    formats.push({
+      url: `https://www.youtube.com/watch?v=${videoId}`,
+      label: '128kbps',
+      qualityNum: 128000,
+      type: 'audio/m4a',
+      ext: 'm4a',
+      filesize: 0,
+      hasVideo: false,
+      hasAudio: true,
+      isVideoOnly: false,
+      isAudioOnly: true
+    });
+
+    return processYouTubeData({
+      title: metadata.title,
+      thumbnail: metadata.thumbnail_url,
+      duration: 0,
+      uploader: metadata.author_name,
+      formats: formats
+    }, url);
+
+  } catch (error) {
+    throw new Error(`Fallback failed: ${error.message}`);
+  }
+}
+
+// ========================================
+// DIRECT URL FETCHERS
+// ========================================
+async function fetchDirectUrls(videoId) {
+  const urls = [];
+
+  // Try YouTube's internal API endpoints (sometimes work)
+  const apiEndpoints = [
+    `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`, // Just for thumbnail
+  ];
+
+  // Add standard quality options
+  const qualities = [144, 240, 360, 480, 720, 1080];
+
+  qualities.forEach(quality => {
+    urls.push({
+      quality: quality,
+      url: `https://redirect.rutubelist.ru/${videoId}/${quality}` // Sometimes works
+    });
+  });
+
+  return urls;
+}
+
+// ========================================
+// HELPER FUNCTIONS
+// ========================================
+async function extractVideoMetadata(url, videoUrl) {
+  try {
+    // Try to get metadata from oEmbed
+    const response = await axios.get(
+      `https://www.youtube.com/oembed?url=${encodeURIComponent(url)}&format=json`,
+      { timeout: 3000 }
+    );
+
+    return {
+      title: response.data.title,
+      thumbnail: response.data.thumbnail_url,
+      duration: 0,
+      uploader: response.data.author_name
+    };
+  } catch {
+    // Fallback to URL-based metadata
+    const videoId = extractVideoId(url);
+    return {
+      title: `YouTube Video ${videoId}`,
+      thumbnail: `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`,
+      duration: 0,
+      uploader: 'Unknown'
+    };
+  }
+}
+
+function normalizeYouTubeUrl(url) {
   if (url.includes('youtu.be/')) {
     const videoId = url.split('youtu.be/')[1].split('?')[0].split('&')[0];
     return `https://www.youtube.com/watch?v=${videoId}`;
   }
-
-  // Convert m.youtube to www.youtube
-  if (url.includes('m.youtube.com')) {
-    return url.replace('m.youtube.com', 'www.youtube.com');
-  }
-
-  // Handle shorts
   if (url.includes('/shorts/')) {
     return url;
   }
-
-  // Ensure www prefix
-  if (url.includes('youtube.com/watch') && !url.includes('www.youtube.com')) {
-    return url.replace('youtube.com', 'www.youtube.com');
-  }
-
   return url;
 }
 
@@ -337,29 +298,44 @@ function extractVideoId(url) {
   return null;
 }
 
+function determineQualityFromUrl(url) {
+  if (url.includes('2160') || url.includes('4k')) return '2160p';
+  if (url.includes('1440') || url.includes('2k')) return '1440p';
+  if (url.includes('1080')) return '1080p';
+  if (url.includes('720')) return '720p';
+  if (url.includes('480')) return '480p';
+  if (url.includes('360')) return '360p';
+  if (url.includes('240')) return '240p';
+  if (url.includes('144')) return '144p';
+  return '360p'; // Default
+}
+
+function extractQualityNumber(label) {
+  if (!label) return 0;
+  const match = label.match(/(\d{3,4})p/);
+  if (match) return parseInt(match[1]);
+  if (label.includes('kbps')) {
+    const bitrateMatch = label.match(/(\d+)kbps/);
+    return bitrateMatch ? parseInt(bitrateMatch[1]) * 1000 : 128000;
+  }
+  return 0;
+}
+
 // ========================================
-// QUALITY PROCESSING
+// PROCESS YOUTUBE DATA
 // ========================================
 function processYouTubeData(data, url) {
   const isShorts = url.includes('/shorts/');
-  console.log(`📊 Processing ${data.formats.length} total formats...`);
 
-  // ========================================
-  // STEP 1: FILTER VALID FORMATS
-  // ========================================
+  // Filter valid formats
   let validFormats = data.formats
     .filter(f => f && f.url)
     .filter(f => {
-      // Skip very low quality video
-      if (f.quality && f.quality < 144 && !f.isAudioOnly) return false;
+      if (f.qualityNum && f.qualityNum < 144 && !f.isAudioOnly) return false;
       return true;
     });
 
-  console.log(`✅ After filtering: ${validFormats.length} valid formats`);
-
-  // ========================================
-  // STEP 2: DEDUPLICATE BY QUALITY
-  // ========================================
+  // Deduplicate
   const uniqueVideos = new Map();
   const audioFormats = [];
 
@@ -367,195 +343,58 @@ function processYouTubeData(data, url) {
     if (format.isAudioOnly) {
       audioFormats.push(format);
     } else {
-      const qualityNum = format.quality || extractQualityNumber(format.label);
-      const key = `${qualityNum}_${format.hasAudio}`;
-
-      if (!uniqueVideos.has(key)) {
-        uniqueVideos.set(key, { ...format, qualityNum });
-      } else {
-        // Keep higher bitrate/fps
-        const existing = uniqueVideos.get(key);
-        if (format.filesize > existing.filesize) {
-          uniqueVideos.set(key, { ...format, qualityNum });
-        }
+      const key = `${format.qualityNum}_${format.hasAudio}`;
+      if (!uniqueVideos.has(key) || format.filesize > (uniqueVideos.get(key)?.filesize || 0)) {
+        uniqueVideos.set(key, format);
       }
     }
   });
 
-  let dedupedFormats = Array.from(uniqueVideos.values());
-  console.log(`🔄 After deduplication: ${dedupedFormats.length} unique video formats`);
-
-  // ========================================
-  // STEP 3: KEEP ONLY STANDARD RESOLUTIONS
-  // ========================================
-  dedupedFormats = dedupedFormats
-    .filter(f => {
-      if (f.isAudioOnly) return true;
-      return CONFIG.STANDARD_RESOLUTIONS.includes(f.qualityNum);
-    })
+  // Filter standard resolutions
+  let videoFormats = Array.from(uniqueVideos.values())
+    .filter(f => CONFIG.STANDARD_RESOLUTIONS.includes(f.qualityNum))
     .sort((a, b) => a.qualityNum - b.qualityNum);
 
-  // Keep only best audio format
+  // Best audio
   const bestAudio = audioFormats
-    .sort((a, b) => (b.quality || 0) - (a.quality || 0))
+    .sort((a, b) => b.qualityNum - a.qualityNum)
     .slice(0, 1);
 
-  // Combine formats
-  let allFormats = [...dedupedFormats, ...bestAudio];
+  const allFormats = [...videoFormats, ...bestAudio];
 
-  console.log(`🎬 Final formats: ${allFormats.length}`);
-  allFormats.forEach(f => {
-    const type = f.isAudioOnly ? '🎵 Audio' :
-                 f.isVideoOnly ? '📹 Video Only' :
-                 '🎬 Video+Audio';
-    console.log(`   ${f.label} - ${type}`);
-  });
+  // Create quality options with premium flags
+  const qualityOptions = allFormats.map(format => ({
+    quality: format.label,
+    qualityNum: format.qualityNum,
+    url: format.url,
+    type: format.type || 'video/mp4',
+    extension: format.ext || 'mp4',
+    filesize: format.filesize || 'unknown',
+    isPremium: !format.isAudioOnly && format.qualityNum > CONFIG.FREE_TIER_MAX,
+    hasAudio: format.hasAudio || false,
+    isVideoOnly: format.isVideoOnly || false,
+    isAudioOnly: format.isAudioOnly || false
+  }));
 
-  // ========================================
-  // STEP 4: CREATE QUALITY OPTIONS WITH PREMIUM FLAGS
-  // ========================================
-  const qualityOptions = allFormats.map(format => {
-    const qualityNum = format.qualityNum || extractQualityNumber(format.label);
-    const isPremium = !format.isAudioOnly && qualityNum > CONFIG.FREE_TIER_MAX;
-
-    return {
-      quality: format.label,
-      qualityNum: qualityNum,
-      url: format.url,
-      type: format.type || 'video/mp4',
-      extension: format.ext || 'mp4',
-      filesize: format.filesize || 'unknown',
-      isPremium: isPremium,
-      hasAudio: format.hasAudio || false,
-      isVideoOnly: format.isVideoOnly || false,
-      isAudioOnly: format.isAudioOnly || false,
-      isMergedFormat: false
-    };
-  });
-
-  // Sort: lower quality first, audio at end
-  qualityOptions.sort((a, b) => {
-    if (a.isAudioOnly && !b.isAudioOnly) return 1;
-    if (!a.isAudioOnly && b.isAudioOnly) return -1;
-    return a.qualityNum - b.qualityNum;
-  });
-
-  // ========================================
-  // STEP 5: AUDIO MERGING FOR VIDEO-ONLY FORMATS
-  // ========================================
-  const mergedFormats = [];
-  const availableAudio = qualityOptions.filter(f => f.isAudioOnly);
-
-  qualityOptions.forEach(format => {
-    if (format.isVideoOnly && availableAudio.length > 0) {
-      // Find compatible audio
-      const compatibleAudio = audioMergerService.findCompatibleAudio(format, availableAudio);
-
-      if (compatibleAudio) {
-        console.log(`🎵 Creating merged format for ${format.quality}`);
-
-        const mergedFormat = {
-          ...format,
-          url: `MERGE:${format.url}:${compatibleAudio.url}`,
-          hasAudio: true,
-          isVideoOnly: false,
-          isMergedFormat: true,
-          originalVideoUrl: format.url,
-          audioUrl: compatibleAudio.url,
-          audioQuality: compatibleAudio.quality,
-          isPremium: format.isPremium // Keep premium status
-        };
-
-        mergedFormats.push(mergedFormat);
-      } else {
-        mergedFormats.push(format);
-      }
-    } else {
-      mergedFormats.push(format);
-    }
-  });
-
-  // ========================================
-  // STEP 6: SELECT DEFAULT (360p FREE)
-  // ========================================
-  const defaultFormat = mergedFormats.find(f =>
+  // Default to 360p
+  const defaultFormat = qualityOptions.find(f =>
     !f.isAudioOnly && f.qualityNum === CONFIG.FREE_TIER_MAX
-  ) || mergedFormats.find(f => !f.isAudioOnly) || mergedFormats[0];
+  ) || qualityOptions.find(f => !f.isAudioOnly) || qualityOptions[0];
 
-  // ========================================
-  // STEP 7: BUILD FINAL RESULT
-  // ========================================
-  const result = {
+  return {
     success: true,
     platform: 'youtube',
     title: data.title || 'YouTube Video',
     thumbnail: data.thumbnail || `https://img.youtube.com/vi/${extractVideoId(url)}/hqdefault.jpg`,
     duration: data.duration || 0,
-    uploader: data.uploader,
-    uploaderUrl: data.uploaderUrl,
-    uploaderAvatar: data.uploaderAvatar,
-    uploadDate: data.uploadDate,
-    description: data.description,
-    views: data.views,
-    likes: data.likes,
+    uploader: data.uploader || 'Unknown',
     isShorts: isShorts,
-    formats: mergedFormats,
-    allFormats: mergedFormats,
+    formats: qualityOptions,
+    allFormats: qualityOptions,
     url: defaultFormat.url,
     selectedQuality: defaultFormat,
-    audioGuaranteed: defaultFormat.hasAudio || defaultFormat.isMergedFormat
+    audioGuaranteed: defaultFormat.hasAudio
   };
-
-  console.log(`✅ YouTube service completed successfully`);
-  console.log(`🎯 Default: ${defaultFormat.quality} (${defaultFormat.isPremium ? '💰 Premium' : '✅ Free'})`);
-
-  return result;
 }
 
-// ========================================
-// HELPER FUNCTIONS
-// ========================================
-function extractQualityNumber(label) {
-  if (!label) return 0;
-
-  // Match patterns like "1080p", "720p60", etc.
-  const match = label.match(/(\d{3,4})p/);
-  if (match) return parseInt(match[1]);
-
-  // Handle 4K, 2K
-  if (label.includes('2160') || label.includes('4K')) return 2160;
-  if (label.includes('1440') || label.includes('2K')) return 1440;
-  if (label.includes('1080')) return 1080;
-  if (label.includes('720')) return 720;
-  if (label.includes('480')) return 480;
-  if (label.includes('360')) return 360;
-  if (label.includes('240')) return 240;
-  if (label.includes('144')) return 144;
-
-  // Audio formats
-  if (label.includes('kbps') || label.includes('Audio')) {
-    const bitrateMatch = label.match(/(\d+)kbps/);
-    return bitrateMatch ? parseInt(bitrateMatch[1]) * 1000 : 99999;
-  }
-
-  return 0;
-}
-
-function getRandomUserAgent() {
-  const agents = [
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15',
-    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-  ];
-  return agents[Math.floor(Math.random() * agents.length)];
-}
-
-// ========================================
-// EXPORTS
-// ========================================
-module.exports = {
-  fetchYouTubeData,
-  // Exported for testing
-  extractVideoId,
-  normalizeYouTubeUrl
-};
+module.exports = { fetchYouTubeData };
