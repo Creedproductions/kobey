@@ -1,38 +1,86 @@
 // Controllers/youtubeService.js
 const { exec } = require('child_process');
 const util = require('util');
+const fs = require('fs').promises;
+const path = require('path');
+const os = require('os');
 const execPromise = util.promisify(exec);
 const audioMergerService = require("./audioMergerService");
 
+// Path for cookies file
+const COOKIES_PATH = path.join(os.tmpdir(), 'youtube-cookies.txt');
+
 /**
- * Fetches YouTube video data using yt-dlp (primary method)
+ * Fetches YouTube video data using yt-dlp with cookie support
  */
 async function fetchYouTubeData(url) {
   const normalizedUrl = normalizeYouTubeUrl(url);
   console.log(`🔍 Fetching YouTube data with yt-dlp for: ${normalizedUrl}`);
 
   try {
-    return await fetchWithYtDlp(normalizedUrl);
+    // Try with cookies first
+    return await fetchWithYtDlp(normalizedUrl, true);
   } catch (err) {
-    console.error('❌ yt-dlp error:', err.message);
-    console.log('⚠️ Falling back to vidfly.ai...');
-    return fetchWithVidFlyApi(normalizedUrl, 1);
+    console.error('❌ yt-dlp with cookies error:', err.message);
+
+    // Try without cookies as fallback
+    try {
+      console.log('⚠️ Trying without cookies...');
+      return await fetchWithYtDlp(normalizedUrl, false);
+    } catch (err2) {
+      console.error('❌ yt-dlp without cookies error:', err2.message);
+
+      // Final fallback to vidfly.ai
+      console.log('⚠️ Falling back to vidfly.ai...');
+      return fetchWithVidFlyApi(normalizedUrl, 1);
+    }
+  }
+}
+
+/**
+ * Create a basic cookies file for YouTube
+ * This helps with the "Sign in to confirm you're not a bot" error
+ */
+async function createBasicCookiesFile() {
+  try {
+    // Check if cookies file already exists
+    await fs.access(COOKIES_PATH);
+    return COOKIES_PATH;
+  } catch {
+    // Create basic cookies file with CONSENT cookie
+    // This often helps with the bot detection
+    const cookieContent = `# Netscape HTTP Cookie File
+.youtube.com	TRUE	/	FALSE	1735689600	CONSENT	YES+cb.20250305-11-p0.en+FX+424
+`;
+    await fs.writeFile(COOKIES_PATH, cookieContent);
+    console.log('✅ Created basic cookies file');
+    return COOKIES_PATH;
   }
 }
 
 /**
  * Primary API implementation using yt-dlp
  */
-async function fetchWithYtDlp(url) {
+async function fetchWithYtDlp(url, useCookies = true) {
   try {
-    console.log(`📥 Running yt-dlp for: ${url}`);
+    console.log(`📥 Running yt-dlp for: ${url} (cookies: ${useCookies})`);
 
-    // Get video info in JSON format
+    let cookiesOption = '';
+    if (useCookies) {
+      const cookiesPath = await createBasicCookiesFile();
+      cookiesOption = `--cookies "${cookiesPath}"`;
+    }
+
+    // Build command with multiple fallback clients
     const command = `yt-dlp \
       --no-playlist \
       --no-check-certificate \
       --no-warnings \
-      --extractor-args "youtube:player-client=android" \
+      --extractor-args "youtube:player_client=android,mweb" \
+      --geo-bypass \
+      ${cookiesOption} \
+      --add-header "Accept-Language: en-US,en;q=0.9" \
+      --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
       -J \
       "${url}"`;
 
@@ -133,7 +181,7 @@ function processYouTubeData(info, url) {
       let label = `${quality}p`;
 
       // Add quality indicators
-      if (format.fps && format.fps >= 60) label += `${format.fps}`;
+      if (format.fps && format.fps >= 60) label += ` ${format.fps}fps`;
       if (format.vcodec?.includes('av1')) label += ' 🔸';
       else if (format.vcodec?.includes('vp9')) label += ' 🔹';
 
@@ -294,9 +342,9 @@ async function fetchWithVidFlyApi(url, attemptNum) {
  */
 function getRandomUserAgent() {
   const userAgents = [
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15',
-    'Mozilla/5.0 (iPhone; CPU iPhone OS 15_1 like Mac OS X) AppleWebKit/605.1.15',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Safari/605.1.15',
+    'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1',
   ];
   return userAgents[Math.floor(Math.random() * userAgents.length)];
 }
