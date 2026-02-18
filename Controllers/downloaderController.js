@@ -188,18 +188,27 @@ const platformDownloaders = {
   // Layer 1: yt-dlp  →  Layer 2: @tobyg74/tiktok-api-dl  →  Layer 3: btch-downloader
   // ============================================================
   async tiktok(url) {
-    const data = await robustTikTokDownload(url);
+    console.log('TikTok: Initiating robust 3-layer download...');
+
+    // Give TikTok a bit more time because yt-dlp spawns a process
+    const data = await downloadWithTimeout(
+      () => robustTikTokDownload(url),
+      50000 // 50 seconds total budget
+    );
 
     if (!data || !data.video) {
-      throw new Error('TikTok: service returned invalid data');
+      throw new Error('TikTok: All download layers returned invalid data');
     }
 
+    // Validate that we actually got a real video URL, not a bogus short one
     const videoUrl = Array.isArray(data.video) ? data.video[0] : data.video;
     if (!videoUrl || !videoUrl.startsWith('http')) {
-      throw new Error(`TikTok: invalid URL (${videoUrl?.length || 0} chars)`);
+      throw new Error(
+        `TikTok: Final video URL is invalid (${videoUrl?.length || 0} chars)`
+      );
     }
 
-    console.log(`TikTok: OK via [${data._source}] — URL length: ${videoUrl.length}`);
+    console.log(`TikTok: Download complete via [${data._source}] — URL length: ${videoUrl.length}`);
     return data;
   },
 
@@ -479,26 +488,15 @@ const dataFormatters = {
 
     console.log(`TikTok formatter: ✅ Valid URL (${videoUrl.length} chars) from [${data._source}]`);
 
-    // Build videoUrls array: CDN URL first, tikwm proxy as fallback
-    // Flutter download_service tries them in order — proxy works on any IP/simulator
-    const allVideoUrls = Array.isArray(data.video)
-      ? data.video.filter(u => u && u.startsWith('http'))
-      : [videoUrl];
-
     return {
       title: data.title || 'TikTok Video',
-      url: videoUrl,              // primary URL (Flutter default)
-      videoUrls: allVideoUrls,   // [cdnUrl, proxyUrl] — Flutter tries in order
+      url: videoUrl,
       thumbnail: thumbnail,
       sizes: ['Original Quality'],
       audio: audioUrl,
       duration: data.duration || 'unknown',
       source: 'tiktok',
-      // Headers Flutter must send to TikTok CDN — without these get 403 on simulator
-      _downloadHeaders: data._downloadHeaders || {
-        'Referer': 'https://www.tiktok.com/',
-        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
-      },
+      _downloadedVia: data._source || 'unknown', // useful for debugging
     };
   },
 
