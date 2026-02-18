@@ -202,9 +202,9 @@ const platformDownloaders = {
 
     // Validate that we actually got a real video URL, not a bogus short one
     const videoUrl = Array.isArray(data.video) ? data.video[0] : data.video;
-    if (!videoUrl || videoUrl.length < 100) {
+    if (!videoUrl || !videoUrl.startsWith('http')) {
       throw new Error(
-        `TikTok: Final video URL is invalid or too short (${videoUrl?.length || 0} chars)`
+        `TikTok: Final video URL is invalid (${videoUrl?.length || 0} chars)`
       );
     }
 
@@ -477,8 +477,8 @@ const dataFormatters = {
 
     const thumbnail = data.thumbnail || PLACEHOLDER_THUMBNAIL;
 
-    // Final safety guard — if we somehow still got a bad URL, surface it clearly
-    if (!videoUrl || videoUrl.length < 100) {
+    // Final safety guard — tikwm.com URLs at 62 chars ARE valid, only reject non-http
+    if (!videoUrl || !videoUrl.startsWith('http')) {
       console.error(`TikTok formatter: Bad URL slipped through — length: ${videoUrl?.length || 0}`);
       throw new Error(
         `TikTok video URL is invalid (${videoUrl?.length || 0} chars). ` +
