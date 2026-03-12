@@ -477,12 +477,36 @@ const dataFormatters = {
     const serverBase = req ? getServerBaseUrl(req) : '';
     const title      = data.title || 'Facebook Video';
 
+    // metadownloader returns relative /render.php?token=JWT URLs.
+    // The JWT payload contains the real fbcdn.net URL in the video_url field.
+    const resolveMetaUrl = (raw) => {
+      if (!raw) return '';
+      if (raw.startsWith('http')) return raw; // already absolute
+      try {
+        const m = raw.match(/[?&]token=([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]*)/);
+        if (m) {
+          const b64 = m[2].replace(/-/g, '+').replace(/_/g, '/');
+          const pad = b64 + '='.repeat((4 - b64.length % 4) % 4);
+          const payload = JSON.parse(Buffer.from(pad, 'base64').toString('utf8'));
+          const realUrl = payload.video_url || payload.url || payload.u || '';
+          if (realUrl && realUrl.startsWith('http')) {
+            console.log(`📘 FB JWT decoded → ${realUrl.slice(0, 100)}`);
+            return realUrl;
+          }
+        }
+      } catch (e) {
+        console.warn(`📘 FB JWT decode failed: ${e.message}`);
+      }
+      return `https://metadownloader.com${raw.startsWith('/') ? raw : '/' + raw}`;
+    };
+
     const proxy = (cdnUrl) => {
       if (!cdnUrl) return '';
-      // Already a proxy URL — don't double-wrap
       if (cdnUrl.includes('/api/proxy-download')) return cdnUrl;
-      if (serverBase) return wrapForProxy(cdnUrl, 'facebook', title, serverBase);
-      return cdnUrl; // no req available (shouldn't happen) — return raw
+      const realUrl = resolveMetaUrl(cdnUrl);
+      if (!realUrl) return '';
+      if (serverBase) return wrapForProxy(realUrl, 'facebook', title, serverBase);
+      return realUrl;
     };
 
     const qualityScore = (r = '') => {
