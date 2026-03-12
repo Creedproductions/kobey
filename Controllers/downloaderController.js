@@ -258,6 +258,28 @@ const deduplicateByBestQuality = (items) => {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
+// TYPE DETECTION: Some CDNs (e.g. rapidcdn) proxy URLs behind JWT tokens.
+// The original URL with its real extension is in the JWT payload.
+// Decode it to determine whether the asset is an image or a video.
+// ─────────────────────────────────────────────────────────────────────────────
+const detectTypeFromJwtUrl = (tokenUrl) => {
+  try {
+    // Match any ?token= or &token= query param that looks like a JWT (two dots)
+    const m = tokenUrl.match(/[?&]token=([A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)/);
+    if (!m) return null;
+    const payloadB64 = m[1].split('.')[1];
+    if (!payloadB64) return null;
+    // Node's Buffer can handle base64url without padding
+    const payload = JSON.parse(Buffer.from(payloadB64, 'base64url').toString('utf8'));
+    const origUrl  = (payload.url || payload.u || '').toLowerCase();
+    if (!origUrl) return null;
+    if (origUrl.match(/\.(mp4|mov|webm|mkv|avi|ts)/)) return 'video';
+    if (origUrl.match(/\.(jpg|jpeg|png|gif|webp|heic|avif)/)) return 'image';
+  } catch (_) {}
+  return null;
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
 // HELPER: Normalize a raw media item from any platform into a uniform shape.
 // Returns: { url, thumbnail, type ('video'|'image'), quality, index }
 // ─────────────────────────────────────────────────────────────────────────────
@@ -266,13 +288,22 @@ const normalizeMediaItem = (item, index, fallbackThumbnail = PLACEHOLDER_THUMBNA
   const url       = pickBestUrl(item.url || item.download || item.src || '');
   const thumbnail = item.thumbnail || item.cover || item.image || fallbackThumbnail;
 
-  // Determine media type
+  // Determine media type — check in order:
+  // 1. Explicit type field from the library
+  // 2. File extension in the URL
+  // 3. JWT payload decode (for rapidcdn / token-proxied URLs)
+  // 4. Default to 'video'
   let type = item.type || '';
   if (!type) {
     const lower = url.toLowerCase();
-    if (lower.match(/\.(mp4|mov|webm|mkv|avi|ts)(\?|$)/)) type = 'video';
-    else if (lower.match(/\.(jpg|jpeg|png|gif|webp|heic)(\?|$)/)) type = 'image';
-    else type = 'video'; // default assumption
+    if      (lower.match(/\.(mp4|mov|webm|mkv|avi|ts)(\?|$)/))      type = 'video';
+    else if (lower.match(/\.(jpg|jpeg|png|gif|webp|heic|avif)(\?|$)/)) type = 'image';
+    else {
+      // Try to decode the JWT token embedded in the URL
+      const detected = detectTypeFromJwtUrl(url);
+      if (detected) console.log(`🔍 JWT type-decode: ${detected} for ${url.slice(0,60)}`);
+      type = detected || 'video'; // final fallback: video
+    }
   }
 
   return {
@@ -305,9 +336,46 @@ const platformDownloaders = {
   },
 
   async tiktok(url) {
+    // ── Primary: tikwm.com API — supports both video and image slideshow posts ──
+    try {
+      const resp = await downloadWithTimeout(async () => {
+        const r = await axios.post(
+          'https://www.tikwm.com/api/',
+          new URLSearchParams({ url, hd: '1' }).toString(),
+          {
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            timeout: 20000,
+          }
+        );
+        return r.data;
+      }, 25000);
+
+      if (resp && resp.code === 0 && resp.data) {
+        const d = resp.data;
+        console.log('🎵 tikwm OK — has images:', !!(d.images?.length), 'has play:', !!(d.play));
+        // Normalise to the same shape ttdl uses so the formatter works unchanged
+        return {
+          title:     d.title || d.author?.nickname || 'TikTok Post',
+          thumbnail: d.cover || d.origin_cover || '',
+          video:     d.play ? [d.play]   : (d.wmplay ? [d.wmplay] : []),
+          audio:     d.music ? [d.music] : [],
+          // images is an array of plain URL strings for slideshows
+          ...(d.images && d.images.length > 0 && {
+            images: d.images.map(img =>
+              typeof img === 'string' ? img : (img?.url || img?.download || '')
+            ).filter(u => u && u.startsWith('http')),
+          }),
+        };
+      }
+      console.warn('🎵 tikwm returned unexpected shape, falling back to ttdl');
+    } catch (e) {
+      console.warn('🎵 tikwm failed:', e.message, '— falling back to ttdl');
+    }
+
+    // ── Fallback: ttdl (video-only, no image slideshow support) ──
     const data = await downloadWithTimeout(() => ttdl(url));
     if (!data || (!data.video && !data.images)) {
-      throw new Error('TikTok service returned invalid data');
+      throw new Error('TikTok: both tikwm and ttdl failed to return usable data');
     }
     return data;
   },
