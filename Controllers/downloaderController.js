@@ -404,11 +404,19 @@ const platformDownloaders = {
     try {
       const data = await downloadWithTimeout(() => advancedThreadsDownloader(url), 60000);
 
-      if (!data || !data.download) {
+      // Accept: single post (has download/url) OR carousel (has items array)
+      const hasMedia = data && (
+        data.download ||
+        data.url ||
+        (Array.isArray(data.items) && data.items.length > 0)
+      );
+      if (!hasMedia) {
+        console.error("🧵 Threads raw data:", JSON.stringify(data).slice(0, 500));
         throw new Error('Threads service returned invalid data');
       }
 
-      console.log("✅ Threads: Successfully downloaded video");
+      console.log("✅ Threads: data ok — items:", data.items?.length ?? 'none',
+                  "download:", !!data.download, "url:", !!data.url);
       return data;
     } catch (error) {
       console.error(`❌ Threads download failed: ${error.message}`);
@@ -780,36 +788,79 @@ const dataFormatters = {
     if (data.items && Array.isArray(data.items) && data.items.length > 0) {
       console.log(`🧵 Threads: ${data.items.length} item(s) found`);
 
-      const mediaItems = data.items
-        .filter(item => item && (item.download || item.url))
-        .map((item, index) => ({
-          url: item.download || item.url || '',
-          thumbnail: item.thumbnail || data.thumbnail || PLACEHOLDER_THUMBNAIL,
-          type: item.type || 'video',
-          quality: item.quality || 'Best Available',
-          index,
-        }));
+      // Log first item so we can see all available fields
+      console.log("🧵 Threads item[0] keys:", Object.keys(data.items[0] || {}));
+      console.log("🧵 Threads item[0] sample:", JSON.stringify(data.items[0]).slice(0, 300));
 
-      const first = mediaItems[0];
-      return {
-        title: data.title || 'Threads Post',
-        url: first?.url || '',
-        thumbnail: data.thumbnail || first?.thumbnail || PLACEHOLDER_THUMBNAIL,
-        sizes: ['Best Available'],
-        source: 'threads',
-        metadata: data.metadata || {},
-        ...(mediaItems.length > 1 && { mediaItems }),
-      };
+      const mediaItems = data.items
+        .filter(item => item && (item.download || item.url || item.video_url || item.image_url ||
+                                  item.display_url || item.image_versions))
+        .map((item, index) => {
+          // ── URL: try every field the service might use ──
+          const itemUrl =
+            item.download ||
+            item.url ||
+            item.video_url ||
+            item.image_url ||
+            item.display_url ||
+            item.image_versions?.candidates?.[0]?.url ||
+            item.image_versions?.[0]?.url ||
+            '';
+
+          // ── Thumbnail: prefer per-item image over post-level fallback ──
+          const itemThumb =
+            item.thumbnail ||
+            item.cover ||
+            item.image_url ||
+            item.display_url ||
+            item.image_versions?.candidates?.[0]?.url ||
+            item.image_versions?.[0]?.url ||
+            data.thumbnail ||
+            PLACEHOLDER_THUMBNAIL;
+
+          // ── Type: video if has video_url or media_type==2, else image ──
+          const isVideo = !!(item.video_url || item.download?.includes('.mp4'));
+          const itemType = item.type ||
+            (item.media_type === 2 || item.media_type === '2' ? 'video' :
+             item.media_type === 1 || item.media_type === '1' ? 'image' :
+             isVideo ? 'video' : 'image');
+
+          console.log(`🧵 item[${index}] url=${itemUrl.slice(0,60)} thumb=${itemThumb.slice(0,60)} type=${itemType}`);
+
+          return {
+            url:       itemUrl,
+            thumbnail: itemThumb,
+            type:      itemType,
+            quality:   item.quality || 'Best Available',
+            index,
+          };
+        })
+        .filter(item => item.url); // drop any that still have no URL
+
+      if (mediaItems.length === 0) {
+        console.warn("🧵 Threads: no valid items after mapping, falling back to single");
+      } else {
+        const first = mediaItems[0];
+        return {
+          title:     data.title || 'Threads Post',
+          url:       first.url,
+          thumbnail: data.thumbnail || first.thumbnail || PLACEHOLDER_THUMBNAIL,
+          sizes:     ['Best Available'],
+          source:    'threads',
+          metadata:  data.metadata || {},
+          ...(mediaItems.length > 1 && { mediaItems }),
+        };
+      }
     }
 
     // ── Single item ──
     return {
-      title: data.title || 'Threads Post',
-      url: data.download || '',
+      title:     data.title || 'Threads Post',
+      url:       data.download || data.url || '',
       thumbnail: data.thumbnail || PLACEHOLDER_THUMBNAIL,
-      sizes: [data.quality || 'Best Available'],
-      source: 'threads',
-      metadata: data.metadata || {}
+      sizes:     [data.quality || 'Best Available'],
+      source:    'threads',
+      metadata:  data.metadata || {}
     };
   },
 
