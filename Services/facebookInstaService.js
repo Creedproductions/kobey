@@ -2,39 +2,58 @@
  * facebookInstaService.js
  *
  * Routes by URL:
- *   facebook.com / fb.watch  →  metadownloader  (npm install metadownloader)
+ *   facebook.com / fb.watch  →  multi-strategy chain (see below)
  *   instagram.com            →  snapsave.app → snapinsta.app scrapers
+ *
+ * Facebook strategy chain (in order):
+ *   1. Resolve share/redirect URLs to canonical FB URL
+ *   2. @mrnima/facebook-downloader  (npm install @mrnima/facebook-downloader)
+ *   3. fdown.net scraper            (no install needed — HTTP scrape)
+ *   4. Direct Facebook HTML scrape  (sd_src / hd_src / browser_native_* regex)
+ *   5. metadownloader               (legacy last-resort)
  *
  * Return shape (Instagram success):
  *   { status: true, data: [ { thumbnail, url, type, quality } , … ] }
  *
  * Return shape (Facebook success):
- *   raw metadownloader response — normalised by downloaderController's normaliseFacebookData()
+ *   raw response — normalised by downloaderController.normaliseFacebookData()
  */
 
-const axios      = require('axios');
-const cheerio    = require('cheerio');
+const axios   = require('axios');
+const cheerio = require('cheerio');
 
-// ─── metadownloader (Facebook) ───────────────────────────────────────────────
+// ─── optional deps ───────────────────────────────────────────────────────────
 
 let metadownloader;
 try {
   metadownloader = require('metadownloader');
 } catch (_) {
   metadownloader = null;
-  console.warn('⚠️ metadownloader not installed — Facebook downloads will fail. Run: npm install metadownloader');
+  console.warn('⚠️ metadownloader not installed — using as last-resort fallback only');
 }
 
-// ─── shared axios instance (Instagram scrapers) ──────────────────────────────
+let mrnima;
+try {
+  mrnima = require('@mrnima/facebook-downloader');
+} catch (_) {
+  mrnima = null;
+  console.warn('⚠️ @mrnima/facebook-downloader not installed. Run: npm install @mrnima/facebook-downloader');
+}
+
+// ─── shared axios instance ───────────────────────────────────────────────────
 
 const http = axios.create({
   timeout: 30_000,
+  maxRedirects: 10,
   headers: {
-    'User-Agent':      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-    'Accept':          'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-    'Accept-Language': 'en-US,en;q=0.5',
-    'Accept-Encoding': 'gzip, deflate, br',
-    'Connection':      'keep-alive',
+    'User-Agent':
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
+      '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    'Accept':
+      'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+    'Accept-Language':    'en-US,en;q=0.5',
+    'Accept-Encoding':    'gzip, deflate, br',
+    'Connection':         'keep-alive',
     'Upgrade-Insecure-Requests': '1',
   },
 });
@@ -57,60 +76,27 @@ function decodeCdnUrl(href) {
   return href;
 }
 
-/**
- * Detect media type from a URL string.
- *
- * Instagram CDN path conventions (priority order):
- *   /t16/         → video  (newer Reels / image+audio clips)
- *   /o1/v/        → video  (newer CDN path prefix)
- *   /v/t16        → video  (alternate reel path)
- *   /t50.         → video  (older video CDN)
- *   /t51.         → image  (older image CDN)
- *   /t39.         → image  (feed photos — most single-image posts)
- *   /video/       → video
- *   default       → 'video' (safer for reels; caller checks thumbnail to override)
- */
 function detectType(url) {
   if (!url) return 'video';
-
-  // 1. Proxy ext param
   try {
     const u   = new URL(url);
     const ext = (u.searchParams.get('ext') || '').toLowerCase();
-    if (['mp4', 'mov', 'webm', 'mkv', 'avi', 'ts'].includes(ext))           return 'video';
+    if (['mp4', 'mov', 'webm', 'mkv', 'avi', 'ts'].includes(ext))            return 'video';
     if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'heic', 'avif'].includes(ext)) return 'image';
   } catch (_) {}
-
-  // 2. Path extension
   const pathOnly = url.toLowerCase().split('?')[0];
   if (pathOnly.match(/\.(mp4|mov|webm|mkv|avi|ts)$/))          return 'video';
   if (pathOnly.match(/\.(jpg|jpeg|png|gif|webp|heic|avif)$/))   return 'image';
-
-  // 3. Instagram CDN path conventions
-  if (pathOnly.includes('/t16/'))    return 'video';  // newer Reels / audio+image video CDN
-  if (pathOnly.includes('/o1/v/'))   return 'video';  // newer CDN path prefix
-  if (pathOnly.match(/\/v\/t16/))    return 'video';  // /v/t16xxx
-  if (pathOnly.includes('/t50.'))    return 'video';  // older video CDN
-  if (pathOnly.includes('/t51.'))    return 'image';  // older image CDN
-  if (pathOnly.includes('/t39.'))    return 'image';  // feed photos (most single-image posts)
-  if (pathOnly.includes('/video/'))  return 'video';
-
-  // 4. Decode proxy URL and retry
+  if (pathOnly.includes('/t16/'))   return 'video';
+  if (pathOnly.includes('/o1/v/'))  return 'video';
+  if (pathOnly.match(/\/v\/t16/))   return 'video';
+  if (pathOnly.includes('/t50.'))   return 'video';
+  if (pathOnly.includes('/t51.'))   return 'image';
+  if (pathOnly.includes('/t39.'))   return 'image';
+  if (pathOnly.includes('/video/')) return 'video';
   const decoded = decodeCdnUrl(url);
-  if (decoded !== url) {
-    const dp = decoded.toLowerCase().split('?')[0];
-    if (dp.match(/\.(mp4|mov|webm|mkv|avi|ts)$/))          return 'video';
-    if (dp.match(/\.(jpg|jpeg|png|gif|webp|heic|avif)$/))   return 'image';
-    if (dp.includes('/t16/'))    return 'video';
-    if (dp.includes('/o1/v/'))   return 'video';
-    if (dp.match(/\/v\/t16/))    return 'video';
-    if (dp.includes('/t50.'))    return 'video';
-    if (dp.includes('/t51.'))    return 'image';
-    if (dp.includes('/t39.'))    return 'image';
-    if (dp.includes('/video/'))  return 'video';
-  }
-
-  return 'video'; // safe default
+  if (decoded !== url) return detectType(decoded);
+  return 'video';
 }
 
 function qualityFromText(txt) {
@@ -133,7 +119,293 @@ function isMediaHref(href) {
   );
 }
 
-// ─── Scraper 1: snapsave.app ─────────────────────────────────────────────────
+// ─── Step 1: URL resolver ─────────────────────────────────────────────────────
+//
+// facebook.com/share/r/XXXXX   → share links must be followed to get canonical
+// fb.watch/XXXXX               → always redirects
+// m.facebook.com               → normalise to www
+//
+// We do a lightweight HEAD request and follow redirects; if that fails we fall
+// back to a GET (some CDNs block HEAD).
+
+async function resolveCanonicalFbUrl(url) {
+  // Fast-exit: already looks like a canonical video/reel/watch URL
+  if (
+    url.match(/facebook\.com\/(watch|reel|video)\//) ||
+    url.match(/facebook\.com\/[^/]+\/videos\/\d+/) ||
+    url.includes('facebook.com/watch?')
+  ) {
+    return url;
+  }
+
+  try {
+    console.log(`🔗 Resolving redirect: ${url}`);
+    const resp = await axios.head(url, {
+      maxRedirects: 10,
+      timeout: 10000,
+      validateStatus: () => true,
+      headers: { 'User-Agent': http.defaults.headers['User-Agent'] },
+    });
+    const finalUrl = resp.request?.res?.responseUrl || resp.config?.url || url;
+    if (finalUrl && finalUrl !== url) {
+      console.log(`🔗 Resolved → ${finalUrl}`);
+      return finalUrl;
+    }
+  } catch (_) {}
+
+  // Fallback: GET redirect
+  try {
+    const resp = await axios.get(url, {
+      maxRedirects: 10,
+      timeout: 12000,
+      validateStatus: () => true,
+      headers: { 'User-Agent': http.defaults.headers['User-Agent'] },
+    });
+    const finalUrl = resp.request?.res?.responseUrl || resp.config?.url || url;
+    if (finalUrl && finalUrl !== url) {
+      console.log(`🔗 Resolved (GET) → ${finalUrl}`);
+      return finalUrl;
+    }
+  } catch (_) {}
+
+  console.warn(`🔗 Could not resolve redirect, proceeding with original URL`);
+  return url;
+}
+
+// ─── Strategy 2: @mrnima/facebook-downloader ─────────────────────────────────
+//
+// Returns: { creator, status, result: { thumbnail, duration, links: { HD, SD } } }
+// Normalised to: { sd, hd, thumbnail, title }
+
+async function tryMrnima(url) {
+  if (!mrnima) throw new Error('@mrnima/facebook-downloader not installed');
+  const result = await mrnima.facebook(url);
+  console.log('📘 mrnima raw:', JSON.stringify(result).slice(0, 300));
+
+  if (!result || !result.status) {
+    throw new Error(`@mrnima failed: ${result?.msg || 'status false'}`);
+  }
+
+  const links = result.result?.links || {};
+  const hd    = links.HD || links.hd || '';
+  const sd    = links.SD || links.sd || '';
+  const thumb = result.result?.thumbnail || '';
+
+  if (!hd && !sd) throw new Error('@mrnima returned no video links');
+
+  return {
+    hd,
+    sd,
+    thumbnail: thumb,
+    title:     result.result?.title || 'Facebook Video',
+  };
+}
+
+// ─── Strategy 3: fdown.net scraper ───────────────────────────────────────────
+//
+// POST https://fdown.net/download.php  with  URLz=<url>
+// Parse the response HTML for HD/SD download links.
+
+async function tryFdown(url) {
+  const resp = await http.post(
+    'https://fdown.net/download.php',
+    `URLz=${encodeURIComponent(url)}`,
+    {
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Origin':  'https://fdown.net',
+        'Referer': 'https://fdown.net/',
+      },
+    }
+  );
+
+  const html = typeof resp.data === 'string' ? resp.data : '';
+  if (!html) throw new Error('fdown.net returned empty response');
+
+  const $ = cheerio.load(html);
+
+  // Look for HD/SD anchor links (href attributes pointing to fbcdn.net or video)
+  let hd = '';
+  let sd = '';
+
+  $('a[href]').each((_, a) => {
+    const href = $(a).attr('href') || '';
+    const text = $(a).text().toLowerCase();
+    if (!href.includes('fbcdn.net') && !href.match(/\.mp4/i)) return;
+
+    if (!hd && (text.includes('hd') || text.includes('high') || $(a).closest('[id*="HD"]').length))
+      hd = href;
+    else if (!sd && (text.includes('sd') || text.includes('low') || text.includes('normal')))
+      sd = href;
+    else if (!sd)
+      sd = href;  // accept first unknown quality as SD
+  });
+
+  // Fallback: look inside input[type=text] (some versions embed URL in input)
+  if (!hd && !sd) {
+    $('input[type="text"]').each((_, el) => {
+      const val = $(el).attr('value') || '';
+      if (val.includes('fbcdn.net') || val.match(/\.mp4/i)) {
+        const id = ($(el).attr('id') || '').toLowerCase();
+        if (id.includes('hd') && !hd) hd = val;
+        else if (!sd) sd = val;
+      }
+    });
+  }
+
+  console.log(`📘 fdown.net: hd=${hd.slice(0, 60)} sd=${sd.slice(0, 60)}`);
+
+  if (!hd && !sd) throw new Error('fdown.net: no video URLs found in response HTML');
+
+  const thumb = $('img').first().attr('src') || '';
+  return { hd, sd, thumbnail: thumb, title: $('title').text().trim() || 'Facebook Video' };
+}
+
+// ─── Strategy 4: Direct Facebook HTML scrape ─────────────────────────────────
+//
+// Fetches the actual Facebook page and regex-extracts sd_src / hd_src /
+// browser_native_hd_url / browser_native_sd_url from the embedded JSON blobs.
+
+const FB_VIDEO_REGEXES = [
+  { key: 'hd',  re: /"browser_native_hd_url"\s*:\s*"([^"]+)"/ },
+  { key: 'sd',  re: /"browser_native_sd_url"\s*:\s*"([^"]+)"/ },
+  { key: 'hd',  re: /"hd_src"\s*:\s*"([^"]+)"/ },
+  { key: 'sd',  re: /"sd_src"\s*:\s*"([^"]+)"/ },
+  { key: 'hd',  re: /"hd_src_no_ratelimit"\s*:\s*"([^"]+)"/ },
+  { key: 'sd',  re: /"sd_src_no_ratelimit"\s*:\s*"([^"]+)"/ },
+  // newer "playable_url" forms
+  { key: 'hd',  re: /"playable_url_quality_hd"\s*:\s*"([^"]+)"/ },
+  { key: 'sd',  re: /"playable_url"\s*:\s*"([^"]+)"/ },
+];
+
+function unescapeJsString(s) {
+  return s
+    .replace(/\\u003C/gi, '<')
+    .replace(/\\u003E/gi, '>')
+    .replace(/\\u0026/gi, '&')
+    .replace(/\\u00[0-9a-f]{2}/gi, m => String.fromCharCode(parseInt(m.slice(2), 16)))
+    .replace(/\\\//g, '/')
+    .replace(/\\"/g, '"');
+}
+
+async function tryDirectHtmlScrape(url) {
+  const resp = await http.get(url, {
+    headers: {
+      // Use a mobile UA — mobile FB pages expose more raw JSON in page source
+      'User-Agent':
+        'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) ' +
+        'AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1',
+      'Accept-Language': 'en-US,en;q=0.9',
+    },
+  });
+
+  const html = typeof resp.data === 'string' ? resp.data : '';
+  if (!html) throw new Error('Facebook page returned empty content');
+  if (html.length < 500) throw new Error('Facebook page response too short — likely blocked');
+
+  let hd = '';
+  let sd = '';
+
+  for (const { key, re } of FB_VIDEO_REGEXES) {
+    const match = html.match(re);
+    if (match && match[1]) {
+      const cleanUrl = unescapeJsString(match[1]);
+      if (key === 'hd' && !hd && cleanUrl.startsWith('http')) hd = cleanUrl;
+      if (key === 'sd' && !sd && cleanUrl.startsWith('http')) sd = cleanUrl;
+    }
+    if (hd && sd) break;
+  }
+
+  console.log(`📘 Direct scrape: hd=${hd.slice(0, 60)} sd=${sd.slice(0, 60)}`);
+
+  if (!hd && !sd)
+    throw new Error('Direct HTML scrape: no video URLs found — page may require login');
+
+  // Extract thumbnail from og:image
+  const $ = cheerio.load(html);
+  const thumb =
+    $('meta[property="og:image"]').attr('content') ||
+    $('meta[name="og:image"]').attr('content') || '';
+
+  const title =
+    $('meta[property="og:title"]').attr('content') ||
+    $('title').text().trim() || 'Facebook Video';
+
+  return { hd, sd, thumbnail: thumb, title };
+}
+
+// ─── Strategy 5: metadownloader (legacy last-resort) ─────────────────────────
+
+async function tryMetadownloader(url) {
+  if (!metadownloader) throw new Error('metadownloader not installed');
+
+  const data = await metadownloader(url);
+  console.log('📘 metadownloader raw keys:', Object.keys(data || {}));
+
+  // Detect and reject the error shape { developer, status: false, msg }
+  if (data && data.status === false) {
+    throw new Error(`metadownloader error: ${data.msg || 'status false'}`);
+  }
+
+  if (!data) throw new Error('metadownloader returned null');
+
+  return data;  // let normaliseFacebookData handle the shape
+}
+
+// ─── Facebook main entry ──────────────────────────────────────────────────────
+
+async function downloadFacebook(url) {
+  console.log(`📘 Facebook: starting download for ${url}`);
+
+  // Step 1: resolve redirect/share URLs
+  const canonicalUrl = await resolveCanonicalFbUrl(url);
+
+  const errors = [];
+  const attempts = [
+    { name: '@mrnima', fn: () => tryMrnima(canonicalUrl) },
+    { name: 'fdown.net', fn: () => tryFdown(canonicalUrl) },
+    { name: 'direct-html', fn: () => tryDirectHtmlScrape(canonicalUrl) },
+    { name: 'metadownloader', fn: () => tryMetadownloader(canonicalUrl) },
+    // Also try the original URL if canonical differs (safety net)
+    ...(canonicalUrl !== url
+      ? [
+          { name: '@mrnima-orig', fn: () => tryMrnima(url) },
+          { name: 'fdown.net-orig', fn: () => tryFdown(url) },
+          { name: 'direct-html-orig', fn: () => tryDirectHtmlScrape(url) },
+        ]
+      : []),
+  ];
+
+  for (const { name, fn } of attempts) {
+    try {
+      console.log(`📘 Facebook: trying strategy [${name}]`);
+      const result = await fn();
+      console.log(`✅ Facebook: strategy [${name}] succeeded`);
+
+      // Strategies 2-4 return normalised { hd, sd, thumbnail, title }
+      // — wrap into the shape normaliseFacebookData() understands ({ sd, hd, title, thumbnail })
+      if (result && (result.hd || result.sd) && !result.data && !result.media) {
+        return {
+          hd:        result.hd        || '',
+          sd:        result.sd        || '',
+          title:     result.title     || 'Facebook Video',
+          thumbnail: result.thumbnail || '',
+        };
+      }
+
+      // metadownloader may return its own shape — pass through
+      return result;
+
+    } catch (err) {
+      console.warn(`📘 Facebook: strategy [${name}] failed: ${err.message}`);
+      errors.push(`${name}: ${err.message}`);
+    }
+  }
+
+  throw new Error(`Facebook: all strategies failed.\n${errors.join('\n')}`);
+}
+
+// ─── Instagram scrapers ───────────────────────────────────────────────────────
 
 async function scrapeSnapsave(igUrl) {
   const resp = await http.post(
@@ -153,7 +425,6 @@ async function scrapeSnapsave(igUrl) {
   const items    = [];
   const seenUrls = new Set();
 
-  // Strategy 1: table rows / .download-items blocks
   $('table tr, .download-items').each((_, row) => {
     const $row    = $(row);
     const thumbEl = $row.find('img').first();
@@ -214,8 +485,6 @@ async function scrapeSnapsave(igUrl) {
 
   return items;
 }
-
-// ─── Scraper 2: snapinsta.app ────────────────────────────────────────────────
 
 async function scrapeSnapinsta(igUrl) {
   const resp = await http.post(
@@ -292,148 +561,13 @@ async function scrapeSnapinsta(igUrl) {
 
 // ─── public API ──────────────────────────────────────────────────────────────
 
-// ─── Facebook redirect resolver ──────────────────────────────────────────────
-// /share/r/ links are HTTP redirects. metadownloader crashes on them because it
-// tries to parse the page before the redirect resolves. Follow the redirect
-// first to get the real reel/video URL, then pass that to metadownloader.
-
-async function resolveFacebookUrl(url) {
-  // Only bother for known redirect patterns
-  if (!url.includes('/share/') && !url.includes('fb.watch')) return url;
-
-  try {
-    const resp = await axios.get(url, {
-      maxRedirects: 10,
-      timeout: 15000,
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-      },
-      validateStatus: () => true, // accept any status so we can read the final URL
-    });
-
-    // axios resolves the redirect chain — the final URL is in resp.request.res.responseUrl
-    // or resp.request._redirectable?._currentUrl depending on the http client version
-    const finalUrl =
-      resp.request?.res?.responseUrl ||
-      resp.request?._redirectable?._currentUrl ||
-      resp.config?.url ||
-      url;
-
-    if (finalUrl && finalUrl !== url) {
-      console.log(`📘 Facebook redirect: ${url} → ${finalUrl}`);
-      return finalUrl;
-    }
-
-    // Fallback: check for a canonical URL or og:url in the HTML body
-    if (typeof resp.data === 'string') {
-      const canonical = resp.data.match(/<link[^>]+rel=["']canonical["'][^>]+href=["']([^"']+)["']/i)?.[1]
-        || resp.data.match(/<meta[^>]+property=["']og:url["'][^>]+content=["']([^"']+)["']/i)?.[1];
-      if (canonical && canonical.includes('facebook.com')) {
-        console.log(`📘 Facebook canonical: ${canonical}`);
-        return canonical;
-      }
-    }
-  } catch (e) {
-    console.warn('📘 Facebook redirect resolve failed:', e.message, '— using original URL');
-  }
-
-  return url;
-}
-
-// ─── Facebook scraper fallback (fbdown.net) ───────────────────────────────────
-// Used when metadownloader fails (status:false or throws).
-
-async function scrapeFbdown(fbUrl) {
-  try {
-    // Step 1: get token from homepage
-    const home = await axios.get('https://fbdown.net/', {
-      timeout: 15000,
-      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36' },
-    });
-    const $home  = cheerio.load(home.data);
-    const token  = $home('input[name="_token"]').val() || $home('input[name="token"]').val() || '';
-
-    // Step 2: submit the URL
-    const form = new URLSearchParams({ _token: token, url: fbUrl });
-    const resp = await axios.post('https://fbdown.net/', form.toString(), {
-      timeout: 20000,
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'Referer': 'https://fbdown.net/',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36',
-      },
-    });
-
-    const $ = cheerio.load(resp.data);
-    const items = [];
-
-    $('a[href]').each((_, a) => {
-      const href = $(a).attr('href') || '';
-      if (!href.startsWith('http')) return;
-      const lower = href.toLowerCase();
-      if (!lower.includes('fbcdn.net') && !lower.includes('.mp4') && !lower.includes('facebook')) return;
-      const text  = $(a).text().trim().toLowerCase();
-      const quality = text.includes('hd') ? 'HD' : text.includes('sd') ? 'SD' : 'Best Quality';
-      items.push({ resolution: quality, url: href, thumbnail: '' });
-    });
-
-    if (items.length > 0) {
-      console.log(`✅ fbdown: ${items.length} item(s)`);
-      return { data: items, title: 'Facebook Video', thumbnail: '' };
-    }
-  } catch (e) {
-    console.warn('📘 fbdown scraper failed:', e.message);
-  }
-  return null;
-}
-
 async function facebookInsta(url) {
-  // ── Facebook branch: metadownloader + fallback ────────────────────────────
+  // ── Facebook branch ───────────────────────────────────────────────────────
   if (url.includes('facebook.com') || url.includes('fb.watch')) {
-    console.log('📘 Facebook: using metadownloader');
-
-    if (!metadownloader) {
-      throw new Error('metadownloader is not installed. Run: npm install metadownloader');
-    }
-
-    // For /share/r/ and fb.watch links, resolve the redirect first so
-    // metadownloader receives the real video/reel URL instead of a redirect stub.
-    const resolvedUrl = await resolveFacebookUrl(url);
-
-    let data = null;
-    try {
-      data = await metadownloader(resolvedUrl);
-    } catch (e) {
-      console.warn('📘 metadownloader threw:', e.message);
-    }
-
-    // Check if metadownloader actually succeeded (it returns status:false on failure)
-    const metaOk = data && data.status !== false && (
-      (Array.isArray(data.data)  && data.data.length  > 0) ||
-      (Array.isArray(data.media) && data.media.length > 0) ||
-      data.sd || data.hd || data.url
-    );
-
-    if (metaOk) {
-      console.log('📘 Facebook metadownloader raw type:', typeof data);
-      console.log('📘 Facebook metadownloader raw keys:', Object.keys(data || {}));
-      console.log('📘 Facebook metadownloader sample:', JSON.stringify(data).slice(0, 400));
-      return data;
-    }
-
-    // metadownloader failed — log why and try fbdown.net scraper
-    console.warn('📘 metadownloader failed or returned status:false — msg:', data?.msg || 'unknown');
-    console.log('📘 Facebook: trying fbdown.net scraper as fallback');
-
-    const fbdownData = await scrapeFbdown(resolvedUrl);
-    if (fbdownData) return fbdownData;
-
-    // Both failed
-    throw new Error(`Facebook: all download methods failed. metadownloader: ${data?.msg || 'error'}`);
+    return downloadFacebook(url);
   }
 
-  // ── Instagram branch: scraper chain ──────────────────────────────────────
+  // ── Instagram branch ──────────────────────────────────────────────────────
   const errors = [];
 
   try {
