@@ -161,6 +161,15 @@ function getServerBaseUrl(req) {
   return process.env.SERVER_BASE_URL || `${protocol}://${host}`;
 }
 
+// Wrap a CDN url through the server proxy so the Flutter client
+// doesn't need to send platform-specific Referer/Origin headers.
+function wrapForProxy(cdnUrl, platform, title, serverBaseUrl) {
+  if (!cdnUrl) return cdnUrl;
+  const encoded  = encodeURIComponent(cdnUrl);
+  const safeName = encodeURIComponent((title || 'video').replace(/[^a-zA-Z0-9_\- ]/g, '').trim() || 'video');
+  return `${serverBaseUrl}/api/proxy-download?url=${encoded}&filename=${safeName}&platform=${platform}`;
+}
+
 // ===== FACEBOOK DATA NORMALISER =====
 //
 // metadownloader, snapsave, and direct-scrape each return a different shape.
@@ -234,12 +243,14 @@ const platformDownloaders = {
   },
 
   // ─── FACEBOOK (patched) ───────────────────────────────────────────────────
-  async facebook(url) {
+  async facebook(url, req) {
     const raw = await downloadWithTimeout(() => facebookInsta(url), 60000);
     if (!raw) throw new Error('Facebook: no data returned');
 
     // Normalise every possible shape metadownloader/snapsave can return
     const data = normaliseFacebookData(raw);
+    // Attach req so the formatter can build proxy URLs
+    data._req = req;
 
     const hasUrl =
       (Array.isArray(data?.data)  && data.data.some(v  => v?.url))  ||
@@ -461,14 +472,37 @@ const dataFormatters = {
   facebook(data) {
     console.log('📘 FB formatter — keys:', Object.keys(data || {}));
 
+    // Pull req out (attached by the downloader) and build proxy helper
+    const req        = data._req || null;
+    const serverBase = req ? getServerBaseUrl(req) : '';
+    const title      = data.title || 'Facebook Video';
+
+    const proxy = (cdnUrl) => {
+      if (!cdnUrl) return '';
+      // Already a proxy URL — don't double-wrap
+      if (cdnUrl.includes('/api/proxy-download')) return cdnUrl;
+      if (serverBase) return wrapForProxy(cdnUrl, 'facebook', title, serverBase);
+      return cdnUrl; // no req available (shouldn't happen) — return raw
+    };
+
+    const qualityScore = (r = '') => {
+      const s = r.toLowerCase();
+      if (s.includes('1080'))                    return 5;
+      if (s.includes('720') || s.includes('hd')) return 4;
+      if (s.includes('480'))                     return 3;
+      if (s.includes('360') || s.includes('sd')) return 2;
+      return 1;
+    };
+
     // media array shape  { media: [{url, type, quality}…] }
     if (data && Array.isArray(data.media) && data.media.length > 0) {
       const valid = data.media.filter(i => i?.url);
       if (!valid.length) throw new Error('Facebook media array has no valid URLs');
       const best = valid.find(i => i.type === 'video') || valid[0];
+      console.log(`📘 FB media-array: best url=${best.url.slice(0, 80)}`);
       return {
-        title:     data.title     || 'Facebook Video',
-        url:       best.url,
+        title,
+        url:       proxy(best.url),
         thumbnail: data.thumbnail || best.thumbnail || PLACEHOLDER_THUMBNAIL,
         sizes:     valid.map(i => i.quality || i.resolution || 'Original Quality'),
         source:    'facebook',
@@ -476,25 +510,19 @@ const dataFormatters = {
       };
     }
 
-    // data array shape  { data: [{url, resolution}…] }  — most common
+    // data array shape  { data: [{url, resolution}…] }  — most common (metadownloader)
     const fbData = data?.data || [];
     if (Array.isArray(fbData) && fbData.length > 0) {
-      const qualityScore = (r = '') => {
-        const s = r.toLowerCase();
-        if (s.includes('1080'))               return 5;
-        if (s.includes('720') || s.includes('hd')) return 4;
-        if (s.includes('480'))               return 3;
-        if (s.includes('360') || s.includes('sd')) return 2;
-        return 1;
-      };
       const sorted = [...fbData].sort((a, b) =>
         qualityScore(b.resolution || b.quality || '') -
         qualityScore(a.resolution || a.quality || '')
       );
       const best = sorted[0];
+      const rawUrl = best?.url || '';
+      console.log(`📘 FB data-array: best resolution=${best?.resolution} url=${rawUrl.slice(0, 80)}`);
       return {
-        title:     data.title      || 'Facebook Video',
-        url:       best?.url       || '',
+        title,
+        url:       proxy(rawUrl),
         thumbnail: best?.thumbnail || data.thumbnail || PLACEHOLDER_THUMBNAIL,
         sizes:     fbData.map(v => v.resolution || v.quality || 'Unknown'),
         source:    'facebook',
@@ -505,9 +533,10 @@ const dataFormatters = {
     // Single-URL fallback
     const fallback = data?.url || data?.download || data?.video || data?.videoUrl || '';
     if (fallback) {
+      console.log(`📘 FB fallback url=${fallback.slice(0, 80)}`);
       return {
-        title:     data?.title || 'Facebook Video',
-        url:       fallback,
+        title,
+        url:       proxy(fallback),
         thumbnail: data?.thumbnail || PLACEHOLDER_THUMBNAIL,
         sizes:     ['Best Quality'],
         source:    'facebook',
@@ -718,7 +747,7 @@ const downloadMedia = async (req, res) => {
       throw new Error(`No downloader available for platform: ${platform}`);
     }
 
-    const data = platform === 'youtube'
+    const data = (platform === 'youtube' || platform === 'facebook')
       ? await downloader(processedUrl, req)
       : await downloader(processedUrl);
 

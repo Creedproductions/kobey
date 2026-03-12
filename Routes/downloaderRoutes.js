@@ -1,9 +1,11 @@
 const express = require('express');
 const router = express.Router();
 const { downloadMedia } = require('../Controllers/downloaderController');
+const { proxyDownload } = require('../Controllers/proxyController');
 const mockController = require('../Controllers/mockController');
 
 router.post('/download', downloadMedia);
+router.get('/proxy-download', proxyDownload);
 router.get('/mock-videos', mockController.getMockVideos);
 
 router.get('/test', (req, res) => {
