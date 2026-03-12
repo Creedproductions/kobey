@@ -210,35 +210,41 @@ const pickBestUrl = (rawUrl) => {
  *     {url: img2_hd, thumbnail: t2, ...}, ... ]
  */
 const deduplicateByBestQuality = (items) => {
-  // Build a map keyed by a composite identity:
-  //   primary   → thumbnail URL  (same asset always shares a thumbnail)
-  //   secondary → URL path without query string (catches cases where thumbnail
-  //               is missing or identical across all items in a post)
-  //
-  // We only group two items together when BOTH their thumbnail AND their
-  // stripped URL path agree — this prevents false-positive collapsing of
-  // distinct carousel items that happen to share a post-level thumbnail.
+  // Key strategy:
+  //   A. Generic proxy paths (rapidcdn /v2, etc.) — pathname is NOT the identity.
+  //      → Group by thumbnail URL to collapse HD/SD of the same proxied asset.
+  //        If no thumbnail, fall back to full URL (each token is a distinct asset).
+  //   B. Normal CDN paths — pathname IS the identity.
+  //      → Group by thumbnail::pathname so HD/SD of the same asset collapse.
+  //        If no thumbnail, use pathname alone.
   const groups = new Map();
 
-  items.forEach((item, rawIndex) => {
-    // Resolve url array → best single string
+  const GENERIC_PATH_RE = /^\/v[0-9]?\/?$|^\/download\/?$|^\/media\/?$|^\/proxy\/?$/i;
+
+  items.forEach((item) => {
     const resolvedUrl = pickBestUrl(item.url || item.download || item.src || '');
     const thumb       = item.thumbnail || item.cover || item.image || '';
 
-    // Strip query params from URL to get a stable path-level identity
-    let urlPath = '';
-    try { urlPath = new URL(resolvedUrl).pathname; } catch (_) {
-      urlPath = resolvedUrl.split('?')[0];
+    let key = '';
+    try {
+      const parsed  = new URL(resolvedUrl);
+      const urlPath = parsed.pathname;
+
+      if (GENERIC_PATH_RE.test(urlPath)) {
+        // Proxy CDN: group by thumbnail (same image → same thumb from igdl)
+        // If thumb is also empty, use full URL as unique key.
+        key = thumb || resolvedUrl;
+      } else {
+        key = thumb ? `${thumb}::${urlPath}` : urlPath;
+      }
+    } catch (_) {
+      key = resolvedUrl;
     }
 
-    // Composite key: thumbnail + url path  (both must match to be "the same asset")
-    // If thumbnail is empty, fall back to url-only key so we still deduplicate HD/SD.
-    const key = thumb ? `${thumb}::${urlPath}` : urlPath;
     if (!key) return;
 
-    const score = qualityScore(item.quality || item.resolution || '');
+    const score    = qualityScore(item.quality || item.resolution || '');
     const existing = groups.get(key);
-
     if (!existing || score > existing._score) {
       groups.set(key, { ...item, url: resolvedUrl, _score: score });
     }
@@ -251,7 +257,7 @@ const deduplicateByBestQuality = (items) => {
 
   console.log(`🔑 dedup: ${items.length} raw → ${result.length} unique`);
   result.forEach((it, i) =>
-    console.log(`  [${i}] url=${String(it.url).slice(0,80)} thumb=${String(it.thumbnail).slice(0,60)} type=${it.type}`)
+    console.log(`  [${i}] url=${String(it.url).slice(0, 100)} type=${it.type}`)
   );
 
   return result;
