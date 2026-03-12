@@ -210,32 +210,51 @@ const pickBestUrl = (rawUrl) => {
  *     {url: img2_hd, thumbnail: t2, ...}, ... ]
  */
 const deduplicateByBestQuality = (items) => {
-  // Build a map keyed by the thumbnail URL (most reliable dedup key).
-  // Fall back to a hash of the URL path if no thumbnail exists.
+  // Build a map keyed by a composite identity:
+  //   primary   → thumbnail URL  (same asset always shares a thumbnail)
+  //   secondary → URL path without query string (catches cases where thumbnail
+  //               is missing or identical across all items in a post)
+  //
+  // We only group two items together when BOTH their thumbnail AND their
+  // stripped URL path agree — this prevents false-positive collapsing of
+  // distinct carousel items that happen to share a post-level thumbnail.
   const groups = new Map();
 
-  items.forEach(item => {
-    // Normalise the raw URL first (it might be an array)
+  items.forEach((item, rawIndex) => {
+    // Resolve url array → best single string
     const resolvedUrl = pickBestUrl(item.url || item.download || item.src || '');
     const thumb       = item.thumbnail || item.cover || item.image || '';
 
-    // Key: prefer thumbnail; fall back to URL up to the query string
-    const key = thumb || resolvedUrl.split('?')[0];
-    if (!key) return; // skip items with no identity
+    // Strip query params from URL to get a stable path-level identity
+    let urlPath = '';
+    try { urlPath = new URL(resolvedUrl).pathname; } catch (_) {
+      urlPath = resolvedUrl.split('?')[0];
+    }
 
+    // Composite key: thumbnail + url path  (both must match to be "the same asset")
+    // If thumbnail is empty, fall back to url-only key so we still deduplicate HD/SD.
+    const key = thumb ? `${thumb}::${urlPath}` : urlPath;
+    if (!key) return;
+
+    const score = qualityScore(item.quality || item.resolution || '');
     const existing = groups.get(key);
-    const score    = qualityScore(item.quality || item.resolution || '');
 
     if (!existing || score > existing._score) {
       groups.set(key, { ...item, url: resolvedUrl, _score: score });
     }
   });
 
-  // Strip the internal _score field and re-index
-  return Array.from(groups.values()).map(({ _score, ...item }, index) => ({
+  const result = Array.from(groups.values()).map(({ _score, ...item }, index) => ({
     ...item,
     index,
   }));
+
+  console.log(`🔑 dedup: ${items.length} raw → ${result.length} unique`);
+  result.forEach((it, i) =>
+    console.log(`  [${i}] url=${String(it.url).slice(0,80)} thumb=${String(it.thumbnail).slice(0,60)} type=${it.type}`)
+  );
+
+  return result;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -529,40 +548,56 @@ const dataFormatters = {
   // separate asset so we keep them all as mediaItems.
   // ─────────────────────────────────────────────────────────────────────────
   tiktok(data) {
-    console.log('🎵 TikTok: Formatting data');
+    console.log('🎵 TikTok: keys=', Object.keys(data || {}),
+                'images len=', data.images?.length ?? 0,
+                'has video=', !!(data.video), 'has audio=', !!(data.audio));
 
     // ── Image slideshow post ──
     if (data.images && Array.isArray(data.images) && data.images.length > 0) {
-      console.log(`🎵 TikTok: Image slideshow with ${data.images.length} image(s)`);
+      console.log(`🎵 TikTok: slideshow ${data.images.length} item(s), item[0] type=${typeof data.images[0]}`);
+      if (data.images[0]) console.log('🎵 sample:', JSON.stringify(data.images[0]).slice(0, 120));
 
-      // Each entry is a plain URL string
+      // btch-downloader may return plain strings OR objects like {url, width, height}
+      const extractUrl = (entry) => {
+        if (typeof entry === 'string') return entry;
+        if (entry && typeof entry === 'object')
+          return entry.url || entry.download || entry.src || entry.image_url || entry.display_url || '';
+        return '';
+      };
+
       const mediaItems = data.images
-        .filter(imgUrl => imgUrl && typeof imgUrl === 'string')
+        .map(extractUrl)
+        .filter(u => u && u.startsWith('http'))
         .map((imgUrl, index) => ({
           url:       imgUrl,
-          thumbnail: imgUrl, // use the image itself as its own thumbnail
+          thumbnail: imgUrl,
           type:      'image',
           quality:   'Original Quality',
           index,
         }));
 
-      const first = mediaItems[0];
-      return {
-        title:            data.title || 'TikTok Post',
-        url:              first?.url || '',
-        thumbnail:        data.thumbnail || first?.url || PLACEHOLDER_THUMBNAIL,
-        sizes:            ['Original Quality'],
-        audio:            pickBestUrl(data.audio) || '',
-        source:           'tiktok',
-        isImageSlideshow: true,
-        ...(mediaItems.length > 1 && { mediaItems }),
-      };
+      console.log(`🎵 TikTok: ${mediaItems.length} valid image URL(s) extracted`);
+
+      if (mediaItems.length > 0) {
+        const first = mediaItems[0];
+        return {
+          title:            data.title || 'TikTok Post',
+          url:              first.url,
+          thumbnail:        data.thumbnail || first.url || PLACEHOLDER_THUMBNAIL,
+          sizes:            ['Original Quality'],
+          audio:            pickBestUrl(data.audio) || '',
+          source:           'tiktok',
+          isImageSlideshow: true,
+          ...(mediaItems.length > 1 && { mediaItems }),
+        };
+      }
+      // No valid URLs extracted from images array — fall through to video path
+      console.warn('🎵 TikTok: images array had no valid URLs, falling through');
     }
 
     // ── Standard video post ──
-    // `data.video` is typically [hd_url, sd_url] — pick best (first)
     const bestVideoUrl = pickBestUrl(data.video);
-    console.log('🎵 TikTok: Standard video post');
+    console.log('🎵 TikTok: video post url=', String(bestVideoUrl).slice(0, 80));
     return {
       title:     data.title || 'Untitled Video',
       url:       bestVideoUrl,
