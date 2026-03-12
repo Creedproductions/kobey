@@ -307,20 +307,22 @@ const normalizeMediaItem = (item, index, fallbackThumbnail = PLACEHOLDER_THUMBNA
   const thumbnail = item.thumbnail || item.cover || item.image || fallbackThumbnail;
 
   // Determine media type — check in order:
-  // 1. Explicit type field from the library
+  // 1. Explicit type field from the library (snapsave sets 'video'/'image' directly)
   // 2. File extension in the URL
   // 3. JWT payload decode (for rapidcdn / token-proxied URLs)
   // 4. Default to 'video'
-  let type = item.type || '';
-  if (!type) {
+  let type = '';
+  const rawType = (item.type || '').toString().toLowerCase();
+  if (rawType === 'video' || rawType === 'image') {
+    type = rawType; // trust explicit type (snapsave, tikwm etc.)
+  } else if (!type) {
     const lower = url.toLowerCase();
-    if      (lower.match(/\.(mp4|mov|webm|mkv|avi|ts)(\?|$)/))      type = 'video';
+    if      (lower.match(/\.(mp4|mov|webm|mkv|avi|ts)(\?|$)/))        type = 'video';
     else if (lower.match(/\.(jpg|jpeg|png|gif|webp|heic|avif)(\?|$)/)) type = 'image';
     else {
-      // Try to decode the JWT token embedded in the URL
       const detected = detectTypeFromJwtUrl(url);
       if (detected) console.log(`🔍 JWT type-decode: ${detected} for ${url.slice(0,60)}`);
-      type = detected || 'video'; // final fallback: video
+      type = detected || 'video';
     }
   }
 
@@ -337,20 +339,70 @@ const normalizeMediaItem = (item, index, fallbackThumbnail = PLACEHOLDER_THUMBNA
 
 const platformDownloaders = {
   async instagram(url) {
-    try {
-      const data = await downloadWithTimeout(() => igdl(url));
-      if (!data || (Array.isArray(data) && data.length === 0)) {
-        throw new Error('Instagram primary service returned empty data');
-      }
-      return data;
-    } catch (error) {
-      console.warn('Instagram primary downloader failed, trying fallback...', error.message);
-      const fallbackData = await downloadWithTimeout(() => facebookInsta(url));
-      if (!fallbackData || !fallbackData.media) {
-        throw new Error('Instagram download failed - both primary and fallback methods failed');
-      }
-      return fallbackData;
+    // ── Strategy: run both services in parallel, pick the richer result ──
+    //
+    // `igdl` (btch-downloader) is fast but has a critical flaw: for mixed
+    // image+video carousel posts it returns JPEG thumbnail URLs for all items,
+    // including video items. The video URLs are silently lost.
+    //
+    // `facebookInsta` (snapsave) scrapes differently and properly returns
+    // the actual video URL for video carousel items.
+    //
+    // We race both, then pick the result whose items contain more video URLs.
+    // If one service fails entirely we use the other.
+
+    let igdlResult   = null;
+    let snapsResult  = null;
+    let igdlErr      = null;
+    let snapsErr     = null;
+
+    await Promise.allSettled([
+      downloadWithTimeout(() => igdl(url))
+        .then(d => { igdlResult  = d; })
+        .catch(e => { igdlErr    = e; }),
+      downloadWithTimeout(() => facebookInsta(url))
+        .then(d => { snapsResult = d; })
+        .catch(e => { snapsErr   = e; }),
+    ]);
+
+    // Helper: count how many items look like real video URLs (not JPEG previews)
+    const videoScore = (data) => {
+      const items = Array.isArray(data) ? data
+          : (data?.media ? data.media : []);
+      return items.filter(item => {
+        const u = (item?.url || item?.download || '').toLowerCase();
+        return u.match(/\.(mp4|mov|webm)/) || u.includes('/t50.');
+      }).length;
+    };
+
+    const igdlOk  = igdlResult  && (Array.isArray(igdlResult)  ? igdlResult.length  > 0 : !!igdlResult.media);
+    const snapsOk = snapsResult && (Array.isArray(snapsResult) ? snapsResult.length > 0 : !!snapsResult.media);
+
+    if (!igdlOk && !snapsOk) {
+      throw new Error(`Instagram: both services failed. igdl: ${igdlErr?.message}  snapsave: ${snapsErr?.message}`);
     }
+
+    // Single result available → use it
+    if (igdlOk && !snapsOk) {
+      console.log('📸 Instagram: using igdl only (snapsave failed)');
+      return igdlResult;
+    }
+    if (snapsOk && !igdlOk) {
+      console.log('📸 Instagram: using snapsave only (igdl failed)');
+      return snapsResult;
+    }
+
+    // Both succeeded — pick the one with more video content
+    const igdlScore  = videoScore(igdlResult);
+    const snapsScore = videoScore(snapsResult);
+    console.log(`📸 Instagram: igdl videoScore=${igdlScore} snapsave videoScore=${snapsScore}`);
+
+    if (snapsScore > igdlScore) {
+      console.log('📸 Instagram: using snapsave (richer video data)');
+      return snapsResult;
+    }
+    console.log('📸 Instagram: using igdl');
+    return igdlResult;
   },
 
   async tiktok(url) {
@@ -594,15 +646,21 @@ const dataFormatters = {
       };
     }
 
-    // ── Case 2: fallback / snapsave returns { media: [], title, thumbnail } ──
+    // ── Case 2: snapsave returns { media: [], title, thumbnail } ──
     if (data.media && Array.isArray(data.media)) {
+      console.log(`📸 Instagram (snapsave) raw items (${data.media.length}):`);
+      data.media.forEach((item, i) => {
+        const u = item?.url || item?.download || '';
+        console.log(`  raw[${i}] type=${item?.type} quality=${item?.quality} url=${String(u).slice(0,100)}`);
+      });
+
       const validItems  = data.media.filter(item => item && (item.url || item.download));
       const uniqueItems = deduplicateByBestQuality(validItems);
       const mediaItems  = uniqueItems.map((item, index) =>
         normalizeMediaItem(item, index, data.thumbnail || PLACEHOLDER_THUMBNAIL)
       );
 
-      console.log(`📸 Instagram (media array): ${data.media.length} raw → ${mediaItems.length} unique`);
+      console.log(`📸 Instagram (snapsave): ${data.media.length} raw → ${mediaItems.length} unique`);
 
       if (mediaItems.length === 0) {
         throw new Error('Instagram media array contained no valid URLs');
