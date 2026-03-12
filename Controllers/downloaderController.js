@@ -247,83 +247,115 @@ const detectTypeFromUrl = (url) => {
 // ─────────────────────────────────────────────────────────────────────────────
 // DEDUPLICATION
 //
-// Problem: snapsave returns each carousel asset multiple times as HD/SD/thumb
-// variants. Instagram CDN URLs for the same image differ only in the size
-// segment embedded in the path, e.g.:
-//   HD:    .../v/t51.2885-15/s1080x1080/photo_123.jpg
-//   SD:    .../v/t51.2885-15/s640x640/photo_123.jpg
-//   Thumb: .../v/t51.2885-15/s320x320/photo_123.jpg
+// Two distinct duplicate patterns must be handled:
 //
-// Stripping those size segments leaves the base filename `photo_123.jpg`,
-// which is the true identity of the asset. We combine it with the per-item
-// thumbnail (which snapsave now provides correctly per row) so that carousel
-// slots with different base filenames are kept separate.
+// Pattern A — snapsave HD/SD variants of same asset:
+//   Same file served at multiple resolutions, different size segment in path.
+//   Key: normalised CDN pathname (strip /s1080x1080/ etc.) + thumbnail.
 //
-// This correctly handles both scenarios:
-//   A) HD/SD of same asset  → same normalised key → keep highest quality only
-//   B) Different carousel items → different filenames → kept as separate entries
+// Pattern B — igdl JWT token duplicates (THE BUG CAUSING DOUBLES):
+//   igdl returns each carousel item TWICE with DIFFERENT JWT tokens but both
+//   tokens decode to the SAME underlying Instagram CDN URL. Because the token
+//   string differs, the old key treated them as different assets.
+//   Fix: decode the JWT payload → extract the real Instagram CDN URL →
+//   normalise its path → use THAT as the key. Same asset = same key = one winner.
+//
+// Key priority:
+//   1. JWT token URL  → decode payload → real CDN URL pathname (normalised)
+//   2. snapsave proxy → decode url= param → real CDN URL pathname (normalised)
+//   3. Direct CDN URL → pathname (normalised)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * Strip Instagram CDN size/crop segments from a URL pathname so that HD, SD,
- * and thumbnail variants of the same asset share the same normalised path.
- *
- * Segments removed (examples):
- *   /s1080x1080/   /s640x640/   /p1080x1350/   /c0.0.1080.1350/   /e35/
- */
+/** Extract the real Instagram CDN URL from a rapidcdn JWT token URL.
+ *  Returns the CDN URL string, or null if not a JWT URL / decode fails. */
+const extractJwtCdnUrl = (tokenUrl) => {
+  try {
+    const m = tokenUrl.match(/[?&]token=([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]*)/);
+    if (!m) return null;
+    const payload = JSON.parse(Buffer.from(m[2], 'base64url').toString('utf8'));
+    const cdnUrl  = payload.url || payload.u || payload.src || '';
+    return cdnUrl.startsWith('http') ? cdnUrl : null;
+  } catch (_) {
+    return null;
+  }
+};
+
+/** Strip Instagram CDN size/crop segments so HD, SD and thumb variants share one key.
+ *  /s1080x1080/  /p640x640/  /c0.0.1080.1080/  /e35/  → removed */
 const normaliseInstagramPath = (pathname) => {
   return pathname
-    // Size segments: /s1080x1080/ or /p640x640/
     .replace(/\/[sp]\d{2,4}x\d{2,4}\//g, '/')
-    // Crop segments: /c0.0.1080.1080/
     .replace(/\/c[\d.]+\//g, '/')
-    // Encoding hint segments: /e15/ /e35/
     .replace(/\/e\d+\//g, '/')
-    // Collapse any double slashes produced above
     .replace(/\/+/g, '/');
+};
+
+/** Build the canonical dedup key for a media URL.
+ *  Returns the most stable identifier possible for an asset. */
+const buildDedupKey = (rawUrl, thumb) => {
+  // ── Step 1: JWT token URL (igdl / rapidcdn) ──────────────────────────────
+  // Two tokens for the same asset decode to the same CDN URL → use that.
+  if (rawUrl.includes('token=')) {
+    const cdnUrl = extractJwtCdnUrl(rawUrl);
+    if (cdnUrl) {
+      try {
+        const parsed   = new URL(cdnUrl);
+        const normPath = normaliseInstagramPath(parsed.pathname);
+        console.log(`  🗝 JWT key: ${normPath.slice(0, 80)}`);
+        return normPath; // CDN pathnames are globally unique per asset — no thumb needed
+      } catch (_) {}
+    }
+  }
+
+  // ── Step 2: snapsave/snapinsta proxy URL (url= param holds CDN URL) ───────
+  const decoded = decodeCdnUrl(rawUrl);
+  if (decoded !== rawUrl && decoded.startsWith('http')) {
+    try {
+      const parsed   = new URL(decoded);
+      const normPath = normaliseInstagramPath(parsed.pathname);
+      console.log(`  🗝 proxy-decoded key: ${normPath.slice(0, 80)}`);
+      return thumb ? `${thumb}::${normPath}` : normPath;
+    } catch (_) {}
+  }
+
+  // ── Step 3: Direct CDN URL ────────────────────────────────────────────────
+  try {
+    const parsed  = new URL(rawUrl);
+    const rawPath = parsed.pathname;
+
+    const isGenericPath = rawPath.length <= 3 ||
+      /^\/(v[0-9]?\/?|download\/?|media\/?|proxy\/?|dl\/?|get\/?)$/.test(rawPath);
+
+    if (isGenericPath) {
+      // Generic path carries no identity info — use full URL
+      return thumb ? `${thumb}::${rawUrl}` : rawUrl;
+    }
+
+    const normPath = normaliseInstagramPath(rawPath);
+    console.log(`  🗝 direct key: ${normPath.slice(0, 80)}`);
+    return thumb ? `${thumb}::${normPath}` : normPath;
+  } catch (_) {}
+
+  return rawUrl; // absolute last resort
 };
 
 const deduplicateByBestQuality = (items) => {
   const groups = new Map();
 
   items.forEach((item) => {
-    const rawUrl  = pickBestUrl(item.url || item.download || item.src || '');
-    const thumb   = item.thumbnail || item.cover || item.image || '';
+    const rawUrl = pickBestUrl(item.url || item.download || item.src || '');
+    const thumb  = item.thumbnail || item.cover || item.image || '';
 
-    // Decode proxy URL → real CDN URL (snapsave.app/ajaxDownload.php?url=...)
-    const realUrl = decodeCdnUrl(rawUrl);
+    if (!rawUrl) return;
 
-    let key = '';
-    try {
-      const parsed   = new URL(realUrl);
-      const rawPath  = parsed.pathname;
+    const key   = buildDedupKey(rawUrl, thumb);
+    const score = qualityScore(item.quality || item.resolution || '');
 
-      const isGenericPath = rawPath.length <= 3 ||
-        /^\/(v[0-9]?\/?|download\/?|media\/?|proxy\/?|dl\/?|get\/?)$/.test(rawPath);
-
-      if (isGenericPath) {
-        // Truly generic proxy path — use thumbnail + full URL so distinct
-        // assets don't collapse together
-        key = thumb ? `${thumb}::${realUrl}` : realUrl;
-      } else {
-        // Normalise away Instagram size/crop segments so HD, SD and thumbnail
-        // variants of the same file share one key → we keep only the best.
-        const normPath = normaliseInstagramPath(rawPath);
-        // Include thumbnail as secondary discriminator: two assets with the
-        // same base filename (unlikely but possible) won't wrongly collapse
-        // if they have different per-item thumbnails.
-        key = thumb ? `${thumb}::${normPath}` : normPath;
-      }
-    } catch (_) {
-      key = realUrl || rawUrl;
-    }
-
-    if (!key) return;
-
-    const score    = qualityScore(item.quality || item.resolution || '');
+    // Keep the proxy URL as the download URL (rapidcdn tokens are pre-authorised
+    // and will stream the correct asset — no need to expose the raw CDN URL).
     const existing = groups.get(key);
     if (!existing || score > existing._score) {
-      groups.set(key, { ...item, url: realUrl, _score: score });
+      groups.set(key, { ...item, url: rawUrl, _score: score });
     }
   });
 
@@ -334,7 +366,7 @@ const deduplicateByBestQuality = (items) => {
 
   console.log(`🔑 dedup: ${items.length} raw → ${result.length} unique`);
   result.forEach((it, i) =>
-    console.log(`  [${i}] normKey used, url=${String(it.url).slice(0, 100)} type=${it.type}`)
+    console.log(`  [${i}] type=${it.type} url=${String(it.url).slice(0, 100)}`)
   );
 
   return result;
