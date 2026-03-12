@@ -247,115 +247,83 @@ const detectTypeFromUrl = (url) => {
 // ─────────────────────────────────────────────────────────────────────────────
 // DEDUPLICATION
 //
-// Two distinct duplicate patterns must be handled:
+// Problem: snapsave returns each carousel asset multiple times as HD/SD/thumb
+// variants. Instagram CDN URLs for the same image differ only in the size
+// segment embedded in the path, e.g.:
+//   HD:    .../v/t51.2885-15/s1080x1080/photo_123.jpg
+//   SD:    .../v/t51.2885-15/s640x640/photo_123.jpg
+//   Thumb: .../v/t51.2885-15/s320x320/photo_123.jpg
 //
-// Pattern A — snapsave HD/SD variants of same asset:
-//   Same file served at multiple resolutions, different size segment in path.
-//   Key: normalised CDN pathname (strip /s1080x1080/ etc.) + thumbnail.
+// Stripping those size segments leaves the base filename `photo_123.jpg`,
+// which is the true identity of the asset. We combine it with the per-item
+// thumbnail (which snapsave now provides correctly per row) so that carousel
+// slots with different base filenames are kept separate.
 //
-// Pattern B — igdl JWT token duplicates (THE BUG CAUSING DOUBLES):
-//   igdl returns each carousel item TWICE with DIFFERENT JWT tokens but both
-//   tokens decode to the SAME underlying Instagram CDN URL. Because the token
-//   string differs, the old key treated them as different assets.
-//   Fix: decode the JWT payload → extract the real Instagram CDN URL →
-//   normalise its path → use THAT as the key. Same asset = same key = one winner.
-//
-// Key priority:
-//   1. JWT token URL  → decode payload → real CDN URL pathname (normalised)
-//   2. snapsave proxy → decode url= param → real CDN URL pathname (normalised)
-//   3. Direct CDN URL → pathname (normalised)
+// This correctly handles both scenarios:
+//   A) HD/SD of same asset  → same normalised key → keep highest quality only
+//   B) Different carousel items → different filenames → kept as separate entries
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Extract the real Instagram CDN URL from a rapidcdn JWT token URL.
- *  Returns the CDN URL string, or null if not a JWT URL / decode fails. */
-const extractJwtCdnUrl = (tokenUrl) => {
-  try {
-    const m = tokenUrl.match(/[?&]token=([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]*)/);
-    if (!m) return null;
-    const payload = JSON.parse(Buffer.from(m[2], 'base64url').toString('utf8'));
-    const cdnUrl  = payload.url || payload.u || payload.src || '';
-    return cdnUrl.startsWith('http') ? cdnUrl : null;
-  } catch (_) {
-    return null;
-  }
-};
-
-/** Strip Instagram CDN size/crop segments so HD, SD and thumb variants share one key.
- *  /s1080x1080/  /p640x640/  /c0.0.1080.1080/  /e35/  → removed */
+/**
+ * Strip Instagram CDN size/crop segments from a URL pathname so that HD, SD,
+ * and thumbnail variants of the same asset share the same normalised path.
+ *
+ * Segments removed (examples):
+ *   /s1080x1080/   /s640x640/   /p1080x1350/   /c0.0.1080.1350/   /e35/
+ */
 const normaliseInstagramPath = (pathname) => {
   return pathname
+    // Size segments: /s1080x1080/ or /p640x640/
     .replace(/\/[sp]\d{2,4}x\d{2,4}\//g, '/')
+    // Crop segments: /c0.0.1080.1080/
     .replace(/\/c[\d.]+\//g, '/')
+    // Encoding hint segments: /e15/ /e35/
     .replace(/\/e\d+\//g, '/')
+    // Collapse any double slashes produced above
     .replace(/\/+/g, '/');
-};
-
-/** Build the canonical dedup key for a media URL.
- *  Returns the most stable identifier possible for an asset. */
-const buildDedupKey = (rawUrl, thumb) => {
-  // ── Step 1: JWT token URL (igdl / rapidcdn) ──────────────────────────────
-  // Two tokens for the same asset decode to the same CDN URL → use that.
-  if (rawUrl.includes('token=')) {
-    const cdnUrl = extractJwtCdnUrl(rawUrl);
-    if (cdnUrl) {
-      try {
-        const parsed   = new URL(cdnUrl);
-        const normPath = normaliseInstagramPath(parsed.pathname);
-        console.log(`  🗝 JWT key: ${normPath.slice(0, 80)}`);
-        return normPath; // CDN pathnames are globally unique per asset — no thumb needed
-      } catch (_) {}
-    }
-  }
-
-  // ── Step 2: snapsave/snapinsta proxy URL (url= param holds CDN URL) ───────
-  const decoded = decodeCdnUrl(rawUrl);
-  if (decoded !== rawUrl && decoded.startsWith('http')) {
-    try {
-      const parsed   = new URL(decoded);
-      const normPath = normaliseInstagramPath(parsed.pathname);
-      console.log(`  🗝 proxy-decoded key: ${normPath.slice(0, 80)}`);
-      return thumb ? `${thumb}::${normPath}` : normPath;
-    } catch (_) {}
-  }
-
-  // ── Step 3: Direct CDN URL ────────────────────────────────────────────────
-  try {
-    const parsed  = new URL(rawUrl);
-    const rawPath = parsed.pathname;
-
-    const isGenericPath = rawPath.length <= 3 ||
-      /^\/(v[0-9]?\/?|download\/?|media\/?|proxy\/?|dl\/?|get\/?)$/.test(rawPath);
-
-    if (isGenericPath) {
-      // Generic path carries no identity info — use full URL
-      return thumb ? `${thumb}::${rawUrl}` : rawUrl;
-    }
-
-    const normPath = normaliseInstagramPath(rawPath);
-    console.log(`  🗝 direct key: ${normPath.slice(0, 80)}`);
-    return thumb ? `${thumb}::${normPath}` : normPath;
-  } catch (_) {}
-
-  return rawUrl; // absolute last resort
 };
 
 const deduplicateByBestQuality = (items) => {
   const groups = new Map();
 
   items.forEach((item) => {
-    const rawUrl = pickBestUrl(item.url || item.download || item.src || '');
-    const thumb  = item.thumbnail || item.cover || item.image || '';
+    const rawUrl  = pickBestUrl(item.url || item.download || item.src || '');
+    const thumb   = item.thumbnail || item.cover || item.image || '';
 
-    if (!rawUrl) return;
+    // Decode proxy URL → real CDN URL (snapsave.app/ajaxDownload.php?url=...)
+    const realUrl = decodeCdnUrl(rawUrl);
 
-    const key   = buildDedupKey(rawUrl, thumb);
-    const score = qualityScore(item.quality || item.resolution || '');
+    let key = '';
+    try {
+      const parsed   = new URL(realUrl);
+      const rawPath  = parsed.pathname;
 
-    // Keep the proxy URL as the download URL (rapidcdn tokens are pre-authorised
-    // and will stream the correct asset — no need to expose the raw CDN URL).
+      const isGenericPath = rawPath.length <= 3 ||
+        /^\/(v[0-9]?\/?|download\/?|media\/?|proxy\/?|dl\/?|get\/?)$/.test(rawPath);
+
+      if (isGenericPath) {
+        // Truly generic proxy path — use thumbnail + full URL so distinct
+        // assets don't collapse together
+        key = thumb ? `${thumb}::${realUrl}` : realUrl;
+      } else {
+        // Normalise away Instagram size/crop segments so HD, SD and thumbnail
+        // variants of the same file share one key → we keep only the best.
+        const normPath = normaliseInstagramPath(rawPath);
+        // Include thumbnail as secondary discriminator: two assets with the
+        // same base filename (unlikely but possible) won't wrongly collapse
+        // if they have different per-item thumbnails.
+        key = thumb ? `${thumb}::${normPath}` : normPath;
+      }
+    } catch (_) {
+      key = realUrl || rawUrl;
+    }
+
+    if (!key) return;
+
+    const score    = qualityScore(item.quality || item.resolution || '');
     const existing = groups.get(key);
     if (!existing || score > existing._score) {
-      groups.set(key, { ...item, url: rawUrl, _score: score });
+      groups.set(key, { ...item, url: realUrl, _score: score });
     }
   });
 
@@ -366,7 +334,7 @@ const deduplicateByBestQuality = (items) => {
 
   console.log(`🔑 dedup: ${items.length} raw → ${result.length} unique`);
   result.forEach((it, i) =>
-    console.log(`  [${i}] type=${it.type} url=${String(it.url).slice(0, 100)}`)
+    console.log(`  [${i}] normKey used, url=${String(it.url).slice(0, 100)} type=${it.type}`)
   );
 
   return result;
@@ -403,96 +371,43 @@ const detectTypeFromJwtUrl = (tokenUrl) => {
 // ─────────────────────────────────────────────────────────────────────────────
 // NORMALIZE MEDIA ITEM
 //
-// Type detection priority:
-//   1. Explicit type field from scraper
-//   2. URL extension / Instagram CDN path convention
+// FIX: Type detection now:
+//   1. Trusts explicit type field from scraper (highest priority)
+//   2. Checks file extension / path in the URL (after decoding proxy links)
 //   3. JWT payload decode for rapidcdn token URLs
-//   4. Default to 'video'
-//
-// Thumbnail validation (KEY FIX for wrong video thumbnails):
-//   igdl assigns the same image thumbnail token to every item in a carousel,
-//   including video items. We decode both the media token and the thumbnail
-//   token. If the thumbnail's JWT payload URL points to an image CDN path
-//   (t51.*) but the media item is a video, the thumbnail is wrong — discard
-//   it so the Flutter UI shows the correct video placeholder icon instead.
+//   4. Defaults to 'video'
 // ─────────────────────────────────────────────────────────────────────────────
-
-/** Decode a rapidcdn thumbnail token and return the CDN URL it points to, or null. */
-const decodeThumbnailJwtUrl = (thumbUrl) => {
-  if (!thumbUrl || !thumbUrl.includes('token=')) return null;
-  return extractJwtCdnUrl(thumbUrl); // reuse the same JWT decoder
-};
-
-/**
- * Check whether a thumbnail URL is valid for the given media type.
- * Returns false when igdl has assigned an image thumbnail to a video item.
- */
-const isThumbnailValidForType = (thumbUrl, mediaType) => {
-  if (!thumbUrl || mediaType !== 'video') return true; // only validate video items
-
-  // Decode JWT thumbnail token if present
-  const cdnUrl = decodeThumbnailJwtUrl(thumbUrl);
-  if (!cdnUrl) return true; // not a JWT thumb — trust it
-
-  const lower = cdnUrl.toLowerCase();
-
-  // Instagram CDN: t51.* = image store, t50.* = video store
-  // If a video item's thumbnail points to the image store it's a mismatch.
-  if (lower.includes('/t51.')) {
-    console.log(`🖼 Thumbnail mismatch: video item has image thumbnail (t51) → clearing`);
-    return false;
-  }
-
-  // Also check file extension in the decoded CDN URL
-  if (lower.match(/\.(jpg|jpeg|png|gif|webp)(\?|$)/) && !lower.includes('/t50.')) {
-    // Only reject if it's definitely an image extension AND not a video store path
-    // (some video thumbnails are served as .jpg from the video CDN — keep those)
-    if (!lower.includes('cdninstagram') && !lower.includes('scontent')) {
-      // Unknown CDN serving an image extension for a video — keep it as-is
-      return true;
-    }
-    console.log(`🖼 Thumbnail mismatch: video item has .jpg thumbnail from image CDN → clearing`);
-    return false;
-  }
-
-  return true;
-};
-
 const normalizeMediaItem = (item, index, fallbackThumbnail = PLACEHOLDER_THUMBNAIL) => {
-  const rawUrl = pickBestUrl(item.url || item.download || item.src || '');
-  // Keep the proxy URL for download (rapidcdn tokens are pre-authorised)
-  // but decode it for type detection
-  const url    = rawUrl; // return original proxy URL — downloadable as-is
-  const cdnUrl = decodeCdnUrl(rawUrl) || rawUrl; // used only for type detection
+  const rawUrl    = pickBestUrl(item.url || item.download || item.src || '');
+  // Decode proxy URL so type detection sees the real CDN URL
+  const url       = decodeCdnUrl(rawUrl) || rawUrl;
+  const thumbnail = item.thumbnail || item.cover || item.image || fallbackThumbnail;
 
   let type = '';
   const rawType = (item.type || '').toString().toLowerCase();
 
   if (rawType === 'video' || rawType === 'image') {
+    // Trust explicit type set by the scraper
     type = rawType;
   } else {
-    const fromUrl = detectTypeFromUrl(cdnUrl);
+    // Try URL-based detection (works on real CDN URLs)
+    const fromUrl = detectTypeFromUrl(url);
     if (fromUrl) {
       type = fromUrl;
     } else {
+      // Try JWT decode for rapidcdn/token URLs
       const fromJwt = detectTypeFromJwtUrl(rawUrl);
       if (fromJwt) {
         console.log(`🔍 JWT type-decode: ${fromJwt} for ${rawUrl.slice(0, 60)}`);
         type = fromJwt;
       } else {
-        type = 'video';
+        type = 'video'; // safe default
       }
     }
   }
 
-  // Validate thumbnail — discard if it belongs to a different asset type
-  const rawThumb = item.thumbnail || item.cover || item.image || '';
-  const thumbnail = isThumbnailValidForType(rawThumb, type)
-    ? (rawThumb || fallbackThumbnail)
-    : fallbackThumbnail; // wrong thumb cleared → Flutter shows correct icon
-
   return {
-    url,
+    url,       // ← decoded CDN URL, not the proxy URL
     thumbnail,
     type,
     quality: item.quality || item.resolution || 'Original Quality',
