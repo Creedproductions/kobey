@@ -247,14 +247,42 @@ const detectTypeFromUrl = (url) => {
 // ─────────────────────────────────────────────────────────────────────────────
 // DEDUPLICATION
 //
-// KEY FIX: We must NOT use the thumbnail as the sole dedup key.
-// When snapsave returns a carousel, all items may share the same post-level
-// thumbnail, causing them to collapse to one entry.
+// Problem: snapsave returns each carousel asset multiple times as HD/SD/thumb
+// variants. Instagram CDN URLs for the same image differ only in the size
+// segment embedded in the path, e.g.:
+//   HD:    .../v/t51.2885-15/s1080x1080/photo_123.jpg
+//   SD:    .../v/t51.2885-15/s640x640/photo_123.jpg
+//   Thumb: .../v/t51.2885-15/s320x320/photo_123.jpg
 //
-// Instead: build the key from the REAL CDN URL pathname (after decoding proxy
-// links). Each carousel asset has a distinct CDN pathname even when proxied
-// through snapsave, so this correctly keeps them separate.
+// Stripping those size segments leaves the base filename `photo_123.jpg`,
+// which is the true identity of the asset. We combine it with the per-item
+// thumbnail (which snapsave now provides correctly per row) so that carousel
+// slots with different base filenames are kept separate.
+//
+// This correctly handles both scenarios:
+//   A) HD/SD of same asset  → same normalised key → keep highest quality only
+//   B) Different carousel items → different filenames → kept as separate entries
 // ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Strip Instagram CDN size/crop segments from a URL pathname so that HD, SD,
+ * and thumbnail variants of the same asset share the same normalised path.
+ *
+ * Segments removed (examples):
+ *   /s1080x1080/   /s640x640/   /p1080x1350/   /c0.0.1080.1350/   /e35/
+ */
+const normaliseInstagramPath = (pathname) => {
+  return pathname
+    // Size segments: /s1080x1080/ or /p640x640/
+    .replace(/\/[sp]\d{2,4}x\d{2,4}\//g, '/')
+    // Crop segments: /c0.0.1080.1080/
+    .replace(/\/c[\d.]+\//g, '/')
+    // Encoding hint segments: /e15/ /e35/
+    .replace(/\/e\d+\//g, '/')
+    // Collapse any double slashes produced above
+    .replace(/\/+/g, '/');
+};
+
 const deduplicateByBestQuality = (items) => {
   const groups = new Map();
 
@@ -262,27 +290,29 @@ const deduplicateByBestQuality = (items) => {
     const rawUrl  = pickBestUrl(item.url || item.download || item.src || '');
     const thumb   = item.thumbnail || item.cover || item.image || '';
 
-    // Decode proxy URL to get the real CDN URL for keying
+    // Decode proxy URL → real CDN URL (snapsave.app/ajaxDownload.php?url=...)
     const realUrl = decodeCdnUrl(rawUrl);
 
     let key = '';
     try {
-      // Use the CDN URL's pathname as the primary dedup key.
-      // This is unique per carousel asset regardless of which proxy wraps it.
-      const parsed  = new URL(realUrl);
-      const urlPath = parsed.pathname;
+      const parsed   = new URL(realUrl);
+      const rawPath  = parsed.pathname;
 
-      // Very short/generic paths still fall back to thumbnail+path combo
-      const isGenericPath = urlPath.length <= 3 ||
-        /^\/(v[0-9]?\/?|download\/?|media\/?|proxy\/?|dl\/?|get\/?)$/.test(urlPath);
+      const isGenericPath = rawPath.length <= 3 ||
+        /^\/(v[0-9]?\/?|download\/?|media\/?|proxy\/?|dl\/?|get\/?)$/.test(rawPath);
 
       if (isGenericPath) {
-        // For truly generic proxy paths, combine thumbnail + full URL as key
+        // Truly generic proxy path — use thumbnail + full URL so distinct
+        // assets don't collapse together
         key = thumb ? `${thumb}::${realUrl}` : realUrl;
       } else {
-        // Normal case: CDN pathname is the unique asset identifier
-        // Include thumbnail as secondary discriminator for same-name files
-        key = thumb ? `${thumb}::${urlPath}` : urlPath;
+        // Normalise away Instagram size/crop segments so HD, SD and thumbnail
+        // variants of the same file share one key → we keep only the best.
+        const normPath = normaliseInstagramPath(rawPath);
+        // Include thumbnail as secondary discriminator: two assets with the
+        // same base filename (unlikely but possible) won't wrongly collapse
+        // if they have different per-item thumbnails.
+        key = thumb ? `${thumb}::${normPath}` : normPath;
       }
     } catch (_) {
       key = realUrl || rawUrl;
@@ -304,7 +334,7 @@ const deduplicateByBestQuality = (items) => {
 
   console.log(`🔑 dedup: ${items.length} raw → ${result.length} unique`);
   result.forEach((it, i) =>
-    console.log(`  [${i}] url=${String(it.url).slice(0, 100)} type=${it.type}`)
+    console.log(`  [${i}] normKey used, url=${String(it.url).slice(0, 100)} type=${it.type}`)
   );
 
   return result;
