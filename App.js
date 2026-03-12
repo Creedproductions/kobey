@@ -8,19 +8,27 @@ const app = express();
 const PORT = config.PORT || process.env.PORT || 8000;
 const NODE_ENV = process.env.NODE_ENV || 'development';
 
-const corsOptions = {
-  origin: [
-    'https://savedownloader.vercel.app',
-    'https://savedownloaderweb.vercel.app',
-    'http://localhost:5173'
-  ],
-  methods: ['GET', 'POST', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
-};
+// Web app origins (for the browser-based frontend)
+const WEB_ORIGINS = [
+  'https://savedownloader.vercel.app',
+  'https://savedownloaderweb.vercel.app',
+  'http://localhost:5173'
+];
 
 const setupMiddleware = () => {
   app.use(express.json());
-  app.use(cors(corsOptions));
+
+  // The proxy-download and proxy-test routes are called by the Flutter mobile
+  // app which sends NO Origin header — a strict origin whitelist blocks it.
+  // Allow all origins for those two routes, keep the whitelist for everything else.
+  app.use('/api/proxy-download', cors());
+  app.use('/api/proxy-test',     cors());
+
+  app.use(cors({
+    origin: WEB_ORIGINS,
+    methods: ['GET', 'POST', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+  }));
 };
 
 const setupRoutes = () => {
@@ -41,9 +49,10 @@ const setupRoutes = () => {
       message: 'Media Downloader API',
       status: 'running',
       endpoints: {
-        health: '/health',
-        download: '/api/download',
-        mockVideos: '/api/mock-videos'
+        health:        '/health',
+        download:      '/api/download',
+        proxyDownload: '/api/proxy-download',
+        mockVideos:    '/api/mock-videos'
       }
     });
   });
@@ -51,33 +60,29 @@ const setupRoutes = () => {
 
 const setupErrorHandling = () => {
   process.on('uncaughtException', (error) => {
-    console.error('Ã¢ÂÅ’ Uncaught Exception:', error);
+    console.error('Uncaught Exception:', error);
     if (NODE_ENV !== 'production') {
       process.exit(1);
     }
   });
 
   process.on('unhandledRejection', (reason, promise) => {
-    console.error('Ã¢ÂÅ’ Unhandled Rejection at:', promise, 'reason:', reason);
+    console.error('Unhandled Rejection at:', promise, 'reason:', reason);
   });
 
   process.on('SIGTERM', () => {
-    console.log('Ã°Å¸â€˜â€¹ SIGTERM received, shutting down gracefully');
+    console.log('SIGTERM received, shutting down gracefully');
     if (server) {
-      server.close(() => {
-        process.exit(0);
-      });
+      server.close(() => { process.exit(0); });
     } else {
       process.exit(0);
     }
   });
 
   process.on('SIGINT', () => {
-    console.log('Ã°Å¸â€˜â€¹ SIGINT received, shutting down gracefully');
+    console.log('SIGINT received, shutting down gracefully');
     if (server) {
-      server.close(() => {
-        process.exit(0);
-      });
+      server.close(() => { process.exit(0); });
     } else {
       process.exit(0);
     }
@@ -86,14 +91,15 @@ const setupErrorHandling = () => {
 
 const startServer = () => {
   const server = app.listen(PORT, () => {
-    console.log(`Ã°Å¸Å¡â‚¬ Server running on port ${PORT}`);
-    console.log(`Ã°Å¸Å’Â Environment: ${NODE_ENV}`);
-    console.log(`Ã°Å¸â€œÅ  Health check: http://localhost:${PORT}/health`);
-    console.log(`Ã°Å¸â€œÂ¥ Download API: http://localhost:${PORT}/api/download`);
+    console.log(`🚀 Server running on port ${PORT}`);
+    console.log(`💡 Environment: ${NODE_ENV}`);
+    console.log(`📋 Health check: http://localhost:${PORT}/health`);
+    console.log(`📥 Download API: http://localhost:${PORT}/api/download`);
+    console.log(`🔄 Proxy route:  http://localhost:${PORT}/api/proxy-download`);
   });
 
   server.on('error', (error) => {
-    console.error('Ã¢ÂÅ’ Server error:', error);
+    console.error('Server error:', error);
     if (error.code === 'EADDRINUSE') {
       console.error(`Port ${PORT} is already in use`);
       process.exit(1);
