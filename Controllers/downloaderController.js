@@ -28,40 +28,27 @@ const DOWNLOAD_TIMEOUT = 45000;
 // ===== UTILITY FUNCTIONS =====
 
 const shortenUrl = async (url) => {
-  if (!url || url.length < 200) {
-    return url;
-  }
+  if (!url || url.length < 200) return url;
 
   try {
     const tinyResponse = await axios.post('https://tinyurl.com/api-create.php', null, {
-      params: { url },
-      timeout: 5000
+      params: { url }, timeout: 5000
     });
-
     if (tinyResponse.data && tinyResponse.data.startsWith('https://tinyurl.com/')) {
       console.log('URL shortened with TinyURL');
       return tinyResponse.data;
     }
-  } catch (error) {
-    console.warn('TinyURL shortening failed:', error.message);
-  }
+  } catch (error) { console.warn('TinyURL shortening failed:', error.message); }
 
   try {
     const isgdResponse = await axios.get('https://is.gd/create.php', {
-      params: {
-        format: 'simple',
-        url: url
-      },
-      timeout: 5000
+      params: { format: 'simple', url }, timeout: 5000
     });
-
     if (isgdResponse.data && isgdResponse.data.startsWith('https://is.gd/')) {
       console.log('URL shortened with is.gd');
       return isgdResponse.data;
     }
-  } catch (error) {
-    console.warn('is.gd shortening failed:', error.message);
-  }
+  } catch (error) { console.warn('is.gd shortening failed:', error.message); }
 
   if (config.BITLY_ACCESS_TOKEN) {
     try {
@@ -70,9 +57,7 @@ const shortenUrl = async (url) => {
         console.log('URL shortened with Bitly');
         return bitlyResponse.link;
       }
-    } catch (error) {
-      console.warn('Bitly shortening failed:', error.message);
-    }
+    } catch (error) { console.warn('Bitly shortening failed:', error.message); }
   }
 
   console.log('URL shortening failed, using original URL');
@@ -99,9 +84,7 @@ const identifyPlatform = (url) => {
   };
 
   for (const [domain, platform] of Object.entries(platformMap)) {
-    if (url.includes(domain)) {
-      return platform;
-    }
+    if (url.includes(domain)) return platform;
   }
 
   console.warn("Platform Identification: Unable to identify the platform.");
@@ -111,37 +94,23 @@ const identifyPlatform = (url) => {
 const normalizeYouTubeUrl = (url) => {
   let cleanUrl = url.split('#')[0];
 
-  const shortsRegex = /youtube\.com\/shorts\/([a-zA-Z0-9_-]+)/;
-  const shortsMatch = cleanUrl.match(shortsRegex);
-  if (shortsMatch) {
-    return `https://www.youtube.com/shorts/${shortsMatch[1]}`;
-  }
+  const shortsMatch = cleanUrl.match(/youtube\.com\/shorts\/([a-zA-Z0-9_-]+)/);
+  if (shortsMatch) return `https://www.youtube.com/shorts/${shortsMatch[1]}`;
 
-  const shortRegex = /youtu\.be\/([a-zA-Z0-9_-]+)/;
-  const shortMatch = cleanUrl.match(shortRegex);
-  if (shortMatch) {
-    return `https://www.youtube.com/watch?v=${shortMatch[1]}`;
-  }
+  const shortMatch = cleanUrl.match(/youtu\.be\/([a-zA-Z0-9_-]+)/);
+  if (shortMatch) return `https://www.youtube.com/watch?v=${shortMatch[1]}`;
 
   return cleanUrl;
 };
 
 const validateUrl = (url) => {
-  if (!url) {
-    return { isValid: false, error: 'No URL provided' };
-  }
-
-  if (typeof url !== 'string' || url.trim().length === 0) {
+  if (!url) return { isValid: false, error: 'No URL provided' };
+  if (typeof url !== 'string' || url.trim().length === 0)
     return { isValid: false, error: 'Invalid URL format' };
-  }
 
   const cleanedUrl = url.trim();
-
-  try {
-    new URL(cleanedUrl);
-  } catch (e) {
-    return { isValid: false, error: 'Invalid URL format' };
-  }
+  try { new URL(cleanedUrl); }
+  catch (e) { return { isValid: false, error: 'Invalid URL format' }; }
 
   return { isValid: true, cleanedUrl };
 };
@@ -155,9 +124,8 @@ const downloadWithTimeout = (downloadFunction, timeout = DOWNLOAD_TIMEOUT) => {
   ]);
 };
 
-// Helper function to get server base URL
 function getServerBaseUrl(req) {
-  const host = req.get('host');
+  const host     = req.get('host');
   const protocol = req.secure ? 'https' : 'http';
   return process.env.SERVER_BASE_URL || `${protocol}://${host}`;
 }
@@ -180,14 +148,13 @@ const qualityScore = (q = '') => {
 };
 
 const pickBestUrl = (rawUrl) => {
-  if (Array.isArray(rawUrl)) {
+  if (Array.isArray(rawUrl))
     return rawUrl.find(u => typeof u === 'string' && u.startsWith('http')) || rawUrl[0] || '';
-  }
   return rawUrl || '';
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// URL HELPERS — decode proxy links to real CDN URLs
+// URL HELPERS
 // ─────────────────────────────────────────────────────────────────────────────
 
 const decodeCdnUrl = (href) => {
@@ -198,7 +165,7 @@ const decodeCdnUrl = (href) => {
       const val = u.searchParams.get(param);
       if (val && val.startsWith('http')) {
         const decoded = decodeURIComponent(val);
-        if (decoded.includes('%3A')) return decodeCdnUrl(decoded); // double-encoded
+        if (decoded.includes('%3A')) return decodeCdnUrl(decoded);
         return decoded;
       }
     }
@@ -208,22 +175,11 @@ const decodeCdnUrl = (href) => {
 
 /**
  * Detect media type from a URL.
- *
- * Detection order:
- *   1. Proxy ext= query param
- *   2. File extension in path
- *   3. Instagram CDN path conventions:
- *        /t16/  or  /o1/v/  → video  ← FIX: newer video CDN (image+audio reels)
- *        /t50.              → video  (older video CDN)
- *        /t51.              → image
- *        /video/            → video
- *   4. Decode proxy URL and repeat on the real CDN URL
- *   5. Returns null (caller decides the default)
+ * Includes /t16/ and /o1/v/ for Instagram's newer video CDN (image+audio reels).
  */
 const detectTypeFromUrl = (url) => {
   if (!url) return null;
 
-  // 1. Proxy ext= param
   try {
     const u   = new URL(url);
     const ext = (u.searchParams.get('ext') || '').toLowerCase();
@@ -231,19 +187,16 @@ const detectTypeFromUrl = (url) => {
     if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'heic', 'avif'].includes(ext)) return 'image';
   } catch (_) {}
 
-  // 2. Path extension
   const pathOnly = url.toLowerCase().split('?')[0];
   if (pathOnly.match(/\.(mp4|mov|webm|mkv|avi|ts)$/))          return 'video';
   if (pathOnly.match(/\.(jpg|jpeg|png|gif|webp|heic|avif)$/))   return 'image';
 
-  // 3. Instagram CDN path conventions
-  if (pathOnly.includes('/t16/'))   return 'video'; // newer video CDN (image+audio reels)
+  if (pathOnly.includes('/t16/'))   return 'video'; // image+audio reels (newer CDN)
   if (pathOnly.includes('/o1/v/'))  return 'video'; // newer video store root
   if (pathOnly.includes('/t50.'))   return 'video'; // older video CDN
   if (pathOnly.includes('/t51.'))   return 'image'; // image CDN
   if (pathOnly.includes('/video/')) return 'video';
 
-  // 4. Decode proxy URL and recurse once
   const decoded = decodeCdnUrl(url);
   if (decoded !== url) return detectTypeFromUrl(decoded);
 
@@ -254,7 +207,6 @@ const detectTypeFromUrl = (url) => {
 // DEDUPLICATION
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Extract the real Instagram CDN URL from a rapidcdn JWT token URL. */
 const extractJwtCdnUrl = (tokenUrl) => {
   try {
     const m = tokenUrl.match(/[?&]token=([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]*)/);
@@ -262,12 +214,9 @@ const extractJwtCdnUrl = (tokenUrl) => {
     const payload = JSON.parse(Buffer.from(m[2], 'base64url').toString('utf8'));
     const cdnUrl  = payload.url || payload.u || payload.src || '';
     return cdnUrl.startsWith('http') ? cdnUrl : null;
-  } catch (_) {
-    return null;
-  }
+  } catch (_) { return null; }
 };
 
-/** Strip Instagram CDN size/crop segments so HD, SD and thumb variants share one key. */
 const normaliseInstagramPath = (pathname) => {
   return pathname
     .replace(/\/[sp]\d{2,4}x\d{2,4}\//g, '/')
@@ -277,41 +226,31 @@ const normaliseInstagramPath = (pathname) => {
 };
 
 const buildDedupKey = (rawUrl, thumb) => {
-  // Step 1: JWT token URL (igdl / rapidcdn)
   if (rawUrl.includes('token=')) {
     const cdnUrl = extractJwtCdnUrl(rawUrl);
     if (cdnUrl) {
       try {
-        const parsed   = new URL(cdnUrl);
-        const normPath = normaliseInstagramPath(parsed.pathname);
+        const normPath = normaliseInstagramPath(new URL(cdnUrl).pathname);
         console.log(`  🗝 JWT key: ${normPath.slice(0, 80)}`);
         return normPath;
       } catch (_) {}
     }
   }
 
-  // Step 2: snapsave/snapinsta proxy URL
   const decoded = decodeCdnUrl(rawUrl);
   if (decoded !== rawUrl && decoded.startsWith('http')) {
     try {
-      const parsed   = new URL(decoded);
-      const normPath = normaliseInstagramPath(parsed.pathname);
+      const normPath = normaliseInstagramPath(new URL(decoded).pathname);
       console.log(`  🗝 proxy-decoded key: ${normPath.slice(0, 80)}`);
       return thumb ? `${thumb}::${normPath}` : normPath;
     } catch (_) {}
   }
 
-  // Step 3: Direct CDN URL
   try {
-    const parsed  = new URL(rawUrl);
-    const rawPath = parsed.pathname;
-
+    const rawPath = new URL(rawUrl).pathname;
     const isGenericPath = rawPath.length <= 3 ||
       /^\/(v[0-9]?\/?|download\/?|media\/?|proxy\/?|dl\/?|get\/?)$/.test(rawPath);
-
-    if (isGenericPath) {
-      return thumb ? `${thumb}::${rawUrl}` : rawUrl;
-    }
+    if (isGenericPath) return thumb ? `${thumb}::${rawUrl}` : rawUrl;
 
     const normPath = normaliseInstagramPath(rawPath);
     console.log(`  🗝 direct key: ${normPath.slice(0, 80)}`);
@@ -327,7 +266,6 @@ const deduplicateByBestQuality = (items) => {
   items.forEach((item) => {
     const rawUrl = pickBestUrl(item.url || item.download || item.src || '');
     const thumb  = item.thumbnail || item.cover || item.image || '';
-
     if (!rawUrl) return;
 
     const key   = buildDedupKey(rawUrl, thumb);
@@ -339,50 +277,31 @@ const deduplicateByBestQuality = (items) => {
     }
   });
 
-  const result = Array.from(groups.values()).map(({ _score, ...item }, index) => ({
-    ...item,
-    index,
-  }));
-
+  const result = Array.from(groups.values()).map(({ _score, ...item }, index) => ({ ...item, index }));
   console.log(`🔑 dedup: ${items.length} raw → ${result.length} unique`);
-  result.forEach((it, i) =>
-    console.log(`  [${i}] type=${it.type} url=${String(it.url).slice(0, 100)}`)
-  );
-
+  result.forEach((it, i) => console.log(`  [${i}] type=${it.type} url=${String(it.url).slice(0, 100)}`));
   return result;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// JWT TYPE DETECTION (for rapidcdn / token-proxied URLs)
+// JWT TYPE DETECTION
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * Decode the JWT payload of a rapidcdn token URL and determine media type.
- *
- * Handles:
- *   /t16/  or  /o1/v/  → video  (newer Instagram video CDN, image+audio reels)
- *   /t50.              → video
- *   /t51.              → image
- */
 const detectTypeFromJwtUrl = (tokenUrl) => {
   try {
     const m = tokenUrl.match(/[?&]token=([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]*)/);
     if (!m) return null;
-    const payloadB64 = m[2];
-    if (!payloadB64) return null;
-    const payload  = JSON.parse(Buffer.from(payloadB64, 'base64url').toString('utf8'));
-    const origUrl  = (payload.url || payload.u || payload.src || '').toLowerCase();
+    const payload = JSON.parse(Buffer.from(m[2], 'base64url').toString('utf8'));
+    const origUrl = (payload.url || payload.u || payload.src || '').toLowerCase();
     if (!origUrl) return null;
 
     console.log(`🔑 JWT payload url: ${origUrl.slice(0, 120)}`);
 
-    // File extension check
     if (origUrl.match(/\.(mp4|mov|webm|mkv|avi|ts)(\?|#|$)/))        return 'video';
     if (origUrl.match(/\.(jpg|jpeg|png|gif|webp|heic|avif)(\?|#|$)/)) return 'image';
 
-    // Instagram CDN path conventions (including newer /t16/ and /o1/v/)
-    if (origUrl.includes('/t16/'))   return 'video'; // image+audio reels, newer format
-    if (origUrl.includes('/o1/v/'))  return 'video'; // newer video store root
+    if (origUrl.includes('/t16/'))  return 'video'; // image+audio reels
+    if (origUrl.includes('/o1/v/')) return 'video'; // newer video store root
 
     if (origUrl.includes('scontent') || origUrl.includes('cdninstagram')) {
       if (origUrl.match(/\/t50\./)) return 'video';
@@ -398,16 +317,11 @@ const detectTypeFromJwtUrl = (tokenUrl) => {
 // NORMALIZE MEDIA ITEM
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Decode a rapidcdn thumbnail token and return the CDN URL it points to, or null. */
 const decodeThumbnailJwtUrl = (thumbUrl) => {
   if (!thumbUrl || !thumbUrl.includes('token=')) return null;
   return extractJwtCdnUrl(thumbUrl);
 };
 
-/**
- * Validate that the thumbnail belongs to the same asset type as the media item.
- * Returns false when igdl assigns an image CDN thumbnail to a video item.
- */
 const isThumbnailValidForType = (thumbUrl, mediaType) => {
   if (!thumbUrl || mediaType !== 'video') return true;
 
@@ -415,39 +329,26 @@ const isThumbnailValidForType = (thumbUrl, mediaType) => {
   if (!cdnUrl) return true;
 
   const lower = cdnUrl.toLowerCase();
-
-  // t51.* = image store; a video item should not have an image-store thumbnail
   if (lower.includes('/t51.')) {
     console.log(`🖼 Thumbnail mismatch: video item has image thumbnail (t51) → clearing`);
     return false;
   }
-
-  if (lower.match(/\.(jpg|jpeg|png|gif|webp)(\?|$)/) && !lower.includes('/t50.') &&
-      !lower.includes('/t16/') && !lower.includes('/o1/v/')) {
+  if (lower.match(/\.(jpg|jpeg|png|gif|webp)(\?|$)/) &&
+      !lower.includes('/t50.') && !lower.includes('/t16/') && !lower.includes('/o1/v/')) {
     if (lower.includes('cdninstagram') || lower.includes('scontent')) {
       console.log(`🖼 Thumbnail mismatch: video item has .jpg thumbnail from image CDN → clearing`);
       return false;
     }
   }
-
   return true;
 };
 
-/**
- * Normalize a raw media item from any scraper into a consistent shape.
- *
- * Type detection priority:
- *   1. Explicit type field from scraper (if valid)
- *   2. URL extension / CDN path (detectTypeFromUrl)  ← includes /t16/ fix
- *   3. JWT payload decode (detectTypeFromJwtUrl)      ← includes /t16/ fix
- *   4. Default → 'video'  (image+audio reels are mp4 containers)
- */
 const normalizeMediaItem = (item, index, fallbackThumbnail = PLACEHOLDER_THUMBNAIL) => {
   const rawUrl = pickBestUrl(item.url || item.download || item.src || '');
   const url    = rawUrl;
   const cdnUrl = decodeCdnUrl(rawUrl) || rawUrl;
 
-  let type = '';
+  let type     = '';
   const rawType = (item.type || '').toString().toLowerCase();
 
   if (rawType === 'video' || rawType === 'image') {
@@ -462,8 +363,7 @@ const normalizeMediaItem = (item, index, fallbackThumbnail = PLACEHOLDER_THUMBNA
         console.log(`🔍 JWT type-decode: ${fromJwt} for ${rawUrl.slice(0, 60)}`);
         type = fromJwt;
       } else {
-        // Default to video — Instagram image+audio posts are packaged as mp4
-        type = 'video';
+        type = 'video'; // default — image+audio reels are mp4 containers
       }
     }
   }
@@ -473,13 +373,58 @@ const normalizeMediaItem = (item, index, fallbackThumbnail = PLACEHOLDER_THUMBNA
     ? (rawThumb || fallbackThumbnail)
     : fallbackThumbnail;
 
-  return {
-    url,
-    thumbnail,
-    type,
-    quality: item.quality || item.resolution || 'Original Quality',
-    index,
-  };
+  return { url, thumbnail, type, quality: item.quality || item.resolution || 'Original Quality', index };
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FACEBOOK DATA SHAPE NORMALIZER
+//
+// metadownloader returns different shapes depending on URL type:
+//   • Standard videos:   { data: [ { resolution, url, thumbnail } ], title }
+//   • Reel share links:  { url, title, thumbnail }  OR  { sd, hd }
+//   • Some responses:    plain array
+//
+// This normalises all known shapes into { data: [...], title, thumbnail }
+// so the facebook formatter always receives a consistent structure.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const normaliseFacebookData = (raw) => {
+  console.log('📘 FB raw keys:', Object.keys(raw || {}));
+  console.log('📘 FB raw sample:', JSON.stringify(raw).slice(0, 300));
+
+  // Shape 1: already has data array
+  if (raw && Array.isArray(raw.data) && raw.data.length > 0) return raw;
+
+  // Shape 2: already has media array
+  if (raw && Array.isArray(raw.media) && raw.media.length > 0) return raw;
+
+  // Shape 3: top-level array of quality objects
+  if (Array.isArray(raw) && raw.length > 0 && (raw[0].url || raw[0].resolution)) {
+    return { data: raw, title: 'Facebook Video', thumbnail: raw[0]?.thumbnail || '' };
+  }
+
+  // Shape 4: { sd, hd } or { SD, HD } flat keys
+  const sdUrl = raw?.sd || raw?.SD || '';
+  const hdUrl = raw?.hd || raw?.HD || '';
+  if (sdUrl || hdUrl) {
+    const variants = [];
+    if (hdUrl) variants.push({ resolution: '720p (HD)', url: hdUrl, thumbnail: raw?.thumbnail || '' });
+    if (sdUrl) variants.push({ resolution: '360p (SD)', url: sdUrl, thumbnail: raw?.thumbnail || '' });
+    return { data: variants, title: raw?.title || 'Facebook Video', thumbnail: raw?.thumbnail || '' };
+  }
+
+  // Shape 5: single URL at root (reel share links return this)
+  const directUrl = raw?.url || raw?.download || raw?.video || raw?.videoUrl || '';
+  if (directUrl) {
+    return {
+      data:      [{ resolution: 'Best Quality', url: directUrl, thumbnail: raw?.thumbnail || '' }],
+      title:     raw?.title || 'Facebook Video',
+      thumbnail: raw?.thumbnail || '',
+    };
+  }
+
+  // Unknown — return as-is; the formatter will log and attempt to handle it
+  return raw;
 };
 
 // ===== PLATFORM-SPECIFIC DOWNLOADERS =====
@@ -492,7 +437,6 @@ const platformDownloaders = {
     let snapsErr    = null;
     let igdlErr     = null;
 
-    // Run facebookInsta (Instagram scrapers) and igdl in parallel
     await Promise.allSettled([
       downloadWithTimeout(() => facebookInsta(url), 35000)
         .then(d  => { snapsResult = d; })
@@ -504,10 +448,10 @@ const platformDownloaders = {
 
     const extractItems = (res) => {
       if (!res) return null;
-      if (Array.isArray(res))            return res.length        > 0 ? res          : null;
-      if (Array.isArray(res.data))       return res.data.length   > 0 ? res.data     : null;
-      if (Array.isArray(res.result))     return res.result.length > 0 ? res.result   : null;
-      if (Array.isArray(res.media))      return res.media.length  > 0 ? res.media    : null;
+      if (Array.isArray(res))        return res.length        > 0 ? res        : null;
+      if (Array.isArray(res.data))   return res.data.length   > 0 ? res.data   : null;
+      if (Array.isArray(res.result)) return res.result.length > 0 ? res.result : null;
+      if (Array.isArray(res.media))  return res.media.length  > 0 ? res.media  : null;
       return null;
     };
 
@@ -516,7 +460,7 @@ const platformDownloaders = {
 
     console.log(`📸 Instagram: snapsave items=${snapsItems?.length ?? 'null'}  igdl items=${igdlItems?.length ?? 'null'}`);
     if (snapsErr) console.log('📸 snapsave error:', snapsErr.message);
-    if (igdlErr)  console.log('📸 igdl error:',     igdlErr.message);
+    if (igdlErr)  console.log('📸 igdl error:', igdlErr.message);
 
     if (!snapsItems && !igdlItems) {
       throw new Error(
@@ -526,19 +470,16 @@ const platformDownloaders = {
 
     if (snapsItems && snapsItems.length > 0) {
       console.log('📸 Instagram: using snapsave');
-      snapsItems.forEach((it, i) => {
-        const u = (it.url || '').slice(0, 100);
-        const t = (it.thumbnail || '').slice(0, 60);
-        console.log(`  snap[${i}] type=${it.type || '?'} url=${u} thumb=${t}`);
-      });
+      snapsItems.forEach((it, i) =>
+        console.log(`  snap[${i}] type=${it.type || '?'} url=${(it.url || '').slice(0, 100)}`)
+      );
       return { _items: snapsItems, _source: 'snapsave' };
     }
 
     console.log('📸 Instagram: snapsave empty/failed — falling back to igdl');
-    igdlItems.forEach((it, i) => {
-      const u = (it.url || '').slice(0, 100);
-      console.log(`  igdl[${i}] url=${u}`);
-    });
+    igdlItems.forEach((it, i) =>
+      console.log(`  igdl[${i}] url=${(it.url || '').slice(0, 100)}`)
+    );
     return { _items: igdlItems, _source: 'igdl' };
   },
 
@@ -548,10 +489,7 @@ const platformDownloaders = {
         const r = await axios.post(
           'https://www.tikwm.com/api/',
           new URLSearchParams({ url, hd: '1' }).toString(),
-          {
-            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-            timeout: 20000,
-          }
+          { headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, timeout: 20000 }
         );
         return r.data;
       }, 25000);
@@ -562,12 +500,12 @@ const platformDownloaders = {
         return {
           title:     d.title || d.author?.nickname || 'TikTok Post',
           thumbnail: d.cover || d.origin_cover || '',
-          video:     d.play ? [d.play]   : (d.wmplay ? [d.wmplay] : []),
+          video:     d.play  ? [d.play]  : (d.wmplay ? [d.wmplay] : []),
           audio:     d.music ? [d.music] : [],
           ...(d.images && d.images.length > 0 && {
-            images: d.images.map(img =>
-              typeof img === 'string' ? img : (img?.url || img?.download || '')
-            ).filter(u => u && u.startsWith('http')),
+            images: d.images
+              .map(img => typeof img === 'string' ? img : (img?.url || img?.download || ''))
+              .filter(u => u && u.startsWith('http')),
           }),
         };
       }
@@ -577,18 +515,31 @@ const platformDownloaders = {
     }
 
     const data = await downloadWithTimeout(() => ttdl(url));
-    if (!data || (!data.video && !data.images)) {
+    if (!data || (!data.video && !data.images))
       throw new Error('TikTok: both tikwm and ttdl failed to return usable data');
-    }
     return data;
   },
 
   async facebook(url) {
-    // facebookInstaService now routes Facebook URLs to metadownloader internally
-    const data = await downloadWithTimeout(() => facebookInsta(url));
-    if (!data || (!data.media && !data.data)) {
-      throw new Error('Facebook service returned invalid data');
+    // facebookInstaService routes Facebook URLs to metadownloader internally
+    const raw = await downloadWithTimeout(() => facebookInsta(url));
+
+    if (!raw) throw new Error('Facebook: metadownloader returned null/undefined');
+
+    // Normalise whichever shape metadownloader returned for this URL type
+    const data = normaliseFacebookData(raw);
+
+    // Confirm we actually have a URL somewhere after normalisation
+    const hasUrl =
+      (Array.isArray(data?.data)  && data.data.some(v  => v?.url))  ||
+      (Array.isArray(data?.media) && data.media.some(v => v?.url))  ||
+      data?.url || data?.sd || data?.hd;
+
+    if (!hasUrl) {
+      console.error('📘 Facebook: no URL found in normalised data:', JSON.stringify(data).slice(0, 400));
+      throw new Error('Facebook: could not extract a download URL from the response');
     }
+
     return data;
   },
 
@@ -599,73 +550,51 @@ const platformDownloaders = {
       const hasValidUrls = Array.isArray(data.url) &&
         data.url.some(item => item && Object.keys(item).length > 0 && item.url);
 
-      if (!hasValidData && !hasValidUrls) {
+      if (!hasValidData && !hasValidUrls)
         throw new Error("Twitter primary service returned unusable data");
-      }
       return data;
     } catch (error) {
       console.warn("Twitter: Primary service failed, trying custom service...", error.message);
       const fallbackData = await downloadWithTimeout(() => downloadTwmateData(url));
 
-      if (!fallbackData || (!Array.isArray(fallbackData) && !fallbackData.data)) {
+      if (!fallbackData || (!Array.isArray(fallbackData) && !fallbackData.data))
         throw new Error('Twitter download failed - both primary and fallback methods failed');
-      }
       return fallbackData;
     }
   },
 
   async youtube(url, req) {
     console.log('YouTube: Processing URL:', url);
-
     try {
       const timeout = url.includes('/shorts/') ? 30000 : 60000;
-      const data = await downloadWithTimeout(() => fetchYouTubeData(url), timeout);
+      const data    = await downloadWithTimeout(() => fetchYouTubeData(url), timeout);
 
-      if (!data || !data.title) {
-        throw new Error('YouTube service returned invalid data');
-      }
-
+      if (!data || !data.title) throw new Error('YouTube service returned invalid data');
       console.log('YouTube: Successfully fetched data, formats count:', data.formats?.length || 0);
 
       if (data.formats) {
         const serverBaseUrl = getServerBaseUrl(req);
         data.formats.forEach(format => {
-          if (format.url && format.url.startsWith('MERGE:')) {
+          if (format.url?.startsWith('MERGE:')) {
             const parts = format.url.split(':');
             if (parts.length >= 3) {
-              const videoUrl = parts[1];
-              const audioUrl = parts[2];
-              format.url = `${serverBaseUrl}/api/merge-audio?videoUrl=${encodeURIComponent(videoUrl)}&audioUrl=${encodeURIComponent(audioUrl)}`;
+              format.url = `${serverBaseUrl}/api/merge-audio?videoUrl=${encodeURIComponent(parts[1])}&audioUrl=${encodeURIComponent(parts[2])}`;
               console.log(`🔄 Converted merge URL for: ${format.quality}`);
             }
           }
         });
-
-        if (data.url && data.url.startsWith('MERGE:')) {
+        if (data.url?.startsWith('MERGE:')) {
           const parts = data.url.split(':');
-          if (parts.length >= 3) {
-            const videoUrl = parts[1];
-            const audioUrl = parts[2];
-            data.url = `${serverBaseUrl}/api/merge-audio?videoUrl=${encodeURIComponent(videoUrl)}&audioUrl=${encodeURIComponent(audioUrl)}`;
-          }
+          if (parts.length >= 3)
+            data.url = `${serverBaseUrl}/api/merge-audio?videoUrl=${encodeURIComponent(parts[1])}&audioUrl=${encodeURIComponent(parts[2])}`;
         }
       }
-
       return data;
     } catch (error) {
-      if (error.message.includes('Status code: 410')) {
-        throw new Error('YouTube video not available (removed or private)');
-      }
-      if (error.message.includes('Status code: 403')) {
-        throw new Error('YouTube video access forbidden (age-restricted or region-locked)');
-      }
-      if (error.message.includes('Status code: 404')) {
-        throw new Error('YouTube video not found (invalid URL or removed)');
-      }
-      if (error.message.includes('timeout')) {
-        throw new Error('YouTube download timed out - video processing may be slow, please try again');
-      }
-
+      if (error.message.includes('Status code: 410')) throw new Error('YouTube video not available (removed or private)');
+      if (error.message.includes('Status code: 403')) throw new Error('YouTube video access forbidden (age-restricted or region-locked)');
+      if (error.message.includes('Status code: 404')) throw new Error('YouTube video not found (invalid URL or removed)');
+      if (error.message.includes('timeout'))          throw new Error('YouTube download timed out - please try again');
       throw new Error(`YouTube download failed: ${error.message}`);
     }
   },
@@ -673,16 +602,14 @@ const platformDownloaders = {
   async pinterest(url) {
     try {
       const data = await downloadWithTimeout(() => pindl(url));
-      if (!data || (!data.data && !data.result && !data.url)) {
+      if (!data || (!data.data && !data.result && !data.url))
         throw new Error('Pinterest service returned invalid data');
-      }
       return data;
     } catch (error) {
       console.warn('Pinterest primary downloader failed, trying fallback...', error.message);
       const fallbackData = await downloadWithTimeout(() => pinterest(url));
-      if (!fallbackData || (!fallbackData.data && !fallbackData.result)) {
+      if (!fallbackData || (!fallbackData.data && !fallbackData.result))
         throw new Error('Pinterest download failed - both primary and fallback methods failed');
-      }
       return fallbackData;
     }
   },
@@ -691,17 +618,11 @@ const platformDownloaders = {
     console.log("🧵 Threads: Starting download with advanced service");
     try {
       const data = await downloadWithTimeout(() => advancedThreadsDownloader(url), 60000);
-
-      const hasMedia = data && (
-        data.download ||
-        data.url ||
-        (Array.isArray(data.items) && data.items.length > 0)
-      );
+      const hasMedia = data && (data.download || data.url || (Array.isArray(data.items) && data.items.length > 0));
       if (!hasMedia) {
         console.error("🧵 Threads raw data:", JSON.stringify(data).slice(0, 500));
         throw new Error('Threads service returned invalid data');
       }
-
       console.log("✅ Threads: data ok — items:", data.items?.length ?? 'none',
                   "download:", !!data.download, "url:", !!data.url);
       return data;
@@ -713,9 +634,7 @@ const platformDownloaders = {
 
   async linkedin(url) {
     const data = await downloadWithTimeout(() => fetchLinkedinData(url));
-    if (!data || !data.data) {
-      throw new Error('LinkedIn service returned invalid data');
-    }
+    if (!data || !data.data) throw new Error('LinkedIn service returned invalid data');
     return data;
   }
 };
@@ -774,9 +693,7 @@ const dataFormatters = {
       console.log(`  [${i}] type=${it.type} url=${String(it.url).slice(0, 100)}`)
     );
 
-    if (mediaItems.length === 0) {
-      throw new Error('Instagram returned no usable media items');
-    }
+    if (mediaItems.length === 0) throw new Error('Instagram returned no usable media items');
 
     const first = mediaItems[0];
     return {
@@ -795,9 +712,6 @@ const dataFormatters = {
                 'has video=', !!(data.video), 'has audio=', !!(data.audio));
 
     if (data.images && Array.isArray(data.images) && data.images.length > 0) {
-      console.log(`🎵 TikTok: slideshow ${data.images.length} item(s), item[0] type=${typeof data.images[0]}`);
-      if (data.images[0]) console.log('🎵 sample:', JSON.stringify(data.images[0]).slice(0, 120));
-
       const extractUrl = (entry) => {
         if (typeof entry === 'string') return entry;
         if (entry && typeof entry === 'object')
@@ -808,15 +722,7 @@ const dataFormatters = {
       const mediaItems = data.images
         .map(extractUrl)
         .filter(u => u && u.startsWith('http'))
-        .map((imgUrl, index) => ({
-          url:       imgUrl,
-          thumbnail: imgUrl,
-          type:      'image',
-          quality:   'Original Quality',
-          index,
-        }));
-
-      console.log(`🎵 TikTok: ${mediaItems.length} valid image URL(s) extracted`);
+        .map((imgUrl, index) => ({ url: imgUrl, thumbnail: imgUrl, type: 'image', quality: 'Original Quality', index }));
 
       if (mediaItems.length > 0) {
         const first = mediaItems[0];
@@ -835,7 +741,6 @@ const dataFormatters = {
     }
 
     const bestVideoUrl = pickBestUrl(data.video);
-    console.log('🎵 TikTok: video post url=', String(bestVideoUrl).slice(0, 80));
     return {
       title:     data.title || 'Untitled Video',
       url:       bestVideoUrl,
@@ -849,19 +754,16 @@ const dataFormatters = {
   facebook(data) {
     console.log('📘 Facebook: Formatting data');
 
-    if (data && data.media && Array.isArray(data.media)) {
-      const rawCount    = data.media.length;
+    // media array
+    if (data && Array.isArray(data.media) && data.media.length > 0) {
       const validItems  = data.media.filter(item => item && (item.url || item.download));
       const uniqueItems = deduplicateByBestQuality(validItems);
       const mediaItems  = uniqueItems.map((item, index) =>
         normalizeMediaItem(item, index, data.thumbnail || PLACEHOLDER_THUMBNAIL)
       );
 
-      console.log(`📘 Facebook (media array): ${rawCount} raw → ${mediaItems.length} unique`);
-
-      if (mediaItems.length === 0) {
-        throw new Error('Facebook media array contained no valid URLs');
-      }
+      console.log(`📘 Facebook (media array): ${data.media.length} raw → ${mediaItems.length} unique`);
+      if (mediaItems.length === 0) throw new Error('Facebook media array contained no valid URLs');
 
       const first = mediaItems[0];
       return {
@@ -874,7 +776,8 @@ const dataFormatters = {
       };
     }
 
-    const fbData = data.data || [];
+    // data array (most common metadownloader shape)
+    const fbData = data?.data || [];
     if (Array.isArray(fbData) && fbData.length > 0) {
       console.log(`📘 Facebook (data array): ${fbData.length} quality variant(s)`);
 
@@ -893,52 +796,59 @@ const dataFormatters = {
       };
     }
 
-    return {
-      title:     data.title || 'Facebook Video',
-      url:       decodeCdnUrl(pickBestUrl(data.url || '')),
-      thumbnail: data.thumbnail || PLACEHOLDER_THUMBNAIL,
-      sizes:     ['Best Quality'],
-      source:    'facebook',
-    };
+    // Fallback: single URL (reel share or other non-standard shape)
+    const fallbackUrl = decodeCdnUrl(
+      pickBestUrl(data?.url || data?.download || data?.video || data?.videoUrl || '')
+    );
+    if (fallbackUrl) {
+      console.log(`📘 Facebook (fallback url): ${fallbackUrl.slice(0, 80)}`);
+      return {
+        title:     data?.title || 'Facebook Video',
+        url:       fallbackUrl,
+        thumbnail: data?.thumbnail || PLACEHOLDER_THUMBNAIL,
+        sizes:     ['Best Quality'],
+        source:    'facebook',
+      };
+    }
+
+    throw new Error('Facebook formatter: no usable URL found in data');
   },
 
   twitter(data) {
     if (data.data && (data.data.HD || data.data.SD)) {
       return {
-        title: 'Twitter Video',
-        url: data.data.HD || data.data.SD || '',
+        title:     'Twitter Video',
+        url:       data.data.HD || data.data.SD || '',
         thumbnail: PLACEHOLDER_THUMBNAIL,
-        sizes: data.data.HD ? ['HD', 'SD'] : ['SD'],
-        source: 'twitter',
+        sizes:     data.data.HD ? ['HD', 'SD'] : ['SD'],
+        source:    'twitter',
       };
     }
 
     if (data.url && Array.isArray(data.url)) {
       const videoArray  = data.url.filter(item => item && item.url);
-      const bestQuality = videoArray.find(item => item.quality && item.quality.includes('1280x720')) ||
-                          videoArray.find(item => item.quality && item.quality.includes('640x360')) ||
+      const bestQuality = videoArray.find(item => item.quality?.includes('1280x720')) ||
+                          videoArray.find(item => item.quality?.includes('640x360'))  ||
                           videoArray[0];
-
       return {
-        title: 'Twitter Video',
-        url: bestQuality.url || '',
+        title:     'Twitter Video',
+        url:       bestQuality.url || '',
         thumbnail: PLACEHOLDER_THUMBNAIL,
-        sizes: videoArray.map(item => item.quality),
-        source: 'twitter',
+        sizes:     videoArray.map(item => item.quality),
+        source:    'twitter',
       };
     }
 
     if (Array.isArray(data) && data.length > 0) {
-      const bestQuality = data.find(item => item.quality.includes('1280x720')) ||
-                          data.find(item => item.quality.includes('640x360')) ||
+      const bestQuality = data.find(item => item.quality?.includes('1280x720')) ||
+                          data.find(item => item.quality?.includes('640x360'))  ||
                           data[0];
-
       return {
-        title: 'Twitter Video',
-        url: bestQuality.url || '',
+        title:     'Twitter Video',
+        url:       bestQuality.url || '',
         thumbnail: PLACEHOLDER_THUMBNAIL,
-        sizes: data.map(item => item.quality),
-        source: 'twitter',
+        sizes:     data.map(item => item.quality),
+        source:    'twitter',
       };
     }
 
@@ -947,14 +857,10 @@ const dataFormatters = {
 
   youtube(data, req) {
     console.log('🎬 Formatting YouTube data...');
+    if (!data || !data.title) throw new Error('Invalid YouTube data received');
 
-    if (!data || !data.title) {
-      throw new Error('Invalid YouTube data received');
-    }
-
-    const hasFormats    = data.formats    && data.formats.length > 0;
+    const hasFormats    = data.formats    && data.formats.length    > 0;
     const hasAllFormats = data.allFormats && data.allFormats.length > 0;
-
     console.log(`📊 YouTube data: hasFormats=${hasFormats}, hasAllFormats=${hasAllFormats}`);
 
     let qualityOptions  = [];
@@ -962,56 +868,39 @@ const dataFormatters = {
     let defaultUrl      = data.url;
 
     if (hasFormats || hasAllFormats) {
-      qualityOptions = data.formats || data.allFormats;
+      qualityOptions  = data.formats || data.allFormats;
+      selectedQuality = qualityOptions.find(opt => opt.quality?.includes('360p')) || qualityOptions[0];
+      defaultUrl      = selectedQuality?.url || data.url;
 
-      selectedQuality = qualityOptions.find(opt =>
-        opt.quality && opt.quality.includes('360p')
-      ) || qualityOptions[0];
-
-      defaultUrl = selectedQuality?.url || data.url;
-
-      console.log(`✅ YouTube: ${qualityOptions.length} quality options available`);
+      console.log(`✅ YouTube: ${qualityOptions.length} quality options`);
       console.log(`🎯 Selected quality: ${selectedQuality?.quality}`);
 
       const serverBaseUrl = getServerBaseUrl(req);
       qualityOptions.forEach(format => {
-        if (format.url && format.url.startsWith('MERGE:')) {
+        if (format.url?.startsWith('MERGE:')) {
           const parts = format.url.split(':');
           if (parts.length >= 3) {
-            const videoUrl = parts[1];
-            const audioUrl = parts[2];
-            format.url = `${serverBaseUrl}/api/merge-audio?videoUrl=${encodeURIComponent(videoUrl)}&audioUrl=${encodeURIComponent(audioUrl)}`;
+            format.url = `${serverBaseUrl}/api/merge-audio?videoUrl=${encodeURIComponent(parts[1])}&audioUrl=${encodeURIComponent(parts[2])}`;
             console.log(`🔄 Formatter: Converted merge URL for: ${format.quality}`);
           }
         }
       });
 
-      if (selectedQuality && selectedQuality.url && selectedQuality.url.startsWith('MERGE:')) {
+      if (selectedQuality?.url?.startsWith('MERGE:')) {
         const parts = selectedQuality.url.split(':');
         if (parts.length >= 3) {
-          const videoUrl = parts[1];
-          const audioUrl = parts[2];
-          selectedQuality.url = `${serverBaseUrl}/api/merge-audio?videoUrl=${encodeURIComponent(videoUrl)}&audioUrl=${encodeURIComponent(audioUrl)}`;
+          selectedQuality.url = `${getServerBaseUrl(req)}/api/merge-audio?videoUrl=${encodeURIComponent(parts[1])}&audioUrl=${encodeURIComponent(parts[2])}`;
           defaultUrl = selectedQuality.url;
         }
       }
     } else {
       console.log('⚠️ No quality formats found, creating fallback');
-      qualityOptions = [
-        {
-          quality: '360p',
-          qualityNum: 360,
-          url: data.url,
-          type: 'video/mp4',
-          extension: 'mp4',
-          isPremium: false,
-          hasAudio: true
-        }
-      ];
+      qualityOptions  = [{ quality: '360p', qualityNum: 360, url: data.url, type: 'video/mp4', extension: 'mp4', isPremium: false, hasAudio: true }];
       selectedQuality = qualityOptions[0];
     }
 
-    const result = {
+    console.log(`✅ YouTube formatting complete — ${qualityOptions.length} formats`);
+    return {
       title:           data.title,
       url:             defaultUrl,
       thumbnail:       data.thumbnail || PLACEHOLDER_THUMBNAIL,
@@ -1020,44 +909,26 @@ const dataFormatters = {
       source:          'youtube',
       formats:         qualityOptions,
       allFormats:      qualityOptions,
-      selectedQuality: selectedQuality
+      selectedQuality: selectedQuality,
     };
-
-    console.log(`✅ YouTube formatting complete`);
-    console.log(`📦 Sending to client: ${qualityOptions.length} formats`);
-
-    return result;
   },
 
   threads(data) {
     console.log("🧵 Processing Threads data, keys:", Object.keys(data || {}));
 
     if (data.items && Array.isArray(data.items) && data.items.length > 0) {
-      console.log(`🧵 Threads: ${data.items.length} item(s) found`);
-
       const mediaItems = data.items
         .filter(item => item && (item.download || item.url || item.video_url || item.image_url ||
                                   item.display_url || item.image_versions))
         .map((item, index) => {
           const itemUrl =
-            item.download ||
-            item.url ||
-            item.video_url ||
-            item.image_url ||
-            item.display_url ||
-            item.image_versions?.candidates?.[0]?.url ||
-            item.image_versions?.[0]?.url ||
-            '';
+            item.download || item.url || item.video_url || item.image_url || item.display_url ||
+            item.image_versions?.candidates?.[0]?.url || item.image_versions?.[0]?.url || '';
 
           const itemThumb =
-            item.thumbnail ||
-            item.cover ||
-            item.image_url ||
-            item.display_url ||
-            item.image_versions?.candidates?.[0]?.url ||
-            item.image_versions?.[0]?.url ||
-            data.thumbnail ||
-            PLACEHOLDER_THUMBNAIL;
+            item.thumbnail || item.cover || item.image_url || item.display_url ||
+            item.image_versions?.candidates?.[0]?.url || item.image_versions?.[0]?.url ||
+            data.thumbnail || PLACEHOLDER_THUMBNAIL;
 
           const isVideo  = !!(item.video_url || item.download?.includes('.mp4'));
           const itemType = item.type ||
@@ -1065,15 +936,7 @@ const dataFormatters = {
              item.media_type === 1 || item.media_type === '1' ? 'image' :
              isVideo ? 'video' : 'image');
 
-          console.log(`🧵 item[${index}] url=${itemUrl.slice(0,60)} type=${itemType}`);
-
-          return {
-            url:       itemUrl,
-            thumbnail: itemThumb,
-            type:      itemType,
-            quality:   item.quality || 'Best Available',
-            index,
-          };
+          return { url: itemUrl, thumbnail: itemThumb, type: itemType, quality: item.quality || 'Best Available', index };
         })
         .filter(item => item.url);
 
@@ -1093,37 +956,35 @@ const dataFormatters = {
     }
 
     return {
-      title:     data.title || 'Threads Post',
+      title:     data.title    || 'Threads Post',
       url:       data.download || data.url || '',
       thumbnail: data.thumbnail || PLACEHOLDER_THUMBNAIL,
       sizes:     [data.quality || 'Best Available'],
       source:    'threads',
-      metadata:  data.metadata || {}
+      metadata:  data.metadata || {},
     };
   },
 
   pinterest(data) {
     const pinterestData = data?.data || data;
     return {
-      title: 'Pinterest Image',
-      url: pinterestData.result || pinterestData.url || '',
+      title:     'Pinterest Image',
+      url:       pinterestData.result || pinterestData.url || '',
       thumbnail: pinterestData.result || pinterestData.url || PLACEHOLDER_THUMBNAIL,
-      sizes: ['Original Quality'],
-      source: 'pinterest',
+      sizes:     ['Original Quality'],
+      source:    'pinterest',
     };
   },
 
   linkedin(data) {
     const videoUrl = Array.isArray(data?.data?.videos) && data.data.videos.length > 0
-      ? data.data.videos[0]
-      : '';
-
+      ? data.data.videos[0] : '';
     return {
-      title: 'LinkedIn Video',
-      url: videoUrl,
+      title:     'LinkedIn Video',
+      url:       videoUrl,
       thumbnail: videoUrl ? PLACEHOLDER_THUMBNAIL : 'Error',
-      sizes: ['Original Quality'],
-      source: 'linkedin',
+      sizes:     ['Original Quality'],
+      source:    'linkedin',
     };
   }
 };
@@ -1135,19 +996,15 @@ const formatData = async (platform, data, req) => {
   if (!formatter) {
     console.warn("Data Formatting: Generic formatting applied.");
     return {
-      title: data.title || 'Untitled Media',
-      url: data.url || '',
+      title:     data.title || 'Untitled Media',
+      url:       data.url || '',
       thumbnail: data.thumbnail || PLACEHOLDER_THUMBNAIL,
-      sizes: data.sizes?.length > 0 ? data.sizes : ['Original Quality'],
-      source: platform,
+      sizes:     data.sizes?.length > 0 ? data.sizes : ['Original Quality'],
+      source:    platform,
     };
   }
 
-  if (platform === 'youtube') {
-    return formatter(data, req);
-  }
-
-  return formatter(data);
+  return platform === 'youtube' ? formatter(data, req) : formatter(data);
 };
 
 // ===== MAIN CONTROLLER =====
@@ -1160,10 +1017,7 @@ const downloadMedia = async (req, res) => {
     const urlValidation = validateUrl(url);
     if (!urlValidation.isValid) {
       console.warn(`Download Media: ${urlValidation.error}`);
-      return res.status(400).json({
-        error: urlValidation.error,
-        success: false
-      });
+      return res.status(400).json({ error: urlValidation.error, success: false });
     }
 
     const cleanedUrl = urlValidation.cleanedUrl;
@@ -1172,9 +1026,7 @@ const downloadMedia = async (req, res) => {
     if (!platform) {
       console.warn("Download Media: Unsupported platform for the given URL.");
       return res.status(400).json({
-        error: 'Unsupported platform',
-        success: false,
-        supportedPlatforms: SUPPORTED_PLATFORMS
+        error: 'Unsupported platform', success: false, supportedPlatforms: SUPPORTED_PLATFORMS
       });
     }
 
@@ -1187,9 +1039,7 @@ const downloadMedia = async (req, res) => {
     console.info(`Download Media: Fetching data for platform '${platform}'.`);
 
     const downloader = platformDownloaders[platform];
-    if (!downloader) {
-      throw new Error(`No downloader available for platform: ${platform}`);
-    }
+    if (!downloader) throw new Error(`No downloader available for platform: ${platform}`);
 
     const data = platform === 'youtube'
       ? await downloader(processedUrl, req)
@@ -1197,11 +1047,7 @@ const downloadMedia = async (req, res) => {
 
     if (!data) {
       console.error("Download Media: No data returned for the platform.");
-      return res.status(404).json({
-        error: 'No data found for this URL',
-        success: false,
-        platform: platform
-      });
+      return res.status(404).json({ error: 'No data found for this URL', success: false, platform });
     }
 
     let formattedData;
@@ -1210,19 +1056,14 @@ const downloadMedia = async (req, res) => {
     } catch (formatError) {
       console.error(`Download Media: Data formatting failed - ${formatError.message}`);
       return res.status(500).json({
-        error: 'Failed to format media data',
-        success: false,
-        details: formatError.message,
-        platform: platform
+        error: 'Failed to format media data', success: false, details: formatError.message, platform
       });
     }
 
     if (!formattedData || !formattedData.url) {
       console.error("Download Media: Formatted data is invalid or missing URL.");
       return res.status(500).json({
-        error: 'Invalid media data - no download URL found',
-        success: false,
-        platform: platform
+        error: 'Invalid media data - no download URL found', success: false, platform
       });
     }
 
@@ -1230,28 +1071,28 @@ const downloadMedia = async (req, res) => {
     console.log(`Final ${platform} URL length:`, formattedData.url.length);
     console.log(`Media items: ${formattedData.mediaItems?.length || 1}`);
     if (platform === 'youtube') {
-      console.log(`Formats count: ${formattedData.formats?.length || 0}`);
       const mergeFormats = formattedData.formats?.filter(f => f.url?.includes('/api/merge-audio')) || [];
+      console.log(`Formats count: ${formattedData.formats?.length || 0}`);
       console.log(`🎵 Merge formats available: ${mergeFormats.length}`);
     }
 
     console.info("Download Media: Media successfully downloaded and formatted.");
 
     res.status(200).json({
-      success: true,
-      data: formattedData,
-      platform: platform,
+      success:   true,
+      data:      formattedData,
+      platform:  platform,
       timestamp: new Date().toISOString(),
       debug: {
-        originalUrl: url,
-        cleanedUrl: cleanedUrl,
-        processedUrl: processedUrl,
-        hasValidUrl: !!formattedData.url,
-        finalUrlLength: formattedData.url ? formattedData.url.length : 0,
+        originalUrl:      url,
+        cleanedUrl:       cleanedUrl,
+        processedUrl:     processedUrl,
+        hasValidUrl:      !!formattedData.url,
+        finalUrlLength:   formattedData.url ? formattedData.url.length : 0,
         hasMultipleItems: hasMultiple,
-        mediaItemsCount: formattedData.mediaItems?.length || 1,
-        hasFormats: !!formattedData.formats,
-        formatsCount: formattedData.formats?.length || 0,
+        mediaItemsCount:  formattedData.mediaItems?.length || 1,
+        hasFormats:       !!formattedData.formats,
+        formatsCount:     formattedData.formats?.length || 0,
       }
     });
 
@@ -1260,20 +1101,16 @@ const downloadMedia = async (req, res) => {
     console.error('Error stack:', error.stack);
 
     let statusCode = 500;
-    if (error.message.includes('not available') || error.message.includes('not found')) {
-      statusCode = 404;
-    } else if (error.message.includes('forbidden') || error.message.includes('access')) {
-      statusCode = 403;
-    } else if (error.message.includes('timeout')) {
-      statusCode = 408;
-    }
+    if (error.message.includes('not available') || error.message.includes('not found')) statusCode = 404;
+    else if (error.message.includes('forbidden') || error.message.includes('access'))   statusCode = 403;
+    else if (error.message.includes('timeout'))                                          statusCode = 408;
 
     res.status(statusCode).json({
-      error: 'Failed to download media',
-      success: false,
-      details: error.message,
-      platform: identifyPlatform(url) || 'unknown',
-      timestamp: new Date().toISOString(),
+      error:       'Failed to download media',
+      success:     false,
+      details:     error.message,
+      platform:    identifyPlatform(url) || 'unknown',
+      timestamp:   new Date().toISOString(),
       suggestions: getErrorSuggestions(error.message, identifyPlatform(url))
     });
   }
@@ -1285,19 +1122,14 @@ const getErrorSuggestions = (errorMessage, platform) => {
   if (platform === 'threads') {
     suggestions.push('Ensure the Threads post contains video content (not just images or text)');
     suggestions.push('Check if the post is public and not deleted');
-    suggestions.push('Try using a different Threads video post to test');
   }
 
-  if (platform === 'youtube') {
-    if (errorMessage.includes('timeout')) {
-      suggestions.push('YouTube videos may take longer to process - the API is working but needs time');
-      suggestions.push('Check your frontend code to ensure it waits for the full response');
-    }
+  if (platform === 'youtube' && errorMessage.includes('timeout')) {
+    suggestions.push('YouTube videos may take longer to process - please try again');
+    suggestions.push('Check your frontend code to ensure it waits for the full response');
   }
 
   return suggestions;
 };
 
-module.exports = {
-  downloadMedia
-};
+module.exports = { downloadMedia };
