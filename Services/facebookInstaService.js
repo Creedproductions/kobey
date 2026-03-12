@@ -292,8 +292,104 @@ async function scrapeSnapinsta(igUrl) {
 
 // ─── public API ──────────────────────────────────────────────────────────────
 
+// ─── Facebook redirect resolver ──────────────────────────────────────────────
+// /share/r/ links are HTTP redirects. metadownloader crashes on them because it
+// tries to parse the page before the redirect resolves. Follow the redirect
+// first to get the real reel/video URL, then pass that to metadownloader.
+
+async function resolveFacebookUrl(url) {
+  // Only bother for known redirect patterns
+  if (!url.includes('/share/') && !url.includes('fb.watch')) return url;
+
+  try {
+    const resp = await axios.get(url, {
+      maxRedirects: 10,
+      timeout: 15000,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      },
+      validateStatus: () => true, // accept any status so we can read the final URL
+    });
+
+    // axios resolves the redirect chain — the final URL is in resp.request.res.responseUrl
+    // or resp.request._redirectable?._currentUrl depending on the http client version
+    const finalUrl =
+      resp.request?.res?.responseUrl ||
+      resp.request?._redirectable?._currentUrl ||
+      resp.config?.url ||
+      url;
+
+    if (finalUrl && finalUrl !== url) {
+      console.log(`📘 Facebook redirect: ${url} → ${finalUrl}`);
+      return finalUrl;
+    }
+
+    // Fallback: check for a canonical URL or og:url in the HTML body
+    if (typeof resp.data === 'string') {
+      const canonical = resp.data.match(/<link[^>]+rel=["']canonical["'][^>]+href=["']([^"']+)["']/i)?.[1]
+        || resp.data.match(/<meta[^>]+property=["']og:url["'][^>]+content=["']([^"']+)["']/i)?.[1];
+      if (canonical && canonical.includes('facebook.com')) {
+        console.log(`📘 Facebook canonical: ${canonical}`);
+        return canonical;
+      }
+    }
+  } catch (e) {
+    console.warn('📘 Facebook redirect resolve failed:', e.message, '— using original URL');
+  }
+
+  return url;
+}
+
+// ─── Facebook scraper fallback (fbdown.net) ───────────────────────────────────
+// Used when metadownloader fails (status:false or throws).
+
+async function scrapeFbdown(fbUrl) {
+  try {
+    // Step 1: get token from homepage
+    const home = await axios.get('https://fbdown.net/', {
+      timeout: 15000,
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36' },
+    });
+    const $home  = cheerio.load(home.data);
+    const token  = $home('input[name="_token"]').val() || $home('input[name="token"]').val() || '';
+
+    // Step 2: submit the URL
+    const form = new URLSearchParams({ _token: token, url: fbUrl });
+    const resp = await axios.post('https://fbdown.net/', form.toString(), {
+      timeout: 20000,
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Referer': 'https://fbdown.net/',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36',
+      },
+    });
+
+    const $ = cheerio.load(resp.data);
+    const items = [];
+
+    $('a[href]').each((_, a) => {
+      const href = $(a).attr('href') || '';
+      if (!href.startsWith('http')) return;
+      const lower = href.toLowerCase();
+      if (!lower.includes('fbcdn.net') && !lower.includes('.mp4') && !lower.includes('facebook')) return;
+      const text  = $(a).text().trim().toLowerCase();
+      const quality = text.includes('hd') ? 'HD' : text.includes('sd') ? 'SD' : 'Best Quality';
+      items.push({ resolution: quality, url: href, thumbnail: '' });
+    });
+
+    if (items.length > 0) {
+      console.log(`✅ fbdown: ${items.length} item(s)`);
+      return { data: items, title: 'Facebook Video', thumbnail: '' };
+    }
+  } catch (e) {
+    console.warn('📘 fbdown scraper failed:', e.message);
+  }
+  return null;
+}
+
 async function facebookInsta(url) {
-  // ── Facebook branch: metadownloader ──────────────────────────────────────
+  // ── Facebook branch: metadownloader + fallback ────────────────────────────
   if (url.includes('facebook.com') || url.includes('fb.watch')) {
     console.log('📘 Facebook: using metadownloader');
 
@@ -301,14 +397,40 @@ async function facebookInsta(url) {
       throw new Error('metadownloader is not installed. Run: npm install metadownloader');
     }
 
-    // metadownloader can throw or return null for some URL types — let it bubble
-    const data = await metadownloader(url);
+    // For /share/r/ and fb.watch links, resolve the redirect first so
+    // metadownloader receives the real video/reel URL instead of a redirect stub.
+    const resolvedUrl = await resolveFacebookUrl(url);
 
-    console.log('📘 Facebook metadownloader raw type:', typeof data);
-    console.log('📘 Facebook metadownloader raw keys:', Object.keys(data || {}));
-    console.log('📘 Facebook metadownloader sample:', JSON.stringify(data).slice(0, 400));
+    let data = null;
+    try {
+      data = await metadownloader(resolvedUrl);
+    } catch (e) {
+      console.warn('📘 metadownloader threw:', e.message);
+    }
 
-    return data; // normalisation happens in downloaderController.normaliseFacebookData()
+    // Check if metadownloader actually succeeded (it returns status:false on failure)
+    const metaOk = data && data.status !== false && (
+      (Array.isArray(data.data)  && data.data.length  > 0) ||
+      (Array.isArray(data.media) && data.media.length > 0) ||
+      data.sd || data.hd || data.url
+    );
+
+    if (metaOk) {
+      console.log('📘 Facebook metadownloader raw type:', typeof data);
+      console.log('📘 Facebook metadownloader raw keys:', Object.keys(data || {}));
+      console.log('📘 Facebook metadownloader sample:', JSON.stringify(data).slice(0, 400));
+      return data;
+    }
+
+    // metadownloader failed — log why and try fbdown.net scraper
+    console.warn('📘 metadownloader failed or returned status:false — msg:', data?.msg || 'unknown');
+    console.log('📘 Facebook: trying fbdown.net scraper as fallback');
+
+    const fbdownData = await scrapeFbdown(resolvedUrl);
+    if (fbdownData) return fbdownData;
+
+    // Both failed
+    throw new Error(`Facebook: all download methods failed. metadownloader: ${data?.msg || 'error'}`);
   }
 
   // ── Instagram branch: scraper chain ──────────────────────────────────────
