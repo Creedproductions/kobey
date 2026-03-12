@@ -696,13 +696,29 @@ const dataFormatters = {
     if (mediaItems.length === 0) throw new Error('Instagram returned no usable media items');
 
     const first = mediaItems[0];
+
+    // Single item: include type so Flutter can route images to downloadImage()
+    // instead of downloadVideo() — this is the key field the Flutter patch reads.
+    if (mediaItems.length === 1) {
+      console.log(`📸 Instagram single item: type=${first.type}`);
+      return {
+        title:     postTitle,
+        url:       first.url,
+        thumbnail: first.thumbnail,
+        type:      first.type,   // 'image' or 'video'
+        sizes:     ['Best Quality'],
+        source:    'instagram',
+      };
+    }
+
+    // Multiple items: type is embedded per-item inside the mediaItems array
     return {
-      title:     postTitle,
-      url:       first.url,
-      thumbnail: first.thumbnail,
-      sizes:     ['Best Quality'],
-      source:    'instagram',
-      ...(mediaItems.length > 1 && { mediaItems }),
+      title:      postTitle,
+      url:        first.url,
+      thumbnail:  first.thumbnail,
+      sizes:      ['Best Quality'],
+      source:     'instagram',
+      mediaItems: mediaItems,
     };
   },
 
@@ -772,6 +788,7 @@ const dataFormatters = {
         thumbnail: data.thumbnail || first.thumbnail,
         sizes:     ['Best Quality'],
         source:    'facebook',
+        type:      first.type,
         ...(mediaItems.length > 1 && { mediaItems }),
       };
     }
@@ -793,6 +810,7 @@ const dataFormatters = {
         thumbnail: best?.thumbnail || PLACEHOLDER_THUMBNAIL,
         sizes:     fbData.map(v => v.resolution || 'Unknown'),
         source:    'facebook',
+        type:      'video',
       };
     }
 
@@ -808,6 +826,7 @@ const dataFormatters = {
         thumbnail: data?.thumbnail || PLACEHOLDER_THUMBNAIL,
         sizes:     ['Best Quality'],
         source:    'facebook',
+        type:      'video',
       };
     }
 

@@ -1,26 +1,32 @@
 /**
- * facebookInstaService.js  (Instagram only)
+ * facebookInstaService.js
  *
- * Clean Instagram carousel / reel scraper.
+ * Routes by URL:
+ *   facebook.com / fb.watch  →  metadownloader  (npm install metadownloader)
+ *   instagram.com            →  snapsave.app → snapinsta.app scrapers
  *
- * Tries two services in order:
- *   1. snapsave.app
- *   2. snapinsta.app
- *
- * Return shape (on success):
+ * Return shape (Instagram success):
  *   { status: true, data: [ { thumbnail, url, type, quality } , … ] }
  *
- * CHANGES vs previous version:
- *   - detectType() now recognises /t16/ (newer Instagram video CDN)
- *     and /o1/v/ path prefix, which appear in Reels and image+audio posts.
- *   - Both the raw path AND the decoded proxy URL are checked with the
- *     expanded rule set so image+audio clips are never mis-labelled 'image'.
+ * Return shape (Facebook success):
+ *   raw metadownloader response — normalised by downloaderController's normaliseFacebookData()
  */
 
-const axios   = require('axios');
-const cheerio = require('cheerio');
+const axios      = require('axios');
+const cheerio    = require('cheerio');
 
-// ─── shared axios instance ───────────────────────────────────────────────────
+// ─── metadownloader (Facebook) ───────────────────────────────────────────────
+
+let metadownloader;
+try {
+  metadownloader = require('metadownloader');
+} catch (_) {
+  metadownloader = null;
+  console.warn('⚠️ metadownloader not installed — Facebook downloads will fail. Run: npm install metadownloader');
+}
+
+// ─── shared axios instance (Instagram scrapers) ──────────────────────────────
+
 const http = axios.create({
   timeout: 30_000,
   headers: {
@@ -54,18 +60,15 @@ function decodeCdnUrl(href) {
 /**
  * Detect media type from a URL string.
  *
- * Priority order:
- *   1. Proxy `ext` query param  (snapsave sets this explicitly)
- *   2. File extension in the URL path
- *   3. Instagram CDN path conventions:
- *        /t51.*  → image store
- *        /t50.*  → video store (older)
- *        /t16/   → video store (newer — Reels, image+audio clips)
- *        /o1/v/  → video path prefix (newer CDN layout)
- *        /v/t    → video path (general)
- *        /video/ → video
- *   4. Decode proxy URL and repeat on real CDN URL
- *   5. Default → 'video'
+ * Instagram CDN path conventions (priority order):
+ *   /t16/         → video  (newer Reels / image+audio clips)
+ *   /o1/v/        → video  (newer CDN path prefix)
+ *   /v/t16        → video  (alternate reel path)
+ *   /t50.         → video  (older video CDN)
+ *   /t51.         → image  (older image CDN)
+ *   /t39.         → image  (feed photos — most single-image posts)
+ *   /video/       → video
+ *   default       → 'video' (safer for reels; caller checks thumbnail to override)
  */
 function detectType(url) {
   if (!url) return 'video';
@@ -83,13 +86,14 @@ function detectType(url) {
   if (pathOnly.match(/\.(mp4|mov|webm|mkv|avi|ts)$/))          return 'video';
   if (pathOnly.match(/\.(jpg|jpeg|png|gif|webp|heic|avif)$/))   return 'image';
 
-  // 3. Instagram CDN path conventions (expanded)
-  if (pathOnly.includes('/t50.'))   return 'video';
-  if (pathOnly.includes('/t51.'))   return 'image';
-  if (pathOnly.includes('/t16/'))   return 'video';   // newer Reels / audio+image video CDN
-  if (pathOnly.includes('/o1/v/'))  return 'video';   // newer CDN path prefix
-  if (pathOnly.match(/\/v\/t\d/))   return 'video';   // /v/t16, /v/t50, etc.
-  if (pathOnly.includes('/video/')) return 'video';
+  // 3. Instagram CDN path conventions
+  if (pathOnly.includes('/t16/'))    return 'video';  // newer Reels / audio+image video CDN
+  if (pathOnly.includes('/o1/v/'))   return 'video';  // newer CDN path prefix
+  if (pathOnly.match(/\/v\/t16/))    return 'video';  // /v/t16xxx
+  if (pathOnly.includes('/t50.'))    return 'video';  // older video CDN
+  if (pathOnly.includes('/t51.'))    return 'image';  // older image CDN
+  if (pathOnly.includes('/t39.'))    return 'image';  // feed photos (most single-image posts)
+  if (pathOnly.includes('/video/'))  return 'video';
 
   // 4. Decode proxy URL and retry
   const decoded = decodeCdnUrl(url);
@@ -97,12 +101,13 @@ function detectType(url) {
     const dp = decoded.toLowerCase().split('?')[0];
     if (dp.match(/\.(mp4|mov|webm|mkv|avi|ts)$/))          return 'video';
     if (dp.match(/\.(jpg|jpeg|png|gif|webp|heic|avif)$/))   return 'image';
-    if (dp.includes('/t50.'))   return 'video';
-    if (dp.includes('/t51.'))   return 'image';
-    if (dp.includes('/t16/'))   return 'video';
-    if (dp.includes('/o1/v/'))  return 'video';
-    if (dp.match(/\/v\/t\d/))   return 'video';
-    if (dp.includes('/video/')) return 'video';
+    if (dp.includes('/t16/'))    return 'video';
+    if (dp.includes('/o1/v/'))   return 'video';
+    if (dp.match(/\/v\/t16/))    return 'video';
+    if (dp.includes('/t50.'))    return 'video';
+    if (dp.includes('/t51.'))    return 'image';
+    if (dp.includes('/t39.'))    return 'image';
+    if (dp.includes('/video/'))  return 'video';
   }
 
   return 'video'; // safe default
@@ -170,8 +175,8 @@ async function scrapeSnapsave(igUrl) {
     if (seenUrls.has(realUrl)) return;
     seenUrls.add(realUrl);
 
-    const type      = detectType(best.href);
-    const quality   = qualityFromText(best.text);
+    const type    = detectType(best.href);
+    const quality = qualityFromText(best.text);
     const itemThumb = thumb || (type === 'image' ? realUrl : '');
 
     console.log(`  snapsave row → realUrl=${realUrl.slice(0, 80)} type=${type}`);
@@ -199,7 +204,7 @@ async function scrapeSnapsave(igUrl) {
       thumbnail: singleThumb || (type === 'image' ? realUrl : ''),
       url:       realUrl,
       type,
-      quality: qualityFromText($(a).text().trim()),
+      quality:   qualityFromText($(a).text().trim()),
     });
   });
 
@@ -258,7 +263,7 @@ async function scrapeSnapinsta(igUrl) {
         thumbnail: thumb || (type === 'image' ? realUrl : ''),
         url:       realUrl,
         type,
-        quality: qualityFromText(best.text),
+        quality:   qualityFromText(best.text),
       });
     });
   }
@@ -276,21 +281,37 @@ async function scrapeSnapinsta(igUrl) {
         thumbnail: singleThumb || (type === 'image' ? realUrl : ''),
         url:       realUrl,
         type,
-        quality: qualityFromText($(a).text().trim()),
+        quality:   qualityFromText($(a).text().trim()),
       });
     });
   }
 
-  if (items.length > 0) {
-    console.log(`✅ snapinsta: ${items.length} item(s)`);
-  }
-
+  if (items.length > 0) console.log(`✅ snapinsta: ${items.length} item(s)`);
   return items;
 }
 
 // ─── public API ──────────────────────────────────────────────────────────────
 
 async function facebookInsta(url) {
+  // ── Facebook branch: metadownloader ──────────────────────────────────────
+  if (url.includes('facebook.com') || url.includes('fb.watch')) {
+    console.log('📘 Facebook: using metadownloader');
+
+    if (!metadownloader) {
+      throw new Error('metadownloader is not installed. Run: npm install metadownloader');
+    }
+
+    // metadownloader can throw or return null for some URL types — let it bubble
+    const data = await metadownloader(url);
+
+    console.log('📘 Facebook metadownloader raw type:', typeof data);
+    console.log('📘 Facebook metadownloader raw keys:', Object.keys(data || {}));
+    console.log('📘 Facebook metadownloader sample:', JSON.stringify(data).slice(0, 400));
+
+    return data; // normalisation happens in downloaderController.normaliseFacebookData()
+  }
+
+  // ── Instagram branch: scraper chain ──────────────────────────────────────
   const errors = [];
 
   try {
