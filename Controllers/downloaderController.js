@@ -217,6 +217,21 @@ const extractJwtCdnUrl = (tokenUrl) => {
   } catch (_) { return null; }
 };
 
+// Resolve the best direct download URL from a raw CDN URL.
+// If it is a rapidcdn/JWT proxy URL, extract the real CDN URL from the token
+// so the Flutter client can download it directly instead of going through the proxy.
+const resolveDownloadUrl = (rawUrl) => {
+  if (!rawUrl) return '';
+  if (rawUrl.includes('token=')) {
+    const real = extractJwtCdnUrl(rawUrl);
+    if (real) {
+      console.log(`🔓 Resolved proxy URL → ${real.slice(0, 100)}`);
+      return real;
+    }
+  }
+  return decodeCdnUrl(rawUrl) || rawUrl;
+};
+
 const normaliseInstagramPath = (pathname) => {
   return pathname
     .replace(/\/[sp]\d{2,4}x\d{2,4}\//g, '/')
@@ -697,21 +712,20 @@ const dataFormatters = {
 
     const first = mediaItems[0];
 
-    // Single item: include type so Flutter can route images to downloadImage()
-    // instead of downloadVideo() — this is the key field the Flutter patch reads.
+    // Single item: include type so Flutter routes images to downloadImage()
     if (mediaItems.length === 1) {
       console.log(`📸 Instagram single item: type=${first.type}`);
       return {
         title:     postTitle,
         url:       first.url,
         thumbnail: first.thumbnail,
-        type:      first.type,   // 'image' or 'video'
+        type:      first.type,
         sizes:     ['Best Quality'],
         source:    'instagram',
       };
     }
 
-    // Multiple items: type is embedded per-item inside the mediaItems array
+    // Multiple items: type is per-item inside mediaItems
     return {
       title:      postTitle,
       url:        first.url,
@@ -784,7 +798,7 @@ const dataFormatters = {
       const first = mediaItems[0];
       return {
         title:     data.title || 'Facebook Post',
-        url:       first.url,
+        url:       resolveDownloadUrl(first.url),
         thumbnail: data.thumbnail || first.thumbnail,
         sizes:     ['Best Quality'],
         source:    'facebook',
@@ -806,7 +820,7 @@ const dataFormatters = {
 
       return {
         title:     data.title || 'Facebook Video',
-        url:       decodeCdnUrl(pickBestUrl(best?.url || '')),
+        url:       resolveDownloadUrl(pickBestUrl(best?.url || '')),
         thumbnail: best?.thumbnail || PLACEHOLDER_THUMBNAIL,
         sizes:     fbData.map(v => v.resolution || 'Unknown'),
         source:    'facebook',
@@ -815,7 +829,7 @@ const dataFormatters = {
     }
 
     // Fallback: single URL (reel share or other non-standard shape)
-    const fallbackUrl = decodeCdnUrl(
+    const fallbackUrl = resolveDownloadUrl(
       pickBestUrl(data?.url || data?.download || data?.video || data?.videoUrl || '')
     );
     if (fallbackUrl) {
