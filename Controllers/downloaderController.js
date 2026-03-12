@@ -403,43 +403,96 @@ const detectTypeFromJwtUrl = (tokenUrl) => {
 // ─────────────────────────────────────────────────────────────────────────────
 // NORMALIZE MEDIA ITEM
 //
-// FIX: Type detection now:
-//   1. Trusts explicit type field from scraper (highest priority)
-//   2. Checks file extension / path in the URL (after decoding proxy links)
+// Type detection priority:
+//   1. Explicit type field from scraper
+//   2. URL extension / Instagram CDN path convention
 //   3. JWT payload decode for rapidcdn token URLs
-//   4. Defaults to 'video'
+//   4. Default to 'video'
+//
+// Thumbnail validation (KEY FIX for wrong video thumbnails):
+//   igdl assigns the same image thumbnail token to every item in a carousel,
+//   including video items. We decode both the media token and the thumbnail
+//   token. If the thumbnail's JWT payload URL points to an image CDN path
+//   (t51.*) but the media item is a video, the thumbnail is wrong — discard
+//   it so the Flutter UI shows the correct video placeholder icon instead.
 // ─────────────────────────────────────────────────────────────────────────────
+
+/** Decode a rapidcdn thumbnail token and return the CDN URL it points to, or null. */
+const decodeThumbnailJwtUrl = (thumbUrl) => {
+  if (!thumbUrl || !thumbUrl.includes('token=')) return null;
+  return extractJwtCdnUrl(thumbUrl); // reuse the same JWT decoder
+};
+
+/**
+ * Check whether a thumbnail URL is valid for the given media type.
+ * Returns false when igdl has assigned an image thumbnail to a video item.
+ */
+const isThumbnailValidForType = (thumbUrl, mediaType) => {
+  if (!thumbUrl || mediaType !== 'video') return true; // only validate video items
+
+  // Decode JWT thumbnail token if present
+  const cdnUrl = decodeThumbnailJwtUrl(thumbUrl);
+  if (!cdnUrl) return true; // not a JWT thumb — trust it
+
+  const lower = cdnUrl.toLowerCase();
+
+  // Instagram CDN: t51.* = image store, t50.* = video store
+  // If a video item's thumbnail points to the image store it's a mismatch.
+  if (lower.includes('/t51.')) {
+    console.log(`🖼 Thumbnail mismatch: video item has image thumbnail (t51) → clearing`);
+    return false;
+  }
+
+  // Also check file extension in the decoded CDN URL
+  if (lower.match(/\.(jpg|jpeg|png|gif|webp)(\?|$)/) && !lower.includes('/t50.')) {
+    // Only reject if it's definitely an image extension AND not a video store path
+    // (some video thumbnails are served as .jpg from the video CDN — keep those)
+    if (!lower.includes('cdninstagram') && !lower.includes('scontent')) {
+      // Unknown CDN serving an image extension for a video — keep it as-is
+      return true;
+    }
+    console.log(`🖼 Thumbnail mismatch: video item has .jpg thumbnail from image CDN → clearing`);
+    return false;
+  }
+
+  return true;
+};
+
 const normalizeMediaItem = (item, index, fallbackThumbnail = PLACEHOLDER_THUMBNAIL) => {
-  const rawUrl    = pickBestUrl(item.url || item.download || item.src || '');
-  // Decode proxy URL so type detection sees the real CDN URL
-  const url       = decodeCdnUrl(rawUrl) || rawUrl;
-  const thumbnail = item.thumbnail || item.cover || item.image || fallbackThumbnail;
+  const rawUrl = pickBestUrl(item.url || item.download || item.src || '');
+  // Keep the proxy URL for download (rapidcdn tokens are pre-authorised)
+  // but decode it for type detection
+  const url    = rawUrl; // return original proxy URL — downloadable as-is
+  const cdnUrl = decodeCdnUrl(rawUrl) || rawUrl; // used only for type detection
 
   let type = '';
   const rawType = (item.type || '').toString().toLowerCase();
 
   if (rawType === 'video' || rawType === 'image') {
-    // Trust explicit type set by the scraper
     type = rawType;
   } else {
-    // Try URL-based detection (works on real CDN URLs)
-    const fromUrl = detectTypeFromUrl(url);
+    const fromUrl = detectTypeFromUrl(cdnUrl);
     if (fromUrl) {
       type = fromUrl;
     } else {
-      // Try JWT decode for rapidcdn/token URLs
       const fromJwt = detectTypeFromJwtUrl(rawUrl);
       if (fromJwt) {
         console.log(`🔍 JWT type-decode: ${fromJwt} for ${rawUrl.slice(0, 60)}`);
         type = fromJwt;
       } else {
-        type = 'video'; // safe default
+        type = 'video';
       }
     }
   }
 
+  // Validate thumbnail — discard if it belongs to a different asset type
+  const rawThumb = item.thumbnail || item.cover || item.image || '';
+  const thumbnail = isThumbnailValidForType(rawThumb, type)
+    ? (rawThumb || fallbackThumbnail)
+    : fallbackThumbnail; // wrong thumb cleared → Flutter shows correct icon
+
   return {
-    url,       // ← decoded CDN URL, not the proxy URL
+    url,
     thumbnail,
     type,
     quality: item.quality || item.resolution || 'Original Quality',
