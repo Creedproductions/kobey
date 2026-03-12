@@ -1,4 +1,5 @@
 // ===== DEPENDENCIES =====
+// NEW CODE
 const { ttdl, twitter } = require('btch-downloader');
 const { igdl } = require('btch-downloader');
 const { pinterest } = require('ironman-api');
@@ -189,13 +190,6 @@ const pickBestUrl = (rawUrl) => {
 // URL HELPERS — decode proxy links to real CDN URLs
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * Decode the real CDN URL from scraper proxy links such as:
- *   https://snapsave.app/api/ajaxDownload.php?url=ENCODED&ext=jpg
- *   https://snapinsta.app/api/ajaxDownload.php?url=ENCODED
- *
- * Returns the decoded URL, or the original href if it's already a direct URL.
- */
 const decodeCdnUrl = (href) => {
   if (!href) return '';
   try {
@@ -214,12 +208,22 @@ const decodeCdnUrl = (href) => {
 
 /**
  * Detect media type from a URL.
- * Works on both direct CDN URLs and proxy URLs (decodes proxy → CDN first).
+ *
+ * Detection order:
+ *   1. Proxy ext= query param
+ *   2. File extension in path
+ *   3. Instagram CDN path conventions:
+ *        /t16/  or  /o1/v/  → video  ← FIX: newer video CDN (image+audio reels)
+ *        /t50.              → video  (older video CDN)
+ *        /t51.              → image
+ *        /video/            → video
+ *   4. Decode proxy URL and repeat on the real CDN URL
+ *   5. Returns null (caller decides the default)
  */
 const detectTypeFromUrl = (url) => {
   if (!url) return null;
 
-  // Try the proxy URL's ext param first (snapsave sets this explicitly)
+  // 1. Proxy ext= param
   try {
     const u   = new URL(url);
     const ext = (u.searchParams.get('ext') || '').toLowerCase();
@@ -227,17 +231,19 @@ const detectTypeFromUrl = (url) => {
     if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'heic', 'avif'].includes(ext)) return 'image';
   } catch (_) {}
 
-  // Check the URL path extension (strip query string first)
+  // 2. Path extension
   const pathOnly = url.toLowerCase().split('?')[0];
-  if (pathOnly.match(/\.(mp4|mov|webm|mkv|avi|ts)$/))         return 'video';
-  if (pathOnly.match(/\.(jpg|jpeg|png|gif|webp|heic|avif)$/))  return 'image';
+  if (pathOnly.match(/\.(mp4|mov|webm|mkv|avi|ts)$/))          return 'video';
+  if (pathOnly.match(/\.(jpg|jpeg|png|gif|webp|heic|avif)$/))   return 'image';
 
-  // Instagram CDN convention
-  if (pathOnly.includes('/t50.'))  return 'video';
-  if (pathOnly.includes('/t51.'))  return 'image';
+  // 3. Instagram CDN path conventions
+  if (pathOnly.includes('/t16/'))   return 'video'; // newer video CDN (image+audio reels)
+  if (pathOnly.includes('/o1/v/'))  return 'video'; // newer video store root
+  if (pathOnly.includes('/t50.'))   return 'video'; // older video CDN
+  if (pathOnly.includes('/t51.'))   return 'image'; // image CDN
   if (pathOnly.includes('/video/')) return 'video';
 
-  // Decode proxy URL and recurse once
+  // 4. Decode proxy URL and recurse once
   const decoded = decodeCdnUrl(url);
   if (decoded !== url) return detectTypeFromUrl(decoded);
 
@@ -246,28 +252,9 @@ const detectTypeFromUrl = (url) => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DEDUPLICATION
-//
-// Two distinct duplicate patterns must be handled:
-//
-// Pattern A — snapsave HD/SD variants of same asset:
-//   Same file served at multiple resolutions, different size segment in path.
-//   Key: normalised CDN pathname (strip /s1080x1080/ etc.) + thumbnail.
-//
-// Pattern B — igdl JWT token duplicates (THE BUG CAUSING DOUBLES):
-//   igdl returns each carousel item TWICE with DIFFERENT JWT tokens but both
-//   tokens decode to the SAME underlying Instagram CDN URL. Because the token
-//   string differs, the old key treated them as different assets.
-//   Fix: decode the JWT payload → extract the real Instagram CDN URL →
-//   normalise its path → use THAT as the key. Same asset = same key = one winner.
-//
-// Key priority:
-//   1. JWT token URL  → decode payload → real CDN URL pathname (normalised)
-//   2. snapsave proxy → decode url= param → real CDN URL pathname (normalised)
-//   3. Direct CDN URL → pathname (normalised)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Extract the real Instagram CDN URL from a rapidcdn JWT token URL.
- *  Returns the CDN URL string, or null if not a JWT URL / decode fails. */
+/** Extract the real Instagram CDN URL from a rapidcdn JWT token URL. */
 const extractJwtCdnUrl = (tokenUrl) => {
   try {
     const m = tokenUrl.match(/[?&]token=([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]*)/);
@@ -280,8 +267,7 @@ const extractJwtCdnUrl = (tokenUrl) => {
   }
 };
 
-/** Strip Instagram CDN size/crop segments so HD, SD and thumb variants share one key.
- *  /s1080x1080/  /p640x640/  /c0.0.1080.1080/  /e35/  → removed */
+/** Strip Instagram CDN size/crop segments so HD, SD and thumb variants share one key. */
 const normaliseInstagramPath = (pathname) => {
   return pathname
     .replace(/\/[sp]\d{2,4}x\d{2,4}\//g, '/')
@@ -290,11 +276,8 @@ const normaliseInstagramPath = (pathname) => {
     .replace(/\/+/g, '/');
 };
 
-/** Build the canonical dedup key for a media URL.
- *  Returns the most stable identifier possible for an asset. */
 const buildDedupKey = (rawUrl, thumb) => {
-  // ── Step 1: JWT token URL (igdl / rapidcdn) ──────────────────────────────
-  // Two tokens for the same asset decode to the same CDN URL → use that.
+  // Step 1: JWT token URL (igdl / rapidcdn)
   if (rawUrl.includes('token=')) {
     const cdnUrl = extractJwtCdnUrl(rawUrl);
     if (cdnUrl) {
@@ -302,12 +285,12 @@ const buildDedupKey = (rawUrl, thumb) => {
         const parsed   = new URL(cdnUrl);
         const normPath = normaliseInstagramPath(parsed.pathname);
         console.log(`  🗝 JWT key: ${normPath.slice(0, 80)}`);
-        return normPath; // CDN pathnames are globally unique per asset — no thumb needed
+        return normPath;
       } catch (_) {}
     }
   }
 
-  // ── Step 2: snapsave/snapinsta proxy URL (url= param holds CDN URL) ───────
+  // Step 2: snapsave/snapinsta proxy URL
   const decoded = decodeCdnUrl(rawUrl);
   if (decoded !== rawUrl && decoded.startsWith('http')) {
     try {
@@ -318,7 +301,7 @@ const buildDedupKey = (rawUrl, thumb) => {
     } catch (_) {}
   }
 
-  // ── Step 3: Direct CDN URL ────────────────────────────────────────────────
+  // Step 3: Direct CDN URL
   try {
     const parsed  = new URL(rawUrl);
     const rawPath = parsed.pathname;
@@ -327,7 +310,6 @@ const buildDedupKey = (rawUrl, thumb) => {
       /^\/(v[0-9]?\/?|download\/?|media\/?|proxy\/?|dl\/?|get\/?)$/.test(rawPath);
 
     if (isGenericPath) {
-      // Generic path carries no identity info — use full URL
       return thumb ? `${thumb}::${rawUrl}` : rawUrl;
     }
 
@@ -336,7 +318,7 @@ const buildDedupKey = (rawUrl, thumb) => {
     return thumb ? `${thumb}::${normPath}` : normPath;
   } catch (_) {}
 
-  return rawUrl; // absolute last resort
+  return rawUrl;
 };
 
 const deduplicateByBestQuality = (items) => {
@@ -351,8 +333,6 @@ const deduplicateByBestQuality = (items) => {
     const key   = buildDedupKey(rawUrl, thumb);
     const score = qualityScore(item.quality || item.resolution || '');
 
-    // Keep the proxy URL as the download URL (rapidcdn tokens are pre-authorised
-    // and will stream the correct asset — no need to expose the raw CDN URL).
     const existing = groups.get(key);
     if (!existing || score > existing._score) {
       groups.set(key, { ...item, url: rawUrl, _score: score });
@@ -375,20 +355,34 @@ const deduplicateByBestQuality = (items) => {
 // ─────────────────────────────────────────────────────────────────────────────
 // JWT TYPE DETECTION (for rapidcdn / token-proxied URLs)
 // ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Decode the JWT payload of a rapidcdn token URL and determine media type.
+ *
+ * Handles:
+ *   /t16/  or  /o1/v/  → video  (newer Instagram video CDN, image+audio reels)
+ *   /t50.              → video
+ *   /t51.              → image
+ */
 const detectTypeFromJwtUrl = (tokenUrl) => {
   try {
     const m = tokenUrl.match(/[?&]token=([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]*)/);
     if (!m) return null;
     const payloadB64 = m[2];
     if (!payloadB64) return null;
-    const payload = JSON.parse(Buffer.from(payloadB64, 'base64url').toString('utf8'));
+    const payload  = JSON.parse(Buffer.from(payloadB64, 'base64url').toString('utf8'));
     const origUrl  = (payload.url || payload.u || payload.src || '').toLowerCase();
     if (!origUrl) return null;
 
     console.log(`🔑 JWT payload url: ${origUrl.slice(0, 120)}`);
 
-    if (origUrl.match(/\.(mp4|mov|webm|mkv|avi|ts)(\?|#|$)/)) return 'video';
+    // File extension check
+    if (origUrl.match(/\.(mp4|mov|webm|mkv|avi|ts)(\?|#|$)/))        return 'video';
     if (origUrl.match(/\.(jpg|jpeg|png|gif|webp|heic|avif)(\?|#|$)/)) return 'image';
+
+    // Instagram CDN path conventions (including newer /t16/ and /o1/v/)
+    if (origUrl.includes('/t16/'))   return 'video'; // image+audio reels, newer format
+    if (origUrl.includes('/o1/v/'))  return 'video'; // newer video store root
 
     if (origUrl.includes('scontent') || origUrl.includes('cdninstagram')) {
       if (origUrl.match(/\/t50\./)) return 'video';
@@ -402,68 +396,56 @@ const detectTypeFromJwtUrl = (tokenUrl) => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // NORMALIZE MEDIA ITEM
-//
-// Type detection priority:
-//   1. Explicit type field from scraper
-//   2. URL extension / Instagram CDN path convention
-//   3. JWT payload decode for rapidcdn token URLs
-//   4. Default to 'video'
-//
-// Thumbnail validation (KEY FIX for wrong video thumbnails):
-//   igdl assigns the same image thumbnail token to every item in a carousel,
-//   including video items. We decode both the media token and the thumbnail
-//   token. If the thumbnail's JWT payload URL points to an image CDN path
-//   (t51.*) but the media item is a video, the thumbnail is wrong — discard
-//   it so the Flutter UI shows the correct video placeholder icon instead.
 // ─────────────────────────────────────────────────────────────────────────────
 
 /** Decode a rapidcdn thumbnail token and return the CDN URL it points to, or null. */
 const decodeThumbnailJwtUrl = (thumbUrl) => {
   if (!thumbUrl || !thumbUrl.includes('token=')) return null;
-  return extractJwtCdnUrl(thumbUrl); // reuse the same JWT decoder
+  return extractJwtCdnUrl(thumbUrl);
 };
 
 /**
- * Check whether a thumbnail URL is valid for the given media type.
- * Returns false when igdl has assigned an image thumbnail to a video item.
+ * Validate that the thumbnail belongs to the same asset type as the media item.
+ * Returns false when igdl assigns an image CDN thumbnail to a video item.
  */
 const isThumbnailValidForType = (thumbUrl, mediaType) => {
-  if (!thumbUrl || mediaType !== 'video') return true; // only validate video items
+  if (!thumbUrl || mediaType !== 'video') return true;
 
-  // Decode JWT thumbnail token if present
   const cdnUrl = decodeThumbnailJwtUrl(thumbUrl);
-  if (!cdnUrl) return true; // not a JWT thumb — trust it
+  if (!cdnUrl) return true;
 
   const lower = cdnUrl.toLowerCase();
 
-  // Instagram CDN: t51.* = image store, t50.* = video store
-  // If a video item's thumbnail points to the image store it's a mismatch.
+  // t51.* = image store; a video item should not have an image-store thumbnail
   if (lower.includes('/t51.')) {
     console.log(`🖼 Thumbnail mismatch: video item has image thumbnail (t51) → clearing`);
     return false;
   }
 
-  // Also check file extension in the decoded CDN URL
-  if (lower.match(/\.(jpg|jpeg|png|gif|webp)(\?|$)/) && !lower.includes('/t50.')) {
-    // Only reject if it's definitely an image extension AND not a video store path
-    // (some video thumbnails are served as .jpg from the video CDN — keep those)
-    if (!lower.includes('cdninstagram') && !lower.includes('scontent')) {
-      // Unknown CDN serving an image extension for a video — keep it as-is
-      return true;
+  if (lower.match(/\.(jpg|jpeg|png|gif|webp)(\?|$)/) && !lower.includes('/t50.') &&
+      !lower.includes('/t16/') && !lower.includes('/o1/v/')) {
+    if (lower.includes('cdninstagram') || lower.includes('scontent')) {
+      console.log(`🖼 Thumbnail mismatch: video item has .jpg thumbnail from image CDN → clearing`);
+      return false;
     }
-    console.log(`🖼 Thumbnail mismatch: video item has .jpg thumbnail from image CDN → clearing`);
-    return false;
   }
 
   return true;
 };
 
+/**
+ * Normalize a raw media item from any scraper into a consistent shape.
+ *
+ * Type detection priority:
+ *   1. Explicit type field from scraper (if valid)
+ *   2. URL extension / CDN path (detectTypeFromUrl)  ← includes /t16/ fix
+ *   3. JWT payload decode (detectTypeFromJwtUrl)      ← includes /t16/ fix
+ *   4. Default → 'video'  (image+audio reels are mp4 containers)
+ */
 const normalizeMediaItem = (item, index, fallbackThumbnail = PLACEHOLDER_THUMBNAIL) => {
   const rawUrl = pickBestUrl(item.url || item.download || item.src || '');
-  // Keep the proxy URL for download (rapidcdn tokens are pre-authorised)
-  // but decode it for type detection
-  const url    = rawUrl; // return original proxy URL — downloadable as-is
-  const cdnUrl = decodeCdnUrl(rawUrl) || rawUrl; // used only for type detection
+  const url    = rawUrl;
+  const cdnUrl = decodeCdnUrl(rawUrl) || rawUrl;
 
   let type = '';
   const rawType = (item.type || '').toString().toLowerCase();
@@ -480,16 +462,16 @@ const normalizeMediaItem = (item, index, fallbackThumbnail = PLACEHOLDER_THUMBNA
         console.log(`🔍 JWT type-decode: ${fromJwt} for ${rawUrl.slice(0, 60)}`);
         type = fromJwt;
       } else {
+        // Default to video — Instagram image+audio posts are packaged as mp4
         type = 'video';
       }
     }
   }
 
-  // Validate thumbnail — discard if it belongs to a different asset type
-  const rawThumb = item.thumbnail || item.cover || item.image || '';
+  const rawThumb  = item.thumbnail || item.cover || item.image || '';
   const thumbnail = isThumbnailValidForType(rawThumb, type)
     ? (rawThumb || fallbackThumbnail)
-    : fallbackThumbnail; // wrong thumb cleared → Flutter shows correct icon
+    : fallbackThumbnail;
 
   return {
     url,
@@ -503,12 +485,14 @@ const normalizeMediaItem = (item, index, fallbackThumbnail = PLACEHOLDER_THUMBNA
 // ===== PLATFORM-SPECIFIC DOWNLOADERS =====
 
 const platformDownloaders = {
+
   async instagram(url) {
     let snapsResult = null;
     let igdlResult  = null;
     let snapsErr    = null;
     let igdlErr     = null;
 
+    // Run facebookInsta (Instagram scrapers) and igdl in parallel
     await Promise.allSettled([
       downloadWithTimeout(() => facebookInsta(url), 35000)
         .then(d  => { snapsResult = d; })
@@ -600,6 +584,7 @@ const platformDownloaders = {
   },
 
   async facebook(url) {
+    // facebookInstaService now routes Facebook URLs to metadownloader internally
     const data = await downloadWithTimeout(() => facebookInsta(url));
     if (!data || (!data.media && !data.data)) {
       throw new Error('Facebook service returned invalid data');
@@ -929,10 +914,10 @@ const dataFormatters = {
     }
 
     if (data.url && Array.isArray(data.url)) {
-      const videoArray = data.url.filter(item => item && item.url);
+      const videoArray  = data.url.filter(item => item && item.url);
       const bestQuality = videoArray.find(item => item.quality && item.quality.includes('1280x720')) ||
-                         videoArray.find(item => item.quality && item.quality.includes('640x360')) ||
-                         videoArray[0];
+                          videoArray.find(item => item.quality && item.quality.includes('640x360')) ||
+                          videoArray[0];
 
       return {
         title: 'Twitter Video',
@@ -945,8 +930,8 @@ const dataFormatters = {
 
     if (Array.isArray(data) && data.length > 0) {
       const bestQuality = data.find(item => item.quality.includes('1280x720')) ||
-                         data.find(item => item.quality.includes('640x360')) ||
-                         data[0];
+                          data.find(item => item.quality.includes('640x360')) ||
+                          data[0];
 
       return {
         title: 'Twitter Video',
@@ -1049,8 +1034,6 @@ const dataFormatters = {
 
     if (data.items && Array.isArray(data.items) && data.items.length > 0) {
       console.log(`🧵 Threads: ${data.items.length} item(s) found`);
-      console.log("🧵 Threads item[0] keys:", Object.keys(data.items[0] || {}));
-      console.log("🧵 Threads item[0] sample:", JSON.stringify(data.items[0]).slice(0, 300));
 
       const mediaItems = data.items
         .filter(item => item && (item.download || item.url || item.video_url || item.image_url ||
@@ -1076,13 +1059,13 @@ const dataFormatters = {
             data.thumbnail ||
             PLACEHOLDER_THUMBNAIL;
 
-          const isVideo = !!(item.video_url || item.download?.includes('.mp4'));
+          const isVideo  = !!(item.video_url || item.download?.includes('.mp4'));
           const itemType = item.type ||
             (item.media_type === 2 || item.media_type === '2' ? 'video' :
              item.media_type === 1 || item.media_type === '1' ? 'image' :
              isVideo ? 'video' : 'image');
 
-          console.log(`🧵 item[${index}] url=${itemUrl.slice(0,60)} thumb=${itemThumb.slice(0,60)} type=${itemType}`);
+          console.log(`🧵 item[${index}] url=${itemUrl.slice(0,60)} type=${itemType}`);
 
           return {
             url:       itemUrl,
@@ -1094,9 +1077,7 @@ const dataFormatters = {
         })
         .filter(item => item.url);
 
-      if (mediaItems.length === 0) {
-        console.warn("🧵 Threads: no valid items after mapping, falling back to single");
-      } else {
+      if (mediaItems.length > 0) {
         const first = mediaItems[0];
         return {
           title:     data.title || 'Threads Post',
@@ -1108,6 +1089,7 @@ const dataFormatters = {
           ...(mediaItems.length > 1 && { mediaItems }),
         };
       }
+      console.warn("🧵 Threads: no valid items after mapping, falling back to single");
     }
 
     return {

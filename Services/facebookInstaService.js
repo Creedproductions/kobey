@@ -1,28 +1,39 @@
-/**
+/** NEW CODE
  * facebookInstaService.js
  *
- * Clean Instagram / Facebook carousel scraper.
- *
- * Tries two services in order:
- *   1. snapsave.app
- *   2. snapinsta.app
+ * Routes by URL:
+ *   • Facebook (facebook.com / fb.watch) → metadownloader (original working approach)
+ *   • Instagram                           → snapsave.app scraper → snapinsta.app scraper
  *
  * Return shape (on success):
- *   { status: true, data: [ { thumbnail, url, type, quality } , … ] }
+ *   { status: true, data: [ { thumbnail, url, type, quality } , … ] }   ← Instagram
+ *   { media: […], data: […], title, thumbnail, … }                       ← Facebook (metadownloader shape)
  */
 
-const axios   = require('axios');
-const cheerio = require('cheerio');
+const axios      = require('axios');
+const cheerio    = require('cheerio');
 
-// ─── shared axios instance ──────────────────────────────────────────────────
+// ─── metadownloader (used for Facebook) ─────────────────────────────────────
+let metadownloader;
+try {
+  metadownloader = require('metadownloader');
+} catch (e) {
+  console.warn('⚠️  metadownloader package not found:', e.message,
+               '— Facebook downloads will fail. Run: npm install metadownloader');
+}
+
+// ─── shared axios instance (used for Instagram scrapers) ────────────────────
 const http = axios.create({
   timeout: 30_000,
   headers: {
-    'User-Agent':      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-    'Accept':          'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-    'Accept-Language': 'en-US,en;q=0.5',
-    'Accept-Encoding': 'gzip, deflate, br',
-    'Connection':      'keep-alive',
+    'User-Agent':
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
+      '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    'Accept':
+      'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+    'Accept-Language':      'en-US,en;q=0.5',
+    'Accept-Encoding':      'gzip, deflate, br',
+    'Connection':           'keep-alive',
     'Upgrade-Insecure-Requests': '1',
   },
 });
@@ -31,11 +42,6 @@ const http = axios.create({
 
 /**
  * Decode the real CDN URL from a snapsave/snapinsta proxy link.
- *
- * Proxy URL shapes:
- *   https://snapsave.app/api/ajaxDownload.php?url=ENCODED&ext=jpg
- *   https://snapinsta.app/api/ajaxDownload.php?url=ENCODED
- *
  * If the href is already a direct CDN URL, returns it unchanged.
  */
 function decodeCdnUrl(href) {
@@ -56,11 +62,17 @@ function decodeCdnUrl(href) {
 
 /**
  * Detect media type from a URL string.
- * 1. Check snapsave's own `ext` query param (most reliable for proxy links).
- * 2. Check the path extension (strip query string first).
- * 3. Instagram CDN path conventions (/t50.* = video, /t51.* = image).
- * 4. Decode proxy URL and repeat checks on the real CDN URL.
- * 5. Default to 'video'.
+ *
+ * Detection order:
+ *   1. Proxy ext= query param (snapsave sets this explicitly)
+ *   2. File extension in path
+ *   3. Instagram / Facebook CDN path conventions:
+ *        /t16/ or /o1/v/ → video  (newer Instagram video CDN, image+audio reels)
+ *        /t50.           → video  (older video CDN)
+ *        /t51.           → image  (image CDN)
+ *        /video/         → video
+ *   4. Decode proxy URL and repeat on the real CDN URL
+ *   5. Default → 'video'
  */
 function detectType(url) {
   if (!url) return 'video';
@@ -69,32 +81,36 @@ function detectType(url) {
   try {
     const u   = new URL(url);
     const ext = (u.searchParams.get('ext') || '').toLowerCase();
-    if (['mp4', 'mov', 'webm', 'mkv', 'avi', 'ts'].includes(ext))         return 'video';
+    if (['mp4', 'mov', 'webm', 'mkv', 'avi', 'ts'].includes(ext))            return 'video';
     if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'heic', 'avif'].includes(ext)) return 'image';
   } catch (_) {}
 
   // 2. Path extension
   const pathOnly = url.toLowerCase().split('?')[0];
-  if (pathOnly.match(/\.(mp4|mov|webm|mkv|avi|ts)$/))         return 'video';
-  if (pathOnly.match(/\.(jpg|jpeg|png|gif|webp|heic|avif)$/))  return 'image';
+  if (pathOnly.match(/\.(mp4|mov|webm|mkv|avi|ts)$/))          return 'video';
+  if (pathOnly.match(/\.(jpg|jpeg|png|gif|webp|heic|avif)$/))   return 'image';
 
-  // 3. Instagram CDN path conventions
-  if (pathOnly.includes('/t50.'))   return 'video';
-  if (pathOnly.includes('/t51.'))   return 'image';
+  // 3. Instagram CDN path conventions (incl. newer /t16/ and /o1/v/ paths)
+  if (pathOnly.includes('/t16/'))   return 'video'; // newer video CDN (image+audio reels)
+  if (pathOnly.includes('/o1/v/'))  return 'video'; // newer video store root
+  if (pathOnly.includes('/t50.'))   return 'video'; // older video CDN
+  if (pathOnly.includes('/t51.'))   return 'image'; // image CDN
   if (pathOnly.includes('/video/')) return 'video';
 
   // 4. Decode proxy link and retry on the real CDN URL
   const decoded = decodeCdnUrl(url);
   if (decoded !== url) {
     const dp = decoded.toLowerCase().split('?')[0];
-    if (dp.match(/\.(mp4|mov|webm|mkv|avi|ts)$/))         return 'video';
-    if (dp.match(/\.(jpg|jpeg|png|gif|webp|heic|avif)$/))  return 'image';
+    if (dp.match(/\.(mp4|mov|webm|mkv|avi|ts)$/))          return 'video';
+    if (dp.match(/\.(jpg|jpeg|png|gif|webp|heic|avif)$/))   return 'image';
+    if (dp.includes('/t16/'))   return 'video';
+    if (dp.includes('/o1/v/'))  return 'video';
     if (dp.includes('/t50.'))   return 'video';
     if (dp.includes('/t51.'))   return 'image';
     if (dp.includes('/video/')) return 'video';
   }
 
-  return 'video'; // safe default
+  return 'video'; // safe default — image+audio reels are mp4 containers
 }
 
 /** Quality label from button text */
@@ -119,7 +135,7 @@ function isMediaHref(href) {
   );
 }
 
-// ─── Scraper 1: snapsave.app ─────────────────────────────────────────────
+// ─── Scraper 1: snapsave.app ─────────────────────────────────────────────────
 
 async function scrapeSnapsave(igUrl) {
   const resp = await http.post(
@@ -137,9 +153,9 @@ async function scrapeSnapsave(igUrl) {
   const html     = typeof resp.data === 'string' ? resp.data : JSON.stringify(resp.data);
   const $        = cheerio.load(html);
   const items    = [];
-  const seenUrls = new Set(); // prevents the same CDN URL appearing twice
+  const seenUrls = new Set();
 
-  // ── Strategy 1: carousel table rows / .download-items blocks ───────────
+  // Strategy 1: carousel table rows / .download-items blocks
   $('table tr, .download-items').each((_, row) => {
     const $row    = $(row);
     const thumbEl = $row.find('img').first();
@@ -153,11 +169,9 @@ async function scrapeSnapsave(igUrl) {
 
     if (!anchors.length) return;
 
-    // Pick HD > SD > first
     const best    = anchors.find(a => a.text.toLowerCase().includes('hd'))
                  || anchors.find(a => a.text.toLowerCase().includes('sd'))
                  || anchors[0];
-
     const realUrl = decodeCdnUrl(best.href);
 
     if (seenUrls.has(realUrl)) {
@@ -179,7 +193,7 @@ async function scrapeSnapsave(igUrl) {
     return items;
   }
 
-  // ── Strategy 2: flat link scan (single-item / alternative layout) ───────
+  // Strategy 2: flat link scan (single-item / alternative layout)
   const singleThumb = $('img.img-thumbnail, .download-items__thumb img, img').first().attr('src') || '';
 
   $('a[href]').each((_, a) => {
@@ -206,7 +220,7 @@ async function scrapeSnapsave(igUrl) {
   return items;
 }
 
-// ─── Scraper 2: snapinsta.app ────────────────────────────────────────────
+// ─── Scraper 2: snapinsta.app ────────────────────────────────────────────────
 
 async function scrapeSnapinsta(igUrl) {
   const resp = await http.post(
@@ -284,12 +298,34 @@ async function scrapeSnapinsta(igUrl) {
   return items;
 }
 
-// ─── public API ─────────────────────────────────────────────────────────────
+// ─── public API ──────────────────────────────────────────────────────────────
 
+/**
+ * Main entry point called by downloaderController for both Instagram and Facebook.
+ *
+ * Facebook → uses metadownloader (reliable, the original working approach)
+ * Instagram → tries snapsave scraper, then snapinsta scraper
+ */
 async function facebookInsta(url) {
+  // ── Facebook: use the original metadownloader package ────────────────────
+  const isFacebook = url.includes('facebook.com') || url.includes('fb.watch');
+
+  if (isFacebook) {
+    if (!metadownloader) {
+      throw new Error(
+        'metadownloader package not installed. Run: npm install metadownloader'
+      );
+    }
+    console.log('📘 Facebook: using metadownloader');
+    const result = await metadownloader(url);
+    if (!result) throw new Error('metadownloader returned empty result');
+    return result;
+  }
+
+  // ── Instagram: try scrapers in order ─────────────────────────────────────
   const errors = [];
 
-  // ── Attempt 1: snapsave ─────────────────────────────────────────────────
+  // Attempt 1: snapsave
   try {
     const items = await scrapeSnapsave(url);
     if (items.length > 0) return { status: true, data: items };
@@ -300,7 +336,7 @@ async function facebookInsta(url) {
     errors.push(`snapsave: ${e.message}`);
   }
 
-  // ── Attempt 2: snapinsta ────────────────────────────────────────────────
+  // Attempt 2: snapinsta
   try {
     const items = await scrapeSnapinsta(url);
     if (items.length > 0) return { status: true, data: items };
