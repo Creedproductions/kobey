@@ -270,18 +270,30 @@ const deduplicateByBestQuality = (items) => {
 // ─────────────────────────────────────────────────────────────────────────────
 const detectTypeFromJwtUrl = (tokenUrl) => {
   try {
-    // Match any ?token= or &token= query param that looks like a JWT (two dots)
-    const m = tokenUrl.match(/[?&]token=([A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)/);
+    // JWT has 3 parts: header.payload.signature — capture all three
+    const m = tokenUrl.match(/[?&]token=([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]*)/);
     if (!m) return null;
-    const payloadB64 = m[1].split('.')[1];
+    const payloadB64 = m[2]; // part [2] = payload
     if (!payloadB64) return null;
-    // Node's Buffer can handle base64url without padding
     const payload = JSON.parse(Buffer.from(payloadB64, 'base64url').toString('utf8'));
-    const origUrl  = (payload.url || payload.u || '').toLowerCase();
+    const origUrl  = (payload.url || payload.u || payload.src || '').toLowerCase();
     if (!origUrl) return null;
-    if (origUrl.match(/\.(mp4|mov|webm|mkv|avi|ts)/)) return 'video';
-    if (origUrl.match(/\.(jpg|jpeg|png|gif|webp|heic|avif)/)) return 'image';
-  } catch (_) {}
+
+    console.log(`🔑 JWT payload url: ${origUrl.slice(0, 120)}`);
+
+    // 1. File extension in the original URL
+    if (origUrl.match(/\.(mp4|mov|webm|mkv|avi|ts)(\?|#|$)/)) return 'video';
+    if (origUrl.match(/\.(jpg|jpeg|png|gif|webp|heic|avif)(\?|#|$)/)) return 'image';
+
+    // 2. Instagram CDN path prefix — t50.xxxx = video, t51.xxxx = image/photo
+    if (origUrl.includes('scontent') || origUrl.includes('cdninstagram')) {
+      if (origUrl.match(/\/t50\./)) return 'video';
+      if (origUrl.match(/\/t51\./)) return 'image';
+    }
+
+  } catch (e) {
+    console.warn('🔑 JWT decode error:', e.message);
+  }
   return null;
 };
 
@@ -549,6 +561,14 @@ const dataFormatters = {
     // ── Case 1: igdl returns a plain array ──
     if (Array.isArray(data)) {
       const rawCount = data.length;
+
+      // Log full raw structure for diagnosis
+      console.log(`📸 Instagram raw items (${rawCount}):`);
+      data.forEach((item, i) => {
+        const u = item?.url || item?.download || '';
+        const t = item?.thumbnail || '';
+        console.log(`  raw[${i}] quality=${item?.quality} url=${String(u).slice(0,100)} thumb=${String(t).slice(0,80)}`);
+      });
 
       // Filter invalid entries, then deduplicate HD/SD variants
       const validItems   = data.filter(item => item && (item.url || item.download));
