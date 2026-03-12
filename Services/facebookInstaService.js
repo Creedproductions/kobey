@@ -3,19 +3,12 @@
  *
  * Clean Instagram / Facebook carousel scraper.
  *
- * FIX: snapsave returns proxy links like:
- *   https://snapsave.app/api/ajaxDownload.php?url=ENCODED_CDN_URL&ext=jpg
- * The old code ran typeFromUrl() on the proxy URL (.php → null → 'video'),
- * and deduped by thumbnail (all rows may share the same post thumbnail → collapse to 1).
- *
- * Now we:
- *   1. Decode the real Instagram CDN URL from the proxy link's `url` param.
- *   2. Return the CDN URL as the download URL (pre-signed, no-cookie, directly downloadable).
- *   3. Detect type and build the dedup key from the CDN URL, not the proxy.
- *
  * Tries two services in order:
  *   1. snapsave.app
  *   2. snapinsta.app
+ *
+ * Return shape (on success):
+ *   { status: true, data: [ { thumbnail, url, type, quality } , … ] }
  */
 
 const axios   = require('axios');
@@ -39,64 +32,66 @@ const http = axios.create({
 /**
  * Decode the real CDN URL from a snapsave/snapinsta proxy link.
  *
- * Proxy URL shapes we handle:
+ * Proxy URL shapes:
  *   https://snapsave.app/api/ajaxDownload.php?url=ENCODED&ext=jpg
- *   https://snapinsta.app/api/ajaxDownload.php?url=ENCODED&ext=mp4
- *   https://snapsave.app/d?url=ENCODED
+ *   https://snapinsta.app/api/ajaxDownload.php?url=ENCODED
  *
- * If the href is already a direct CDN URL, return it unchanged.
+ * If the href is already a direct CDN URL, returns it unchanged.
  */
 function decodeCdnUrl(href) {
   if (!href) return '';
   try {
     const u = new URL(href);
-    // Common parameter names used by scraper sites
     for (const param of ['url', 'u', 'src', 'link', 'media']) {
       const val = u.searchParams.get(param);
       if (val && val.startsWith('http')) {
         const decoded = decodeURIComponent(val);
-        // Recursively decode in case of double-encoding
-        if (decoded.includes('%')) return decodeCdnUrl(decoded);
+        if (decoded.includes('%3A')) return decodeCdnUrl(decoded); // double-encoded
         return decoded;
       }
     }
   } catch (_) {}
-  return href; // Already a direct URL
+  return href;
 }
 
-/** Detect media type purely from a URL string (works on real CDN URLs). */
-function typeFromUrl(url) {
-  if (!url) return null;
-  const u = url.toLowerCase().split('?')[0]; // strip query params for extension check
-  if (u.match(/\.(mp4|mov|webm|mkv|avi|ts)$/))         return 'video';
-  if (u.match(/\.(jpg|jpeg|png|gif|webp|heic|avif)$/))  return 'image';
-  // Instagram CDN path convention: /t50.* = video, /t51.* = image
-  if (u.includes('/t50.'))  return 'video';
-  if (u.includes('/t51.'))  return 'image';
-  // Path contains 'video'
-  if (u.includes('/video/') || u.includes('video_dashinit')) return 'video';
-  return null;
-}
+/**
+ * Detect media type from a URL string.
+ * 1. Check snapsave's own `ext` query param (most reliable for proxy links).
+ * 2. Check the path extension (strip query string first).
+ * 3. Instagram CDN path conventions (/t50.* = video, /t51.* = image).
+ * 4. Decode proxy URL and repeat checks on the real CDN URL.
+ * 5. Default to 'video'.
+ */
+function detectType(url) {
+  if (!url) return 'video';
 
-/** Detect type first from the proxy URL, then from the decoded CDN URL. */
-function detectType(proxyHref) {
-  // 1. Try extension in the proxy URL's own `ext` param (snapsave sets this)
+  // 1. Proxy ext param
   try {
-    const u   = new URL(proxyHref);
+    const u   = new URL(url);
     const ext = (u.searchParams.get('ext') || '').toLowerCase();
-    if (['mp4', 'mov', 'webm', 'mkv'].includes(ext)) return 'video';
-    if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'heic'].includes(ext)) return 'image';
+    if (['mp4', 'mov', 'webm', 'mkv', 'avi', 'ts'].includes(ext))         return 'video';
+    if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'heic', 'avif'].includes(ext)) return 'image';
   } catch (_) {}
 
-  // 2. Try from the proxy URL path itself
-  const fromProxy = typeFromUrl(proxyHref);
-  if (fromProxy) return fromProxy;
+  // 2. Path extension
+  const pathOnly = url.toLowerCase().split('?')[0];
+  if (pathOnly.match(/\.(mp4|mov|webm|mkv|avi|ts)$/))         return 'video';
+  if (pathOnly.match(/\.(jpg|jpeg|png|gif|webp|heic|avif)$/))  return 'image';
 
-  // 3. Decode the actual CDN URL and check its extension/path
-  const cdnUrl = decodeCdnUrl(proxyHref);
-  if (cdnUrl !== proxyHref) {
-    const fromCdn = typeFromUrl(cdnUrl);
-    if (fromCdn) return fromCdn;
+  // 3. Instagram CDN path conventions
+  if (pathOnly.includes('/t50.'))   return 'video';
+  if (pathOnly.includes('/t51.'))   return 'image';
+  if (pathOnly.includes('/video/')) return 'video';
+
+  // 4. Decode proxy link and retry on the real CDN URL
+  const decoded = decodeCdnUrl(url);
+  if (decoded !== url) {
+    const dp = decoded.toLowerCase().split('?')[0];
+    if (dp.match(/\.(mp4|mov|webm|mkv|avi|ts)$/))         return 'video';
+    if (dp.match(/\.(jpg|jpeg|png|gif|webp|heic|avif)$/))  return 'image';
+    if (dp.includes('/t50.'))   return 'video';
+    if (dp.includes('/t51.'))   return 'image';
+    if (dp.includes('/video/')) return 'video';
   }
 
   return 'video'; // safe default
@@ -110,11 +105,7 @@ function qualityFromText(txt) {
   return 'Original Quality';
 }
 
-/**
- * Accept any href that could be a media download link.
- * Must start with http and be from a known CDN or scraper domain.
- * We're deliberately permissive — stricter checks happen in dedup.
- */
+/** Accept any href that could be a media download link. */
 function isMediaHref(href) {
   if (!href || !href.startsWith('http')) return false;
   const lower = href.toLowerCase();
@@ -143,12 +134,12 @@ async function scrapeSnapsave(igUrl) {
     }
   );
 
-  const html = typeof resp.data === 'string' ? resp.data : JSON.stringify(resp.data);
-  const $    = cheerio.load(html);
-  const items = [];
+  const html     = typeof resp.data === 'string' ? resp.data : JSON.stringify(resp.data);
+  const $        = cheerio.load(html);
+  const items    = [];
+  const seenUrls = new Set(); // prevents the same CDN URL appearing twice
 
-  // ── Strategy 1: carousel table rows ────────────────────────────────────
-  // snapsave renders carousels as <table> rows: [thumbnail | quality buttons]
+  // ── Strategy 1: carousel table rows / .download-items blocks ───────────
   $('table tr, .download-items').each((_, row) => {
     const $row    = $(row);
     const thumbEl = $row.find('img').first();
@@ -157,36 +148,30 @@ async function scrapeSnapsave(igUrl) {
 
     $row.find('a[href]').each((_, a) => {
       const href = $(a).attr('href') || '';
-      if (isMediaHref(href)) {
-        anchors.push({ href, text: $(a).text().trim() });
-      }
+      if (isMediaHref(href)) anchors.push({ href, text: $(a).text().trim() });
     });
 
     if (!anchors.length) return;
 
     // Pick HD > SD > first
-    const best = anchors.find(a => a.text.toLowerCase().includes('hd'))
-              || anchors.find(a => a.text.toLowerCase().includes('sd'))
-              || anchors[0];
+    const best    = anchors.find(a => a.text.toLowerCase().includes('hd'))
+                 || anchors.find(a => a.text.toLowerCase().includes('sd'))
+                 || anchors[0];
 
-    // ── KEY FIX: decode the real CDN URL from the proxy link ──
     const realUrl = decodeCdnUrl(best.href);
-    const type    = detectType(best.href);  // uses ext param + CDN path
-    const quality = qualityFromText(best.text);
 
-    // Per-item thumbnail from the row is more reliable than a decoded CDN URL.
-    // If the row has no per-item thumb, fall back to the decoded URL (images
-    // from Instagram CDN are viewable directly).
+    if (seenUrls.has(realUrl)) {
+      console.log(`  snapsave: skipping duplicate url=${realUrl.slice(0, 60)}`);
+      return;
+    }
+    seenUrls.add(realUrl);
+
+    const type      = detectType(best.href);
+    const quality   = qualityFromText(best.text);
     const itemThumb = thumb || (type === 'image' ? realUrl : '');
 
-    console.log(`  snapsave row → realUrl=${realUrl.slice(0,80)} type=${type} thumb=${itemThumb.slice(0,60)}`);
-
-    items.push({
-      thumbnail: itemThumb,
-      url:       realUrl,   // ← direct CDN URL, not the proxy URL
-      type,
-      quality,
-    });
+    console.log(`  snapsave row → realUrl=${realUrl.slice(0, 80)} type=${type}`);
+    items.push({ thumbnail: itemThumb, url: realUrl, type, quality });
   });
 
   if (items.length > 0) {
@@ -202,8 +187,10 @@ async function scrapeSnapsave(igUrl) {
     if (!isMediaHref(href)) return;
 
     const realUrl = decodeCdnUrl(href);
-    const type    = detectType(href);
+    if (seenUrls.has(realUrl)) return;
+    seenUrls.add(realUrl);
 
+    const type = detectType(href);
     items.push({
       thumbnail: singleThumb || (type === 'image' ? realUrl : ''),
       url:       realUrl,
@@ -237,11 +224,10 @@ async function scrapeSnapinsta(igUrl) {
   const html = resp.data?.data || resp.data || '';
   if (!html || typeof html !== 'string') return [];
 
-  const $     = cheerio.load(html);
-  const items = [];
-
-  // snapinsta carousel: multiple .download-items / .dl-item blocks
-  const blocks = $('.download-items, .dl-item, .media-wrap');
+  const $        = cheerio.load(html);
+  const items    = [];
+  const seenUrls = new Set();
+  const blocks   = $('.download-items, .dl-item, .media-wrap');
 
   if (blocks.length > 0) {
     blocks.each((_, block) => {
@@ -259,8 +245,11 @@ async function scrapeSnapinsta(igUrl) {
 
       const best    = anchors.find(a => a.text.toLowerCase().includes('hd')) || anchors[0];
       const realUrl = decodeCdnUrl(best.href);
-      const type    = detectType(best.href);
 
+      if (seenUrls.has(realUrl)) return;
+      seenUrls.add(realUrl);
+
+      const type = detectType(best.href);
       items.push({
         thumbnail: thumb || (type === 'image' ? realUrl : ''),
         url:       realUrl,
@@ -271,13 +260,14 @@ async function scrapeSnapinsta(igUrl) {
   }
 
   if (items.length === 0) {
-    // Fallback: flat scan
     const singleThumb = $('img').first().attr('src') || '';
     $('a[href]').each((_, a) => {
       const href = $(a).attr('href') || '';
       if (!isMediaHref(href)) return;
       const realUrl = decodeCdnUrl(href);
-      const type    = detectType(href);
+      if (seenUrls.has(realUrl)) return;
+      seenUrls.add(realUrl);
+      const type = detectType(href);
       items.push({
         thumbnail: singleThumb || (type === 'image' ? realUrl : ''),
         url:       realUrl,
@@ -302,9 +292,7 @@ async function facebookInsta(url) {
   // ── Attempt 1: snapsave ─────────────────────────────────────────────────
   try {
     const items = await scrapeSnapsave(url);
-    if (items.length > 0) {
-      return { status: true, data: items };
-    }
+    if (items.length > 0) return { status: true, data: items };
     console.warn('⚠️ snapsave returned 0 items');
     errors.push('snapsave: 0 items');
   } catch (e) {
@@ -315,9 +303,7 @@ async function facebookInsta(url) {
   // ── Attempt 2: snapinsta ────────────────────────────────────────────────
   try {
     const items = await scrapeSnapinsta(url);
-    if (items.length > 0) {
-      return { status: true, data: items };
-    }
+    if (items.length > 0) return { status: true, data: items };
     console.warn('⚠️ snapinsta returned 0 items');
     errors.push('snapinsta: 0 items');
   } catch (e) {
