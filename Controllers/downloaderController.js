@@ -339,70 +339,89 @@ const normalizeMediaItem = (item, index, fallbackThumbnail = PLACEHOLDER_THUMBNA
 
 const platformDownloaders = {
   async instagram(url) {
-    // ── Strategy: run both services in parallel, pick the richer result ──
+    // ── Strategy: run igdl + snapsave in parallel, pick the richer result ──
     //
-    // `igdl` (btch-downloader) is fast but has a critical flaw: for mixed
-    // image+video carousel posts it returns JPEG thumbnail URLs for all items,
-    // including video items. The video URLs are silently lost.
+    // igdl (btch-downloader) is fast but for mixed image+video carousels it
+    // returns JPEG thumbnail URLs for video items — the actual video URLs are lost.
     //
-    // `facebookInsta` (snapsave) scrapes differently and properly returns
-    // the actual video URL for video carousel items.
+    // snapsave (facebookInsta / metadownloader) scrapes differently and returns
+    // real mp4 URLs for video carousel items.
     //
-    // We race both, then pick the result whose items contain more video URLs.
-    // If one service fails entirely we use the other.
+    // We race both services, then pick whichever has more actual video URLs.
+    //
+    // IMPORTANT — result shape normalisation:
+    //   btch-downloader v5 (old): igdl returns a plain array  [{url,thumbnail,quality}]
+    //   btch-downloader v6 (new): igdl returns { status, result: [{url,thumbnail}] }
+    //   metadownloader (snapsave): returns { status, data: [{title,thumbnail,url}] }
+    //                          OR: { status, media: [{url,type,quality}] }
+    // extractItems() handles all of these.
 
-    let igdlResult   = null;
-    let snapsResult  = null;
-    let igdlErr      = null;
-    let snapsErr     = null;
+    let igdlResult  = null;
+    let snapsResult = null;
+    let igdlErr     = null;
+    let snapsErr    = null;
 
     await Promise.allSettled([
       downloadWithTimeout(() => igdl(url))
-        .then(d => { igdlResult  = d; })
-        .catch(e => { igdlErr    = e; }),
+        .then(d  => { igdlResult  = d; })
+        .catch(e => { igdlErr     = e; }),
       downloadWithTimeout(() => facebookInsta(url))
-        .then(d => { snapsResult = d; })
-        .catch(e => { snapsErr   = e; }),
+        .then(d  => { snapsResult = d; })
+        .catch(e => { snapsErr    = e; }),
     ]);
 
-    // Helper: count how many items look like real video URLs (not JPEG previews)
-    const videoScore = (data) => {
-      const items = Array.isArray(data) ? data
-          : (data?.media ? data.media : []);
+    // Normalise any known result shape → plain item array (or null if unusable)
+    const extractItems = (res) => {
+      if (!res) return null;
+      if (Array.isArray(res))          return res.length  > 0 ? res         : null; // igdl v5
+      if (Array.isArray(res.result))   return res.result.length > 0 ? res.result : null; // igdl v6
+      if (Array.isArray(res.data))     return res.data.length   > 0 ? res.data   : null; // snapsave
+      if (Array.isArray(res.media))    return res.media.length  > 0 ? res.media  : null; // alt snapsave
+      return null;
+    };
+
+    // Count items whose URL is a genuine video file (mp4 / t50 CDN path)
+    const videoScore = (items) => {
+      if (!items) return 0;
       return items.filter(item => {
         const u = (item?.url || item?.download || '').toLowerCase();
         return u.match(/\.(mp4|mov|webm)/) || u.includes('/t50.');
       }).length;
     };
 
-    const igdlOk  = igdlResult  && (Array.isArray(igdlResult)  ? igdlResult.length  > 0 : !!igdlResult.media);
-    const snapsOk = snapsResult && (Array.isArray(snapsResult) ? snapsResult.length > 0 : !!snapsResult.media);
+    const igdlItems  = extractItems(igdlResult);
+    const snapsItems = extractItems(snapsResult);
 
-    if (!igdlOk && !snapsOk) {
-      throw new Error(`Instagram: both services failed. igdl: ${igdlErr?.message}  snapsave: ${snapsErr?.message}`);
+    console.log(`📸 Instagram: igdl items=${igdlItems?.length ?? 'null'} snaps items=${snapsItems?.length ?? 'null'}`);
+    if (igdlErr)  console.log('📸 igdl error:', igdlErr.message);
+    if (snapsErr) console.log('📸 snapsave error:', snapsErr.message);
+
+    if (!igdlItems && !snapsItems) {
+      throw new Error(
+        `Instagram: both services failed. igdl: ${igdlErr?.message}  snapsave: ${snapsErr?.message}`
+      );
     }
 
-    // Single result available → use it
-    if (igdlOk && !snapsOk) {
-      console.log('📸 Instagram: using igdl only (snapsave failed)');
-      return igdlResult;
+    if (igdlItems && !snapsItems) {
+      console.log('📸 Instagram: using igdl only (snapsave failed or empty)');
+      return { _items: igdlItems, _title: igdlResult?.[0]?.title };
     }
-    if (snapsOk && !igdlOk) {
-      console.log('📸 Instagram: using snapsave only (igdl failed)');
-      return snapsResult;
+    if (snapsItems && !igdlItems) {
+      console.log('📸 Instagram: using snapsave only (igdl failed or empty)');
+      return { _items: snapsItems, _title: snapsResult?.title };
     }
 
-    // Both succeeded — pick the one with more video content
-    const igdlScore  = videoScore(igdlResult);
-    const snapsScore = videoScore(snapsResult);
-    console.log(`📸 Instagram: igdl videoScore=${igdlScore} snapsave videoScore=${snapsScore}`);
+    // Both succeeded — pick whichever has more real video URLs
+    const igdlScore  = videoScore(igdlItems);
+    const snapsScore = videoScore(snapsItems);
+    console.log(`📸 Instagram: igdl videoScore=${igdlScore}  snapsave videoScore=${snapsScore}`);
 
     if (snapsScore > igdlScore) {
       console.log('📸 Instagram: using snapsave (richer video data)');
-      return snapsResult;
+      return { _items: snapsItems, _title: snapsResult?.title };
     }
     console.log('📸 Instagram: using igdl');
-    return igdlResult;
+    return { _items: igdlItems, _title: igdlResult?.[0]?.title };
   },
 
   async tiktok(url) {
@@ -608,84 +627,76 @@ const dataFormatters = {
   // always keeps the highest-quality URL.
   // ─────────────────────────────────────────────────────────────────────────
   instagram(data) {
-    console.log('📸 Instagram: Formatting data, type=', Array.isArray(data) ? 'array' : typeof data);
+    console.log('📸 Instagram formatter: keys=', Object.keys(data || {}));
 
-    // ── Case 1: igdl returns a plain array ──
-    if (Array.isArray(data)) {
-      const rawCount = data.length;
+    // Resolve to a flat item array.
+    // The downloader now normalises to { _items: [...], _title } but we keep
+    // fallback paths for any legacy or unexpected format.
+    let rawItems = null;
+    let postTitle = 'Instagram Post';
 
-      // Log full raw structure for diagnosis
-      console.log(`📸 Instagram raw items (${rawCount}):`);
-      data.forEach((item, i) => {
-        const u = item?.url || item?.download || '';
-        const t = item?.thumbnail || '';
-        console.log(`  raw[${i}] quality=${item?.quality} url=${String(u).slice(0,100)} thumb=${String(t).slice(0,80)}`);
-      });
-
-      // Filter invalid entries, then deduplicate HD/SD variants
-      const validItems   = data.filter(item => item && (item.url || item.download));
-      const uniqueItems  = deduplicateByBestQuality(validItems);
-      const mediaItems   = uniqueItems.map((item, index) =>
-        normalizeMediaItem(item, index, item.thumbnail || PLACEHOLDER_THUMBNAIL)
-      );
-
-      console.log(`📸 Instagram: ${rawCount} raw → ${mediaItems.length} unique item(s) after dedup`);
-
-      if (mediaItems.length === 0) {
-        throw new Error('Instagram returned an empty media array');
-      }
-
-      const first = mediaItems[0];
+    if (data._items && Array.isArray(data._items)) {
+      // ── Primary path (downloader already normalised) ──
+      rawItems  = data._items;
+      postTitle = data._title || postTitle;
+    } else if (Array.isArray(data)) {
+      // ── Legacy: plain array from old igdl ──
+      rawItems  = data;
+      postTitle = data[0]?.title || postTitle;
+    } else if (Array.isArray(data.result)) {
+      // ── igdl v6: { status, result: [...] } ──
+      rawItems  = data.result;
+    } else if (Array.isArray(data.data)) {
+      // ── snapsave / metadownloader: { status, data: [...] } ──
+      rawItems  = data.data;
+      postTitle = data.title || postTitle;
+    } else if (Array.isArray(data.media)) {
+      // ── alt snapsave: { media: [...] } ──
+      rawItems  = data.media;
+      postTitle = data.title || postTitle;
+    } else {
+      // ── Single item object ──
+      const resolvedUrl = pickBestUrl(data.url || '');
+      console.log('📸 Instagram: single item fallback, url=', resolvedUrl.slice(0, 80));
       return {
-        title: data[0]?.title || 'Instagram Post',
-        url: first.url,
-        thumbnail: first.thumbnail,
-        sizes: ['Best Quality'],
-        source: 'instagram',
-        ...(mediaItems.length > 1 && { mediaItems }),
+        title:     data.title || postTitle,
+        url:       resolvedUrl,
+        thumbnail: data.thumbnail || PLACEHOLDER_THUMBNAIL,
+        sizes:     ['Best Quality'],
+        source:    'instagram',
       };
     }
 
-    // ── Case 2: snapsave returns { media: [], title, thumbnail } ──
-    if (data.media && Array.isArray(data.media)) {
-      console.log(`📸 Instagram (snapsave) raw items (${data.media.length}):`);
-      data.media.forEach((item, i) => {
-        const u = item?.url || item?.download || '';
-        console.log(`  raw[${i}] type=${item?.type} quality=${item?.quality} url=${String(u).slice(0,100)}`);
-      });
+    console.log(`📸 Instagram raw items (${rawItems.length}):`);
+    rawItems.forEach((item, i) => {
+      const u = item?.url || item?.download || '';
+      const t = item?.thumbnail || '';
+      console.log(`  raw[${i}] type=${item?.type ?? 'none'} quality=${item?.quality ?? '-'} url=${String(u).slice(0,100)} thumb=${String(t).slice(0,70)}`);
+    });
 
-      const validItems  = data.media.filter(item => item && (item.url || item.download));
-      const uniqueItems = deduplicateByBestQuality(validItems);
-      const mediaItems  = uniqueItems.map((item, index) =>
-        normalizeMediaItem(item, index, data.thumbnail || PLACEHOLDER_THUMBNAIL)
-      );
+    const validItems  = rawItems.filter(item => item && (item.url || item.download));
+    const uniqueItems = deduplicateByBestQuality(validItems);
+    const mediaItems  = uniqueItems.map((item, index) =>
+      normalizeMediaItem(item, index, item.thumbnail || PLACEHOLDER_THUMBNAIL)
+    );
 
-      console.log(`📸 Instagram (snapsave): ${data.media.length} raw → ${mediaItems.length} unique`);
+    console.log(`📸 Instagram: ${rawItems.length} raw → ${mediaItems.length} unique`);
+    mediaItems.forEach((it, i) =>
+      console.log(`  [${i}] type=${it.type} url=${String(it.url).slice(0, 100)}`)
+    );
 
-      if (mediaItems.length === 0) {
-        throw new Error('Instagram media array contained no valid URLs');
-      }
-
-      const first = mediaItems[0];
-      return {
-        title: data.title || 'Instagram Post',
-        url: first.url,
-        thumbnail: data.thumbnail || first.thumbnail,
-        sizes: ['Best Quality'],
-        source: 'instagram',
-        ...(mediaItems.length > 1 && { mediaItems }),
-      };
+    if (mediaItems.length === 0) {
+      throw new Error('Instagram returned no usable media items');
     }
 
-    // ── Case 3: single media object (url may be an array) ──
-    console.log('📸 Instagram: Single item (object)');
-    const resolvedUrl = pickBestUrl(data.url || '');
+    const first = mediaItems[0];
     return {
-      title: data.title || 'Instagram Post',
-      url: resolvedUrl,
-      thumbnail: data.thumbnail || PLACEHOLDER_THUMBNAIL,
-      sizes: ['Best Quality'],
-      source: 'instagram',
+      title:     postTitle,
+      url:       first.url,
+      thumbnail: first.thumbnail,
+      sizes:     ['Best Quality'],
+      source:    'instagram',
+      ...(mediaItems.length > 1 && { mediaItems }),
     };
   },
 
