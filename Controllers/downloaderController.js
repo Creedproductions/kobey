@@ -162,11 +162,89 @@ function getServerBaseUrl(req) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// QUALITY HELPERS
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Score a quality string so we can always pick the best available.
+ * Higher score = better quality.
+ */
+const qualityScore = (q = '') => {
+  const s = String(q).toLowerCase();
+  if (s.includes('4k') || s.includes('2160')) return 7;
+  if (s.includes('1440') || s.includes('2k'))  return 6;
+  if (s.includes('1080') || s.includes('fhd')) return 5;
+  if (s.includes('720')  || s === 'hd')        return 4;
+  if (s.includes('480'))                        return 3;
+  if (s.includes('360'))                        return 2;
+  if (s.includes('240') || s.includes('144'))  return 1;
+  if (s === 'sd')                               return 1;
+  return 0; // 'Original Quality' etc — treated as lowest so explicit quality wins
+};
+
+/**
+ * When a library returns `item.url` as an array (e.g. [hdUrl, sdUrl]),
+ * this picks the best single URL from it.
+ */
+const pickBestUrl = (rawUrl) => {
+  if (Array.isArray(rawUrl)) {
+    // Some libraries put HD first, SD second — just take index 0
+    return rawUrl.find(u => typeof u === 'string' && u.startsWith('http')) || rawUrl[0] || '';
+  }
+  return rawUrl || '';
+};
+
+/**
+ * Deduplicate a flat array of media items that may contain HD+SD variants of
+ * the same asset (identified by matching thumbnail URL).
+ * Returns one item per unique thumbnail, always the highest-quality URL.
+ *
+ * Example input (5-image Instagram carousel via igdl):
+ *   [ {url: img1_hd, thumbnail: t1, quality:'HD'},
+ *     {url: img1_sd, thumbnail: t1, quality:'SD'},   ← duplicate of t1
+ *     {url: img2_hd, thumbnail: t2, quality:'HD'},
+ *     {url: img2_sd, thumbnail: t2, quality:'SD'},   ← duplicate of t2
+ *     ... ]
+ * Output:
+ *   [ {url: img1_hd, thumbnail: t1, ...},
+ *     {url: img2_hd, thumbnail: t2, ...}, ... ]
+ */
+const deduplicateByBestQuality = (items) => {
+  // Build a map keyed by the thumbnail URL (most reliable dedup key).
+  // Fall back to a hash of the URL path if no thumbnail exists.
+  const groups = new Map();
+
+  items.forEach(item => {
+    // Normalise the raw URL first (it might be an array)
+    const resolvedUrl = pickBestUrl(item.url || item.download || item.src || '');
+    const thumb       = item.thumbnail || item.cover || item.image || '';
+
+    // Key: prefer thumbnail; fall back to URL up to the query string
+    const key = thumb || resolvedUrl.split('?')[0];
+    if (!key) return; // skip items with no identity
+
+    const existing = groups.get(key);
+    const score    = qualityScore(item.quality || item.resolution || '');
+
+    if (!existing || score > existing._score) {
+      groups.set(key, { ...item, url: resolvedUrl, _score: score });
+    }
+  });
+
+  // Strip the internal _score field and re-index
+  return Array.from(groups.values()).map(({ _score, ...item }, index) => ({
+    ...item,
+    index,
+  }));
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
 // HELPER: Normalize a raw media item from any platform into a uniform shape.
 // Returns: { url, thumbnail, type ('video'|'image'), quality, index }
 // ─────────────────────────────────────────────────────────────────────────────
 const normalizeMediaItem = (item, index, fallbackThumbnail = PLACEHOLDER_THUMBNAIL) => {
-  const url = item.url || item.download || item.src || '';
+  // Handle url being an array (some libraries return [hd, sd])
+  const url       = pickBestUrl(item.url || item.download || item.src || '');
   const thumbnail = item.thumbnail || item.cover || item.image || fallbackThumbnail;
 
   // Determine media type
@@ -354,20 +432,31 @@ const dataFormatters = {
   // ─────────────────────────────────────────────────────────────────────────
   // INSTAGRAM
   // Handles: single video, single image, carousel (multiple videos/images)
-  // btch-downloader igdl returns:
-  //   • Array of { url, thumbnail, quality } for carousels
-  //   • Object { media: [{url, type, quality}], title, thumbnail } from fallback
+  //
+  // igdl from btch-downloader returns carousels as a FLAT array where each
+  // physical asset appears TWICE — once as 'HD' and once as 'SD':
+  //   [ {url: img1_hd, thumbnail: t1, quality:'HD'},
+  //     {url: img1_sd, thumbnail: t1, quality:'SD'},   ← same asset, lower q
+  //     {url: img2_hd, thumbnail: t2, quality:'HD'}, ... ]
+  //
+  // deduplicateByBestQuality collapses these into one entry per asset and
+  // always keeps the highest-quality URL.
   // ─────────────────────────────────────────────────────────────────────────
   instagram(data) {
     console.log('📸 Instagram: Formatting data, type=', Array.isArray(data) ? 'array' : typeof data);
 
-    // ── Case 1: igdl returns a plain array (most common for carousels) ──
+    // ── Case 1: igdl returns a plain array ──
     if (Array.isArray(data)) {
-      console.log(`📸 Instagram: ${data.length} item(s) found`);
+      const rawCount = data.length;
 
-      const mediaItems = data
-        .filter(item => item && item.url)
-        .map((item, index) => normalizeMediaItem(item, index, item.thumbnail || PLACEHOLDER_THUMBNAIL));
+      // Filter invalid entries, then deduplicate HD/SD variants
+      const validItems   = data.filter(item => item && (item.url || item.download));
+      const uniqueItems  = deduplicateByBestQuality(validItems);
+      const mediaItems   = uniqueItems.map((item, index) =>
+        normalizeMediaItem(item, index, item.thumbnail || PLACEHOLDER_THUMBNAIL)
+      );
+
+      console.log(`📸 Instagram: ${rawCount} raw → ${mediaItems.length} unique item(s) after dedup`);
 
       if (mediaItems.length === 0) {
         throw new Error('Instagram returned an empty media array');
@@ -378,22 +467,21 @@ const dataFormatters = {
         title: data[0]?.title || 'Instagram Post',
         url: first.url,
         thumbnail: first.thumbnail,
-        sizes: ['Original Quality'],
+        sizes: ['Best Quality'],
         source: 'instagram',
-        // Only attach mediaItems when there are genuinely multiple items
         ...(mediaItems.length > 1 && { mediaItems }),
       };
     }
 
     // ── Case 2: fallback / snapsave returns { media: [], title, thumbnail } ──
     if (data.media && Array.isArray(data.media)) {
-      console.log(`📸 Instagram (media array): ${data.media.length} item(s) found`);
+      const validItems  = data.media.filter(item => item && (item.url || item.download));
+      const uniqueItems = deduplicateByBestQuality(validItems);
+      const mediaItems  = uniqueItems.map((item, index) =>
+        normalizeMediaItem(item, index, data.thumbnail || PLACEHOLDER_THUMBNAIL)
+      );
 
-      const mediaItems = data.media
-        .filter(item => item && item.url)
-        .map((item, index) =>
-          normalizeMediaItem(item, index, data.thumbnail || PLACEHOLDER_THUMBNAIL)
-        );
+      console.log(`📸 Instagram (media array): ${data.media.length} raw → ${mediaItems.length} unique`);
 
       if (mediaItems.length === 0) {
         throw new Error('Instagram media array contained no valid URLs');
@@ -404,19 +492,20 @@ const dataFormatters = {
         title: data.title || 'Instagram Post',
         url: first.url,
         thumbnail: data.thumbnail || first.thumbnail,
-        sizes: ['Original Quality'],
+        sizes: ['Best Quality'],
         source: 'instagram',
         ...(mediaItems.length > 1 && { mediaItems }),
       };
     }
 
-    // ── Case 3: single media object ──
+    // ── Case 3: single media object (url may be an array) ──
     console.log('📸 Instagram: Single item (object)');
+    const resolvedUrl = pickBestUrl(data.url || '');
     return {
       title: data.title || 'Instagram Post',
-      url: data.url || '',
+      url: resolvedUrl,
       thumbnail: data.thumbnail || PLACEHOLDER_THUMBNAIL,
-      sizes: ['Original Quality'],
+      sizes: ['Best Quality'],
       source: 'instagram',
     };
   },
@@ -426,6 +515,10 @@ const dataFormatters = {
   // Handles: single video, image/photo slideshow (data.images array)
   // btch-downloader ttdl returns:
   //   { title, video: [url], audio: [url], thumbnail, images?: [url] }
+  //
+  // For video posts, `video` is an array of quality variants — we pick the
+  // first (highest quality) entry. For slideshows, each image URL is a
+  // separate asset so we keep them all as mediaItems.
   // ─────────────────────────────────────────────────────────────────────────
   tiktok(data) {
     console.log('🎵 TikTok: Formatting data');
@@ -434,38 +527,41 @@ const dataFormatters = {
     if (data.images && Array.isArray(data.images) && data.images.length > 0) {
       console.log(`🎵 TikTok: Image slideshow with ${data.images.length} image(s)`);
 
+      // Each entry is a plain URL string
       const mediaItems = data.images
         .filter(imgUrl => imgUrl && typeof imgUrl === 'string')
         .map((imgUrl, index) => ({
-          url: imgUrl,
-          thumbnail: imgUrl,
-          type: 'image',
-          quality: 'Original Quality',
+          url:       imgUrl,
+          thumbnail: imgUrl, // use the image itself as its own thumbnail
+          type:      'image',
+          quality:   'Original Quality',
           index,
         }));
 
       const first = mediaItems[0];
       return {
-        title: data.title || 'TikTok Post',
-        url: first?.url || '',
-        thumbnail: data.thumbnail || first?.url || PLACEHOLDER_THUMBNAIL,
-        sizes: ['Original Quality'],
-        audio: data.audio?.[0] || '',
-        source: 'tiktok',
+        title:            data.title || 'TikTok Post',
+        url:              first?.url || '',
+        thumbnail:        data.thumbnail || first?.url || PLACEHOLDER_THUMBNAIL,
+        sizes:            ['Original Quality'],
+        audio:            pickBestUrl(data.audio) || '',
+        source:           'tiktok',
         isImageSlideshow: true,
         ...(mediaItems.length > 1 && { mediaItems }),
       };
     }
 
     // ── Standard video post ──
+    // `data.video` is typically [hd_url, sd_url] — pick best (first)
+    const bestVideoUrl = pickBestUrl(data.video);
     console.log('🎵 TikTok: Standard video post');
     return {
-      title: data.title || 'Untitled Video',
-      url: data.video?.[0] || '',
+      title:     data.title || 'Untitled Video',
+      url:       bestVideoUrl,
       thumbnail: data.thumbnail || PLACEHOLDER_THUMBNAIL,
-      sizes: ['Original Quality'],
-      audio: data.audio?.[0] || '',
-      source: 'tiktok',
+      sizes:     ['Best Quality'],
+      audio:     pickBestUrl(data.audio) || '',
+      source:    'tiktok',
     };
   },
 
@@ -474,20 +570,24 @@ const dataFormatters = {
   // Handles: single video, albums / multiple media
   // facebookInsta (snapsave) returns:
   //   { media: [{url, type, quality, thumbnail}], title, thumbnail }
-  //   OR  { data: [{url, resolution, thumbnail}], title }
+  //   OR  { data: [{url, resolution, thumbnail}], title }   ← quality variants
+  //
+  // The `media` array for albums can also contain HD+SD pairs per asset, so
+  // we run the same dedup pass as for Instagram.
   // ─────────────────────────────────────────────────────────────────────────
   facebook(data) {
     console.log('📘 Facebook: Formatting data');
 
     // ── Case 1: snapsave-style { media: [] } ──
     if (data && data.media && Array.isArray(data.media)) {
-      console.log(`📘 Facebook (media array): ${data.media.length} item(s)`);
+      const rawCount    = data.media.length;
+      const validItems  = data.media.filter(item => item && (item.url || item.download));
+      const uniqueItems = deduplicateByBestQuality(validItems);
+      const mediaItems  = uniqueItems.map((item, index) =>
+        normalizeMediaItem(item, index, data.thumbnail || PLACEHOLDER_THUMBNAIL)
+      );
 
-      const mediaItems = data.media
-        .filter(item => item && item.url)
-        .map((item, index) =>
-          normalizeMediaItem(item, index, data.thumbnail || PLACEHOLDER_THUMBNAIL)
-        );
+      console.log(`📘 Facebook (media array): ${rawCount} raw → ${mediaItems.length} unique`);
 
       if (mediaItems.length === 0) {
         throw new Error('Facebook media array contained no valid URLs');
@@ -495,41 +595,44 @@ const dataFormatters = {
 
       const first = mediaItems[0];
       return {
-        title: data.title || 'Facebook Post',
-        url: first.url,
+        title:     data.title || 'Facebook Post',
+        url:       first.url,
         thumbnail: data.thumbnail || first.thumbnail,
-        sizes: ['Original Quality'],
-        source: 'facebook',
+        sizes:     ['Best Quality'],
+        source:    'facebook',
         ...(mediaItems.length > 1 && { mediaItems }),
       };
     }
 
-    // ── Case 2: { data: [{url, resolution}] } (older format) ──
+    // ── Case 2: { data: [{url, resolution}] } — these are quality VARIANTS
+    //           of the same single video, not separate assets.  Just pick best. ──
     const fbData = data.data || [];
     if (Array.isArray(fbData) && fbData.length > 0) {
       console.log(`📘 Facebook (data array): ${fbData.length} quality variant(s)`);
 
-      // These are quality variants of the same video, not separate media items
-      const hdVideo = fbData.find(v => v.resolution?.includes('720p') || v.resolution?.includes('hd'));
-      const sdVideo = fbData.find(v => v.resolution?.includes('360p') || v.resolution?.includes('sd'));
-      const selectedVideo = hdVideo || sdVideo || fbData[0];
+      // Sort by quality score and pick the winner
+      const sorted = [...fbData].sort((a, b) =>
+        qualityScore(b.resolution || b.quality || '') -
+        qualityScore(a.resolution || a.quality || '')
+      );
+      const best = sorted[0];
 
       return {
-        title: data.title || 'Facebook Video',
-        url: selectedVideo?.url || '',
-        thumbnail: selectedVideo?.thumbnail || PLACEHOLDER_THUMBNAIL,
-        sizes: fbData.map(v => v.resolution || 'Unknown'),
-        source: 'facebook',
+        title:     data.title || 'Facebook Video',
+        url:       pickBestUrl(best?.url || ''),
+        thumbnail: best?.thumbnail || PLACEHOLDER_THUMBNAIL,
+        sizes:     fbData.map(v => v.resolution || 'Unknown'),
+        source:    'facebook',
       };
     }
 
     // ── Fallback ──
     return {
-      title: data.title || 'Facebook Video',
-      url: data.url || '',
+      title:     data.title || 'Facebook Video',
+      url:       pickBestUrl(data.url || ''),
       thumbnail: data.thumbnail || PLACEHOLDER_THUMBNAIL,
-      sizes: ['Original Quality'],
-      source: 'facebook',
+      sizes:     ['Best Quality'],
+      source:    'facebook',
     };
   },
 
