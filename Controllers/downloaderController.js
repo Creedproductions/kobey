@@ -1,5 +1,4 @@
 // ===== DEPENDENCIES =====
-//new
 const { ttdl, twitter } = require('btch-downloader');
 const { igdl } = require('btch-downloader');
 const { pinterest } = require('ironman-api');
@@ -24,43 +23,30 @@ const SUPPORTED_PLATFORMS = [
 
 const PLACEHOLDER_THUMBNAIL = 'https://via.placeholder.com/300x150';
 const DOWNLOAD_TIMEOUT = 45000;
+const MAX_CAROUSEL_ITEMS = 20; // safety cap after dedup
 
 // ===== UTILITY FUNCTIONS =====
 
 const shortenUrl = async (url) => {
   if (!url || url.length < 200) return url;
-
   try {
     const tinyResponse = await axios.post('https://tinyurl.com/api-create.php', null, {
       params: { url }, timeout: 5000
     });
-    if (tinyResponse.data && tinyResponse.data.startsWith('https://tinyurl.com/')) {
-      console.log('URL shortened with TinyURL');
-      return tinyResponse.data;
-    }
+    if (tinyResponse.data && tinyResponse.data.startsWith('https://tinyurl.com/')) return tinyResponse.data;
   } catch (error) { console.warn('TinyURL shortening failed:', error.message); }
-
   try {
     const isgdResponse = await axios.get('https://is.gd/create.php', {
       params: { format: 'simple', url }, timeout: 5000
     });
-    if (isgdResponse.data && isgdResponse.data.startsWith('https://is.gd/')) {
-      console.log('URL shortened with is.gd');
-      return isgdResponse.data;
-    }
+    if (isgdResponse.data && isgdResponse.data.startsWith('https://is.gd/')) return isgdResponse.data;
   } catch (error) { console.warn('is.gd shortening failed:', error.message); }
-
   if (config.BITLY_ACCESS_TOKEN) {
     try {
       const bitlyResponse = await bitly.shorten(url);
-      if (bitlyResponse && bitlyResponse.link) {
-        console.log('URL shortened with Bitly');
-        return bitlyResponse.link;
-      }
+      if (bitlyResponse && bitlyResponse.link) return bitlyResponse.link;
     } catch (error) { console.warn('Bitly shortening failed:', error.message); }
   }
-
-  console.log('URL shortening failed, using original URL');
   return url;
 };
 
@@ -120,8 +106,6 @@ function getServerBaseUrl(req) {
   return process.env.SERVER_BASE_URL || `${protocol}://${host}`;
 }
 
-// Wrap a CDN URL through the server proxy so the Flutter client
-// doesn't need to send platform-specific Referer/Origin headers.
 function wrapForProxy(cdnUrl, platform, title, serverBaseUrl) {
   if (!cdnUrl) return cdnUrl;
   const encoded  = encodeURIComponent(cdnUrl);
@@ -130,7 +114,7 @@ function wrapForProxy(cdnUrl, platform, title, serverBaseUrl) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// QUALITY + URL HELPERS  (shared by Instagram, TikTok, Facebook)
+// QUALITY + URL HELPERS
 // ─────────────────────────────────────────────────────────────────────────────
 
 const qualityScore = (q = '') => {
@@ -152,12 +136,6 @@ const pickBestUrl = (rawUrl) => {
   return rawUrl || '';
 };
 
-/**
- * Decode the real CDN URL from scraper proxy links such as:
- *   https://snapsave.app/api/ajaxDownload.php?url=ENCODED&ext=jpg
- *   https://snapinsta.app/api/ajaxDownload.php?url=ENCODED
- * Returns the decoded URL, or the original href if it is already a direct URL.
- */
 const decodeCdnUrl = (href) => {
   if (!href) return '';
   try {
@@ -166,7 +144,7 @@ const decodeCdnUrl = (href) => {
       const val = u.searchParams.get(param);
       if (val && val.startsWith('http')) {
         const decoded = decodeURIComponent(val);
-        if (decoded.includes('%3A')) return decodeCdnUrl(decoded); // double-encoded
+        if (decoded.includes('%3A')) return decodeCdnUrl(decoded);
         return decoded;
       }
     }
@@ -194,6 +172,125 @@ const detectTypeFromUrl = (url) => {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
+// INSTAGRAM EMBED SCRAPER
+// Works from any IP — no credentials, no third-party service needed.
+// Handles single images, single videos, reels, and mixed carousels.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const unescape = (s) =>
+  s.replace(/\\u0026/gi, '&')
+   .replace(/\\u003[cC]/g, '<').replace(/\\u003[eE]/g, '>')
+   .replace(/\\\//g, '/')
+   .replace(/\\"/g, '"');
+
+async function scrapeInstaEmbed(igUrl) {
+  const match = igUrl.match(/instagram\.com\/(?:p|reel|tv)\/([A-Za-z0-9_-]+)/);
+  if (!match) throw new Error('instaEmbed: cannot extract shortcode');
+  const shortcode = match[1];
+
+  const resp = await axios.get(
+    `https://www.instagram.com/p/${shortcode}/embed/captioned/`,
+    {
+      timeout: 20000,
+      headers: {
+        'User-Agent':
+          'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) ' +
+          'AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
+        Accept:          'text/html,application/xhtml+xml,*/*;q=0.9',
+        'Accept-Language': 'en-US,en;q=0.9',
+        Referer:         'https://www.instagram.com/',
+        'Cache-Control': 'no-cache',
+      },
+    }
+  );
+
+  const html = typeof resp.data === 'string' ? resp.data : '';
+  if (!html || html.length < 500) throw new Error('instaEmbed: empty or too-short response');
+
+  const items = [];
+  const seen  = new Set();
+
+  const addItem = (url, type, thumbnail) => {
+    const clean = unescape(url).replace(/&amp;/g, '&');
+    if (!clean || !clean.startsWith('http') || seen.has(clean)) return;
+    seen.add(clean);
+    const thumb = thumbnail ? unescape(thumbnail).replace(/&amp;/g, '&') : (type === 'image' ? clean : '');
+    items.push({ url: clean, type, thumbnail: thumb });
+  };
+
+  // ── Method 1: carousel (edge_sidecar_to_children) ─────────────────────────
+  // Instagram stores all carousel nodes in a JSON blob inside a <script> tag.
+  const sidecarRe = /"edge_sidecar_to_children"\s*:\s*\{"edges"\s*:\s*(\[[\s\S]*?\])\}/;
+  const sidecarM  = html.match(sidecarRe);
+  if (sidecarM) {
+    try {
+      // The JSON is JS-encoded — unescape before parsing
+      const raw   = unescape(sidecarM[1]);
+      const edges = JSON.parse(raw);
+      edges.forEach((edge) => {
+        const node = edge.node || edge || {};
+        if (node.is_video && node.video_url) {
+          addItem(node.video_url, 'video', node.display_url || '');
+        } else if (node.display_url) {
+          addItem(node.display_url, 'image', node.display_url);
+        }
+      });
+      console.log(`📸 instaEmbed sidecar: ${items.length} items`);
+    } catch (e) {
+      console.warn('📸 instaEmbed sidecar parse error:', e.message);
+    }
+  }
+
+  // ── Method 2: single video ─────────────────────────────────────────────────
+  if (items.length === 0) {
+    // Find all "video_url":"..." occurrences
+    const vidRe  = /"video_url"\s*:\s*"([^"]+)"/g;
+    const thumbRe = /"display_url"\s*:\s*"([^"]+)"/;
+    let   vm;
+    const thumbM = html.match(thumbRe);
+    const thumb  = thumbM ? thumbM[1] : '';
+    while ((vm = vidRe.exec(html)) !== null) {
+      addItem(vm[1], 'video', thumb);
+    }
+  }
+
+  // ── Method 3: single image ────────────────────────────────────────────────
+  if (items.length === 0) {
+    const imgRe = /"display_url"\s*:\s*"([^"]+)"/g;
+    let im;
+    while ((im = imgRe.exec(html)) !== null) {
+      addItem(im[1], 'image', im[1]);
+    }
+  }
+
+  // ── Method 4: <video src="..."> tag ──────────────────────────────────────
+  if (items.length === 0) {
+    const vTagRe = /<video[^>]+src="([^"]+)"/gi;
+    let vt;
+    while ((vt = vTagRe.exec(html)) !== null) {
+      addItem(vt[1], 'video', '');
+    }
+  }
+
+  // ── Method 5: Instagram/Facebook CDN <img> tags ───────────────────────────
+  if (items.length === 0) {
+    const imgTagRe = /<img[^>]+src="(https?:\/\/[^"]*(?:cdninstagram\.com|fbcdn\.net)[^"]+)"/gi;
+    let it;
+    while ((it = imgTagRe.exec(html)) !== null) {
+      const u = it[1].replace(/&amp;/g, '&');
+      // skip tiny avatars / emoji
+      if (u.includes('s150x150') || u.includes('s32x32') || u.includes('emoji')) continue;
+      addItem(u, 'image', u);
+    }
+  }
+
+  if (items.length === 0) throw new Error(`instaEmbed: no media found for ${shortcode}`);
+
+  console.log(`📸 instaEmbed: ${items.length} item(s) for ${shortcode}`);
+  return items; // [{ url, type, thumbnail }]
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // INSTAGRAM DEDUPLICATION HELPERS
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -208,44 +305,54 @@ const extractJwtCdnUrl = (tokenUrl) => {
   } catch (_) { return null; }
 };
 
-/** Strip Instagram CDN size/crop segments so HD, SD and thumb variants share one key. */
-const normaliseInstagramPath = (pathname) => {
+/**
+ * Extract the stable Instagram asset ID from any CDN pathname.
+ * - Images: .../NNN_NNN_NNN_n.jpg  → "img:NNN_NNN_NNN"
+ * - Videos: .../o1/v/t16/f2/m84/LONGHASH... → "vid:LONGHASH"
+ */
+const extractInstagramAssetId = (pathname) => {
+  // Image filenames: digits_digits_digits(_n)?.ext
+  const imgM = pathname.match(/\/(\d{6,}_\d+_\d+)(?:_n)?\.(?:jpg|jpeg|png|webp|gif)/i);
+  if (imgM) return `img:${imgM[1]}`;
+
+  // Video hash segment — first path segment ≥ 20 chars of hex/base64url chars
+  const segs = pathname.split('/').filter(Boolean);
+  const long = segs.find(s => s.length >= 20 && /^[a-zA-Z0-9_-]+$/.test(s));
+  if (long) return `vid:${long}`;
+
+  // Fallback: strip size/crop decorators
   return pathname
     .replace(/\/[sp]\d{2,4}x\d{2,4}\//g, '/')
     .replace(/\/c[\d.]+\//g, '/')
     .replace(/\/e\d+\//g, '/')
-    .replace(/\/+/g, '/');
+    .replace(/\/\/+/g, '/');
 };
 
 const buildDedupKey = (rawUrl, thumb) => {
+  // JWT proxy URL — decode to get real CDN URL
   if (rawUrl.includes('token=')) {
     const cdnUrl = extractJwtCdnUrl(rawUrl);
     if (cdnUrl) {
       try {
-        const parsed   = new URL(cdnUrl);
-        const normPath = normaliseInstagramPath(parsed.pathname);
-        return normPath;
+        const assetId = extractInstagramAssetId(new URL(cdnUrl).pathname);
+        console.log(`🔑 dedupKey (jwt): ${assetId}`);
+        return assetId;
       } catch (_) {}
     }
   }
+
+  // Direct CDN URL or decoded proxy URL
   const decoded = decodeCdnUrl(rawUrl);
-  if (decoded !== rawUrl && decoded.startsWith('http')) {
-    try {
-      const parsed   = new URL(decoded);
-      const normPath = normaliseInstagramPath(parsed.pathname);
-      return thumb ? `${thumb}::${normPath}` : normPath;
-    } catch (_) {}
-  }
+  const target  = (decoded && decoded !== rawUrl && decoded.startsWith('http')) ? decoded : rawUrl;
   try {
-    const parsed  = new URL(rawUrl);
-    const rawPath = parsed.pathname;
-    const isGenericPath = rawPath.length <= 3 ||
-      /^\/(v[0-9]?\/?|download\/?|media\/?|proxy\/?|dl\/?|get\/?)$/.test(rawPath);
-    if (isGenericPath) return thumb ? `${thumb}::${rawUrl}` : rawUrl;
-    const normPath = normaliseInstagramPath(rawPath);
-    return thumb ? `${thumb}::${normPath}` : normPath;
+    const assetId = extractInstagramAssetId(new URL(target).pathname);
+    if (assetId && assetId.length > 5) {
+      console.log(`🔑 dedupKey (cdn): ${assetId}`);
+      return assetId;
+    }
   } catch (_) {}
-  return rawUrl;
+
+  return thumb ? `${thumb}::${rawUrl}` : rawUrl;
 };
 
 const deduplicateByBestQuality = (items) => {
@@ -269,7 +376,7 @@ const deduplicateByBestQuality = (items) => {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// JWT TYPE DETECTION (for rapidcdn / token-proxied URLs)
+// JWT TYPE DETECTION
 // ─────────────────────────────────────────────────────────────────────────────
 
 const detectTypeFromJwtUrl = (tokenUrl) => {
@@ -284,6 +391,8 @@ const detectTypeFromJwtUrl = (tokenUrl) => {
     if (origUrl.includes('scontent') || origUrl.includes('cdninstagram')) {
       if (origUrl.match(/\/t50\./)) return 'video';
       if (origUrl.match(/\/t51\./)) return 'image';
+      // o1/v/ pattern is always video
+      if (origUrl.includes('/o1/v/') || origUrl.includes('/t16/')) return 'video';
     }
   } catch (e) { console.warn('🔑 JWT decode error:', e.message); }
   return null;
@@ -291,7 +400,6 @@ const detectTypeFromJwtUrl = (tokenUrl) => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // THUMBNAIL VALIDATION
-// Prevents igdl from assigning image thumbnails to video carousel items.
 // ─────────────────────────────────────────────────────────────────────────────
 
 const decodeThumbnailJwtUrl = (thumbUrl) => {
@@ -316,35 +424,47 @@ const isThumbnailValidForType = (thumbUrl, mediaType) => {
   return true;
 };
 
+// ─────────────────────────────────────────────────────────────────────────────
+// NORMALIZE MEDIA ITEM
+// Key fix: image items use their own URL as thumbnail (always correct).
+//          video items use scraper-supplied thumbnail only if it passes validation.
+// ─────────────────────────────────────────────────────────────────────────────
+
 const normalizeMediaItem = (item, index, fallbackThumbnail = PLACEHOLDER_THUMBNAIL) => {
   const rawUrl = pickBestUrl(item.url || item.download || item.src || '');
   const url    = rawUrl;
   const cdnUrl = decodeCdnUrl(rawUrl) || rawUrl;
 
+  // ── type detection ─────────────────────────────────────────────────────────
   let type = '';
   const rawType = (item.type || '').toString().toLowerCase();
-
   if (rawType === 'video' || rawType === 'image') {
     type = rawType;
   } else {
-    const fromUrl = detectTypeFromUrl(cdnUrl);
-    if (fromUrl) {
-      type = fromUrl;
-    } else {
-      const fromJwt = detectTypeFromJwtUrl(rawUrl);
-      type = fromJwt || 'video';
-    }
+    type = detectTypeFromUrl(cdnUrl) || detectTypeFromJwtUrl(rawUrl) || 'video';
   }
 
-  const rawThumb  = item.thumbnail || item.cover || item.image || '';
-  const thumbnail = isThumbnailValidForType(rawThumb, type)
-    ? (rawThumb || fallbackThumbnail)
-    : fallbackThumbnail;
+  // ── thumbnail ──────────────────────────────────────────────────────────────
+  // Image items: the image URL itself is the best preview — no ambiguity.
+  // Video items: use scraper thumbnail only if it actually points to a video thumbnail;
+  //              otherwise fall back to placeholder.
+  let thumbnail;
+  if (type === 'image') {
+    // For image-typed items, the media URL IS the thumbnail.
+    // Prefer any explicit thumbnail the scraper gave us, but fall back to the URL itself.
+    const rawThumb = item.thumbnail || item.cover || item.image || '';
+    thumbnail = rawThumb || url;
+  } else {
+    const rawThumb = item.thumbnail || item.cover || item.image || '';
+    thumbnail = isThumbnailValidForType(rawThumb, 'video')
+      ? (rawThumb || fallbackThumbnail)
+      : fallbackThumbnail;
+  }
 
   return { url, thumbnail, type, quality: item.quality || item.resolution || 'Original Quality', index };
 };
 
-// ===== FACEBOOK DATA NORMALISER (new implementation) =====
+// ===== FACEBOOK DATA NORMALISER =====
 
 const normaliseFacebookData = (raw) => {
   console.log('📘 FB normalise — keys:', Object.keys(raw || {}));
@@ -376,54 +496,94 @@ const normaliseFacebookData = (raw) => {
 
 const platformDownloaders = {
 
-  // ─── INSTAGRAM — parallel scrapers + igdl, returns { _items, _source } ──
+  // ─── INSTAGRAM ───────────────────────────────────────────────────────────
+  // Three parallel scrapers:
+  //   1. facebookInstaService (snapsave → snapinsta)  — best quality when available
+  //   2. igdl (btch-downloader)                        — reliable but duplicates
+  //   3. scrapeInstaEmbed (Instagram embed page)       — always works from any IP
+  //
+  // Priority: snapsave > igdl > embed
+  // If snapsave/igdl both fail we fall through to embed which is the reliable floor.
   async instagram(url) {
-    let snapsResult = null;
-    let igdlResult  = null;
-    let snapsErr    = null;
-    let igdlErr     = null;
+    let snapsResult = null, igdlResult  = null, embedResult = null;
+    let snapsErr    = null, igdlErr     = null, embedErr    = null;
 
     await Promise.allSettled([
       downloadWithTimeout(() => facebookInsta(url), 35000)
         .then(d  => { snapsResult = d; })
-        .catch(e => { snapsErr    = e; }),
+        .catch(e => {
+          snapsErr = e instanceof Error ? e : new Error(String(e));
+          console.warn('⚠️ snapsave error:', snapsErr.message);
+        }),
+
       downloadWithTimeout(() => igdl(url), 30000)
-        .then(d  => { igdlResult  = d; })
-        .catch(e => { igdlErr     = e; }),
+        .then(d  => {
+          if (!d) {
+            igdlErr = new Error('igdl resolved with null/undefined');
+          } else {
+            igdlResult = d;
+          }
+        })
+        .catch(e => {
+          igdlErr = e instanceof Error ? e : new Error(String(e));
+          console.warn('⚠️ igdl error:', igdlErr.message);
+        }),
+
+      downloadWithTimeout(() => scrapeInstaEmbed(url), 20000)
+        .then(d  => { embedResult = d; })
+        .catch(e => {
+          embedErr = e instanceof Error ? e : new Error(String(e));
+          console.warn('⚠️ instaEmbed error:', embedErr.message);
+        }),
     ]);
 
+    // ── normalise each scraper's raw output to an array of items ──────────
     const extractItems = (res) => {
       if (!res) return null;
-      if (Array.isArray(res))        return res.length        > 0 ? res        : null;
-      if (Array.isArray(res.data))   return res.data.length   > 0 ? res.data   : null;
-      if (Array.isArray(res.result)) return res.result.length > 0 ? res.result : null;
-      if (Array.isArray(res.media))  return res.media.length  > 0 ? res.media  : null;
+      if (Array.isArray(res))           return res.length > 0 ? res        : null;
+      if (Array.isArray(res.data))      return res.data.length   > 0 ? res.data   : null;
+      if (Array.isArray(res.result))    return res.result.length > 0 ? res.result : null;
+      if (Array.isArray(res.media))     return res.media.length  > 0 ? res.media  : null;
+      if (res.status === true && Array.isArray(res.data))
+        return res.data.length > 0 ? res.data : null;
+      if (res.url || res.download)      return [res];
       return null;
     };
 
     const snapsItems = extractItems(snapsResult);
     const igdlItems  = extractItems(igdlResult);
+    // embed already returns an array or null
+    const embedItems = Array.isArray(embedResult) && embedResult.length > 0 ? embedResult : null;
 
-    console.log(`📸 Instagram: snapsave items=${snapsItems?.length ?? 'null'}  igdl items=${igdlItems?.length ?? 'null'}`);
-    if (snapsErr) console.log('📸 snapsave error:', snapsErr.message);
-    if (igdlErr)  console.log('📸 igdl error:',     igdlErr.message);
+    console.log(
+      `📸 Instagram scrapers: snapsave=${snapsItems?.length ?? 'null'}` +
+      `  igdl=${igdlItems?.length ?? 'null'}` +
+      `  embed=${embedItems?.length ?? 'null'}`
+    );
 
-    if (!snapsItems && !igdlItems) {
+    if (!snapsItems && !igdlItems && !embedItems) {
       throw new Error(
-        `Instagram: all scrapers failed. snapsave: ${snapsErr?.message}  igdl: ${igdlErr?.message}`
+        'Instagram: all scrapers failed. ' +
+        `snapsave: ${snapsErr?.message ?? 'null'}  ` +
+        `igdl: ${igdlErr?.message ?? 'null'}  ` +
+        `embed: ${embedErr?.message ?? 'null'}`
       );
     }
 
-    if (snapsItems && snapsItems.length > 0) {
-      console.log('📸 Instagram: using snapsave');
+    // Prefer snapsave (richest metadata), then igdl, then embed
+    if (snapsItems?.length > 0) {
+      console.log('📸 Using snapsave');
       return { _items: snapsItems, _source: 'snapsave' };
     }
-
-    console.log('📸 Instagram: snapsave empty/failed — falling back to igdl');
-    return { _items: igdlItems, _source: 'igdl' };
+    if (igdlItems?.length > 0) {
+      console.log('📸 Using igdl');
+      return { _items: igdlItems, _source: 'igdl' };
+    }
+    console.log('📸 Using instaEmbed fallback');
+    return { _items: embedItems, _source: 'embed' };
   },
 
-  // ─── TIKTOK — tikwm first (supports slideshows), ttdl fallback ──────────
+  // ─── TIKTOK ───────────────────────────────────────────────────────────────
   async tiktok(url) {
     try {
       const resp = await downloadWithTimeout(async () => {
@@ -465,7 +625,7 @@ const platformDownloaders = {
     return data;
   },
 
-  // ─── FACEBOOK — new implementation (proxy-wrapped CDN URLs) ─────────────
+  // ─── FACEBOOK ─────────────────────────────────────────────────────────────
   async facebook(url, req) {
     const raw = await downloadWithTimeout(() => facebookInsta(url), 60000);
     if (!raw) throw new Error('Facebook: no data returned');
@@ -557,8 +717,7 @@ const platformDownloaders = {
     try {
       const data = await downloadWithTimeout(() => advancedThreadsDownloader(url), 60000);
       const hasMedia = data && (
-        data.download ||
-        data.url ||
+        data.download || data.url ||
         (Array.isArray(data.items) && data.items.length > 0)
       );
       if (!hasMedia) {
@@ -585,7 +744,7 @@ const platformDownloaders = {
 
 const dataFormatters = {
 
-  // ─── INSTAGRAM — full carousel/dedup formatter ───────────────────────────
+  // ─── INSTAGRAM ────────────────────────────────────────────────────────────
   instagram(data) {
     console.log('📸 Instagram formatter: keys=', Object.keys(data || {}));
 
@@ -619,19 +778,27 @@ const dataFormatters = {
     }
 
     console.log(`📸 Instagram raw items (${rawItems.length}):`);
-    rawItems.forEach((item, i) => {
+    rawItems.slice(0, 5).forEach((item, i) => {
       const u = item?.url || item?.download || '';
       const t = item?.thumbnail || '';
-      console.log(`  raw[${i}] type=${item?.type ?? 'none'} quality=${item?.quality ?? '-'} url=${String(u).slice(0, 100)} thumb=${String(t).slice(0, 70)}`);
+      console.log(`  raw[${i}] type=${item?.type ?? 'none'} url=${String(u).slice(0, 100)} thumb=${String(t).slice(0, 70)}`);
     });
+    if (rawItems.length > 5) console.log(`  ... (${rawItems.length - 5} more)`);
 
     const validItems  = rawItems.filter(item => item && (item.url || item.download));
     const uniqueItems = deduplicateByBestQuality(validItems);
-    const mediaItems  = uniqueItems.map((item, index) =>
+
+    // Safety cap — if dedup still gives us more than MAX_CAROUSEL_ITEMS
+    // something is wrong; cap and log.
+    const cappedItems = uniqueItems.length > MAX_CAROUSEL_ITEMS
+      ? (console.warn(`📸 Capping ${uniqueItems.length} items to ${MAX_CAROUSEL_ITEMS}`), uniqueItems.slice(0, MAX_CAROUSEL_ITEMS))
+      : uniqueItems;
+
+    const mediaItems = cappedItems.map((item, index) =>
       normalizeMediaItem(item, index, item.thumbnail || PLACEHOLDER_THUMBNAIL)
     );
 
-    console.log(`📸 Instagram: ${rawItems.length} raw → ${mediaItems.length} unique`);
+    console.log(`📸 Instagram: ${rawItems.length} raw → ${mediaItems.length} final`);
     mediaItems.forEach((it, i) =>
       console.log(`  [${i}] type=${it.type} url=${String(it.url).slice(0, 100)}`)
     );
@@ -649,7 +816,7 @@ const dataFormatters = {
     };
   },
 
-  // ─── TIKTOK — slideshow-aware formatter ─────────────────────────────────
+  // ─── TIKTOK ───────────────────────────────────────────────────────────────
   tiktok(data) {
     console.log('🎵 TikTok: keys=', Object.keys(data || {}),
                 'images len=', data.images?.length ?? 0,
@@ -706,7 +873,7 @@ const dataFormatters = {
     };
   },
 
-  // ─── FACEBOOK — new implementation (proxy-wrapped CDN URLs) ─────────────
+  // ─── FACEBOOK ─────────────────────────────────────────────────────────────
   facebook(data) {
     console.log('📘 FB formatter — keys:', Object.keys(data || {}));
 
@@ -732,10 +899,10 @@ const dataFormatters = {
 
     const fbQualityScore = (r = '') => {
       const s = r.toLowerCase();
-      if (s.includes('1080'))                     return 5;
-      if (s.includes('720') || s.includes('hd'))  return 4;
-      if (s.includes('480'))                       return 3;
-      if (s.includes('360') || s.includes('sd'))  return 2;
+      if (s.includes('1080'))                    return 5;
+      if (s.includes('720') || s.includes('hd')) return 4;
+      if (s.includes('480'))                     return 3;
+      if (s.includes('360') || s.includes('sd')) return 2;
       return 1;
     };
 
@@ -807,10 +974,10 @@ const dataFormatters = {
       };
     }
     if (data.url && Array.isArray(data.url)) {
-      const videoArray   = data.url.filter(item => item && item.url);
-      const bestQuality  = videoArray.find(item => item.quality?.includes('1280x720')) ||
-                           videoArray.find(item => item.quality?.includes('640x360'))  ||
-                           videoArray[0];
+      const videoArray  = data.url.filter(item => item && item.url);
+      const bestQuality = videoArray.find(item => item.quality?.includes('1280x720')) ||
+                          videoArray.find(item => item.quality?.includes('640x360'))  ||
+                          videoArray[0];
       return {
         title:     'Twitter Video',
         url:       bestQuality.url || '',
@@ -862,7 +1029,7 @@ const dataFormatters = {
         const parts = selectedQuality.url.split(':');
         if (parts.length >= 3) {
           selectedQuality.url = `${serverBaseUrl}/api/merge-audio?videoUrl=${encodeURIComponent(parts[1])}&audioUrl=${encodeURIComponent(parts[2])}`;
-          defaultUrl          = selectedQuality.url;
+          defaultUrl = selectedQuality.url;
         }
       }
     } else {
@@ -903,8 +1070,8 @@ const dataFormatters = {
             item.thumbnail || item.cover || item.image_url || item.display_url ||
             item.image_versions?.candidates?.[0]?.url ||
             item.image_versions?.[0]?.url || data.thumbnail || PLACEHOLDER_THUMBNAIL;
-          const isVideo    = !!(item.video_url || item.download?.includes('.mp4'));
-          const itemType   = item.type ||
+          const isVideo  = !!(item.video_url || item.download?.includes('.mp4'));
+          const itemType = item.type ||
             (item.media_type === 2 || item.media_type === '2' ? 'video' :
              item.media_type === 1 || item.media_type === '1' ? 'image' :
              isVideo ? 'video' : 'image');
@@ -1004,6 +1171,9 @@ const downloadMedia = async (req, res) => {
       console.log(`YouTube URL processed: ${cleanedUrl} -> ${processedUrl}`);
     }
 
+    console.log(`Platform Identification: Determining the platform for the given URL.`);
+    console.log(`Download Media: Fetching data for platform '${platform}'.`);
+
     const downloader = platformDownloaders[platform];
     if (!downloader) throw new Error(`No downloader available for platform: ${platform}`);
 
@@ -1014,6 +1184,8 @@ const downloadMedia = async (req, res) => {
     if (!data) {
       return res.status(404).json({ error: 'No data found for this URL', success: false, platform });
     }
+
+    console.log(`Data Formatting: Formatting data for platform '${platform}'.`);
 
     let formattedData;
     try {
@@ -1039,6 +1211,8 @@ const downloadMedia = async (req, res) => {
       const mergeFormats = formattedData.formats?.filter(f => f.url?.includes('/api/merge-audio')) || [];
       console.log(`🎵 Merge formats available: ${mergeFormats.length}`);
     }
+
+    console.log(`Download Media: Media successfully downloaded and formatted.`);
 
     res.status(200).json({
       success:   true,
@@ -1080,13 +1254,17 @@ const downloadMedia = async (req, res) => {
 
 const getErrorSuggestions = (errorMessage, platform) => {
   const suggestions = [];
+  if (platform === 'instagram') {
+    suggestions.push('Ensure the post is public and not from a private account');
+    suggestions.push('Stories and highlights are not supported — only posts and reels');
+    suggestions.push('Some sponsored/ad posts cannot be downloaded');
+  }
   if (platform === 'threads') {
     suggestions.push('Ensure the Threads post contains video content (not just images or text)');
     suggestions.push('Check if the post is public and not deleted');
-    suggestions.push('Try using a different Threads video post to test');
   }
   if (platform === 'youtube' && errorMessage.includes('timeout')) {
-    suggestions.push('YouTube videos may take longer to process - the API is working but needs time');
+    suggestions.push('YouTube videos may take longer to process — please try again');
     suggestions.push('Check your frontend code to ensure it waits for the full response');
   }
   return suggestions;
