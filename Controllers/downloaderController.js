@@ -184,33 +184,36 @@ const unescape = (s) =>
    .replace(/\\"/g, '"');
 
 async function scrapeInstaEmbed(igUrl) {
-  // ── Stories are not embeddable (require auth) — fail fast ─────────────────
-  if (igUrl.includes('/stories/') && !igUrl.match(/instagram\.com\/(?:p|reel|tv)\//)) {
-    throw new Error('instaEmbed: Instagram Stories require authentication and cannot be downloaded');
-  }
-
   const match = igUrl.match(/instagram\.com\/(?:p|reel|tv)\/([A-Za-z0-9_-]+)/);
-  if (!match) throw new Error('instaEmbed: cannot extract shortcode from URL');
+  if (!match) throw new Error('instaEmbed: cannot extract shortcode');
   const shortcode = match[1];
 
-  const items = [];
-  const seen  = new Set();
+  // Multiple URL variants — collab posts, sponsored posts, and newer carousel formats
+  // often only serve usable HTML on the bare post URL or non-captioned embed.
+  const embedUrls = [
+    `https://www.instagram.com/p/${shortcode}/embed/captioned/`,
+    `https://www.instagram.com/p/${shortcode}/embed/`,
+    `https://www.instagram.com/reel/${shortcode}/embed/captioned/`,
+    `https://www.instagram.com/reel/${shortcode}/embed/`,
+    `https://www.instagram.com/p/${shortcode}/`,
+    `https://www.instagram.com/reel/${shortcode}/`,
+  ];
+
+  const userAgents = [
+    // Mobile Safari — works for most public posts
+    'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
+    // Desktop Chrome — some collab/sponsored posts serve richer HTML to desktop
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    // Googlebot — sometimes bypasses soft login walls on public posts
+    'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)',
+  ];
+
+  let bestHtml   = '';
+  let bestLength = 0;
 
   const addItem = (url, type, thumbnail) => {
     const clean = unescape(url).replace(/&amp;/g, '&');
     if (!clean || !clean.startsWith('http') || seen.has(clean)) return;
-    // ── Filter out Instagram UI/static assets (icons, sprites, emoji) ────────
-    // static.cdninstagram.com/rsrc.php/ serves UI icons, NOT post media.
-    // Only scontent-*.cdninstagram.com and video-*.fbcdn.net are actual media CDNs.
-    const isUiAsset =
-      clean.includes('static.cdninstagram.com/rsrc.php') ||
-      clean.includes('/rsrc.php/') ||
-      clean.includes('s150x150') ||
-      clean.includes('s32x32') ||
-      clean.includes('emoji') ||
-      clean.includes('/static/bundles/') ||
-      clean.match(/\/[a-z]{1,3}\/r\/[A-Za-z0-9_-]+\.webp/); // rsrc sprite pattern
-    if (isUiAsset) return;
     seen.add(clean);
     const thumb = thumbnail
       ? unescape(thumbnail).replace(/&amp;/g, '&')
@@ -218,281 +221,177 @@ async function scrapeInstaEmbed(igUrl) {
     items.push({ url: clean, type, thumbnail: thumb });
   };
 
-  // ── URL fetch strategy ────────────────────────────────────────────────────
-  // CRITICAL LESSON FROM LOGS:
-  //   Embed pages (~106k chars) always contain "display_url" in their JS bundles
-  //   even when the actual post media JSON is absent. The old break-early logic
-  //   stopped at the first embed URL and never reached the bare post URL
-  //   (/p/shortcode/ with desktop Chrome) which consistently returns 1–2MB of
-  //   full Instagram page HTML containing the complete sidecar/carousel data.
-  //
-  // Strategy:
-  //   Phase 1: Fetch bare post URL with desktop Chrome FIRST (richest data).
-  //            If it contains carousel/sidecar JSON → extract and return.
-  //   Phase 2: If Phase 1 didn't get full carousel, fetch captioned embed URLs.
-  //            These are fast (~106k) and work for single images/videos/reels.
-  //   Phase 3: Fallback — try all remaining URL/UA combos and use best HTML.
+  const items = [];
+  const seen  = new Set();
 
-  const DESKTOP_CHROME =
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
-  const MOBILE_SAFARI =
-    'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1';
-  const GOOGLEBOT =
-    'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)';
-
-  const fetchPage = async (url, ua, timeoutMs = 15000) => {
-    try {
-      const resp = await axios.get(url, {
-        timeout: timeoutMs,
-        maxRedirects: 5,
-        validateStatus: (s) => s < 500,
-        headers: {
-          'User-Agent':      ua,
-          Accept:            'text/html,application/xhtml+xml,*/*;q=0.9',
-          'Accept-Language': 'en-US,en;q=0.9',
-          Referer:           'https://www.instagram.com/',
-          'Cache-Control':   'no-cache',
-          'Sec-Fetch-Dest':  'document',
-          'Sec-Fetch-Mode':  'navigate',
-          'Sec-Fetch-Site':  'none',
-        },
-      });
-      const html = typeof resp.data === 'string' ? resp.data : '';
-      const slug = url.replace('https://www.instagram.com', '');
-      console.log(`📸 instaEmbed: ${html.length} chars [${slug}] ua=${ua.slice(0, 30)}...`);
-      return html;
-    } catch (e) {
-      const slug = url.replace('https://www.instagram.com', '');
-      console.warn(`📸 instaEmbed fetch failed [${slug}]: ${e.message}`);
-      return '';
-    }
-  };
-
-  // ── Extraction helper: try all methods on a given HTML string ─────────────
-  const extractFromHtml = (html) => {
-    if (!html || html.length < 200) return;
-
-    // Method A: carousel_media array (full page HTML — most complete)
-    // This key appears in the full Instagram page JSON and contains all carousel items.
-    const carouselRe = /"carousel_media"\s*:\s*(\[[\s\S]*?\])\s*,\s*"(?:can_see|accessibility|pk"|id"|code")/;
-    const carouselM  = html.match(carouselRe);
-    if (carouselM) {
+  // ── Fetch: iterate URL/UA combos, stop as soon as we find media-rich HTML ─
+  outerLoop:
+  for (const embedUrl of embedUrls) {
+    for (const ua of userAgents) {
       try {
-        const medias = JSON.parse(unescape(carouselM[1]));
-        medias.forEach((m) => {
-          if (m.video_versions && m.video_versions.length > 0) {
-            const vid   = m.video_versions[0];
-            const thumb = m.image_versions2?.candidates?.[0]?.url || '';
-            addItem(vid.url, 'video', thumb);
-          } else if (m.image_versions2?.candidates?.length > 0) {
-            const img = m.image_versions2.candidates[0].url;
-            addItem(img, 'image', img);
-          }
+        const resp = await axios.get(embedUrl, {
+          timeout: 15000,
+          maxRedirects: 5,
+          validateStatus: (s) => s < 500,
+          headers: {
+            'User-Agent':      ua,
+            Accept:            'text/html,application/xhtml+xml,*/*;q=0.9',
+            'Accept-Language': 'en-US,en;q=0.9',
+            Referer:           'https://www.instagram.com/',
+            'Cache-Control':   'no-cache',
+            'Sec-Fetch-Dest':  'document',
+            'Sec-Fetch-Mode':  'navigate',
+            'Sec-Fetch-Site':  'none',
+          },
         });
-        if (items.length > 0) {
-          console.log(`📸 instaEmbed carousel_media: ${items.length} items`);
-          return;
+
+        const html = typeof resp.data === 'string' ? resp.data : '';
+        const slug = embedUrl.replace('https://www.instagram.com', '');
+        console.log(`📸 instaEmbed: ${html.length} chars [${slug}] ua=${ua.slice(0, 30)}...`);
+
+        // Keep the largest/richest response seen so far
+        if (html.length > bestLength) {
+          bestLength = html.length;
+          bestHtml   = html;
         }
-      } catch (e) {
-        console.warn('📸 instaEmbed carousel_media parse error:', e.message);
-      }
-    }
 
-    // Method B: edge_sidecar_to_children (embed page carousel JSON)
-    const sidecarRe = /"edge_sidecar_to_children"\s*:\s*\{"edges"\s*:\s*(\[[\s\S]*?\])\}/;
-    const sidecarM  = html.match(sidecarRe);
-    if (sidecarM) {
-      try {
-        const edges = JSON.parse(unescape(sidecarM[1]));
-        edges.forEach((edge) => {
-          const node = edge.node || edge || {};
-          if (node.is_video && node.video_url) {
-            addItem(node.video_url, 'video', node.display_url || '');
-          } else if (node.display_url) {
-            addItem(node.display_url, 'image', node.display_url);
-          }
-        });
-        if (items.length > 0) {
-          console.log(`📸 instaEmbed sidecar: ${items.length} items`);
-          return;
-        }
-      } catch (e) {
-        console.warn('📸 instaEmbed sidecar parse error:', e.message);
-      }
-    }
-
-    // Method C: video_versions array (full page single video)
-    const vidVersionsRe = /"video_versions"\s*:\s*\[[\s\S]*?"url"\s*:\s*"([^"]+)"/;
-    const vidVerM = html.match(vidVersionsRe);
-    if (vidVerM) {
-      const thumbM = html.match(/"image_versions2"\s*:\s*\{"candidates"\s*:\s*\[\{"url"\s*:\s*"([^"]+)"/);
-      const thumb  = thumbM ? unescape(thumbM[1]).replace(/&amp;/g, '&') : '';
-      addItem(vidVerM[1], 'video', thumb);
-      if (items.length > 0) return;
-    }
-
-    // Method D: video_url JSON key (embed page single video / reel)
-    {
-      const vidRe   = /"video_url"\s*:\s*"([^"]+)"/g;
-      const thumbRe = /"display_url"\s*:\s*"([^"]+)"/;
-      const thumbM  = html.match(thumbRe);
-      const thumb   = thumbM ? thumbM[1] : '';
-      let vm;
-      while ((vm = vidRe.exec(html)) !== null) addItem(vm[1], 'video', thumb);
-      if (items.length > 0) return;
-    }
-
-    // Method E: playable_url (alternate video key)
-    {
-      const playRe  = /"playable_url"\s*:\s*"([^"]+)"/g;
-      const thumbRe = /"display_url"\s*:\s*"([^"]+)"/;
-      const thumbM  = html.match(thumbRe);
-      const thumb   = thumbM ? thumbM[1] : '';
-      let pm;
-      while ((pm = playRe.exec(html)) !== null) addItem(pm[1], 'video', thumb);
-      if (items.length > 0) return;
-    }
-
-    // Method F: display_url JSON key — ONLY accept scontent CDN URLs (actual media).
-    // This key also appears in Instagram's JS bundles with non-media values, so
-    // we must strictly validate it points to a real CDN host.
-    {
-      const imgRe = /"display_url"\s*:\s*"([^"]+)"/g;
-      let im;
-      while ((im = imgRe.exec(html)) !== null) {
-        const decoded = unescape(im[1]).replace(/&amp;/g, '&');
+        // If this page has actual media JSON, use it immediately
         if (
-          decoded.includes('scontent') ||
-          decoded.includes('cdninstagram.com') ||
-          decoded.includes('fbcdn.net')
+          html.includes('video_url')    ||
+          html.includes('display_url')  ||
+          html.includes('edge_sidecar') ||
+          html.includes('playable_url')
         ) {
-          addItem(im[1], 'image', im[1]);
+          bestHtml = html;
+          break outerLoop;
         }
-      }
-      if (items.length > 0) return;
-    }
-
-    // Method G: <video src="..."> HTML tag
-    {
-      const vTagRe = /<video[^>]+src="([^"]+)"/gi;
-      let vt;
-      while ((vt = vTagRe.exec(html)) !== null) addItem(vt[1], 'video', '');
-      if (items.length > 0) return;
-    }
-
-    // Method H: og:video meta tag — reliable floor for any public post
-    {
-      const ogVid =
-        html.match(/<meta[^>]+property="og:video(?::url)?"\s+content="([^"]+)"/i) ||
-        html.match(/<meta[^>]+content="([^"]+)"[^>]+property="og:video(?::url)?"/i);
-      if (ogVid) {
-        const u = ogVid[1].replace(/&amp;/g, '&');
-        if (u.startsWith('http')) { addItem(u, 'video', ''); if (items.length > 0) return; }
+      } catch (e) {
+        const slug = embedUrl.replace('https://www.instagram.com', '');
+        console.warn(`📸 instaEmbed fetch failed [${slug}]: ${e.message}`);
       }
     }
+  }
 
-    // Method I: og:image meta tag — collab/sponsored posts
-    {
-      const ogImg =
-        html.match(/<meta[^>]+property="og:image"\s+content="([^"]+)"/i) ||
-        html.match(/<meta[^>]+content="([^"]+)"[^>]+property="og:image"/i);
-      if (ogImg) {
-        const u = ogImg[1].replace(/&amp;/g, '&');
-        if (u.startsWith('http') && (u.includes('scontent') || u.includes('fbcdn'))) {
-          addItem(u, 'image', u);
-          if (items.length > 0) return;
+  const html = bestHtml;
+  if (!html || html.length < 200) {
+    throw new Error(`instaEmbed: all fetch attempts returned empty HTML for ${shortcode}`);
+  }
+
+  // ── Method 1: full carousel (edge_sidecar_to_children JSON blob) ──────────
+  const sidecarRe = /"edge_sidecar_to_children"\s*:\s*\{"edges"\s*:\s*(\[[\s\S]*?\])\}/;
+  const sidecarM  = html.match(sidecarRe);
+  if (sidecarM) {
+    try {
+      const edges = JSON.parse(unescape(sidecarM[1]));
+      edges.forEach((edge) => {
+        const node = edge.node || edge || {};
+        if (node.is_video && node.video_url) {
+          addItem(node.video_url, 'video', node.display_url || '');
+        } else if (node.display_url) {
+          addItem(node.display_url, 'image', node.display_url);
         }
-      }
+      });
+      console.log(`📸 instaEmbed sidecar: ${items.length} items`);
+    } catch (e) {
+      console.warn('📸 instaEmbed sidecar parse error:', e.message);
     }
+  }
 
-    // Method J: scontent CDN <img> tags only (NOT static.cdninstagram.com)
-    {
-      const imgTagRe = /<img[^>]+src="(https?:\/\/scontent[^"]*(?:cdninstagram\.com|fbcdn\.net)[^"]+)"/gi;
-      let it;
-      while ((it = imgTagRe.exec(html)) !== null) {
-        addItem(it[1].replace(/&amp;/g, '&'), 'image', it[1].replace(/&amp;/g, '&'));
-      }
-      if (items.length > 0) return;
+  // ── Method 2: video_url JSON key (single video / reel) ────────────────────
+  if (items.length === 0) {
+    const vidRe   = /"video_url"\s*:\s*"([^"]+)"/g;
+    const thumbRe = /"display_url"\s*:\s*"([^"]+)"/;
+    const thumbM  = html.match(thumbRe);
+    const thumb   = thumbM ? thumbM[1] : '';
+    let vm;
+    while ((vm = vidRe.exec(html)) !== null) addItem(vm[1], 'video', thumb);
+  }
+
+  // ── Method 3: playable_url JSON key (alternate video key) ─────────────────
+  if (items.length === 0) {
+    const playRe  = /"playable_url"\s*:\s*"([^"]+)"/g;
+    const thumbRe = /"display_url"\s*:\s*"([^"]+)"/;
+    const thumbM  = html.match(thumbRe);
+    const thumb   = thumbM ? thumbM[1] : '';
+    let pm;
+    while ((pm = playRe.exec(html)) !== null) addItem(pm[1], 'video', thumb);
+  }
+
+  // ── Method 4: display_url JSON key (single image) ─────────────────────────
+  if (items.length === 0) {
+    const imgRe = /"display_url"\s*:\s*"([^"]+)"/g;
+    let im;
+    while ((im = imgRe.exec(html)) !== null) addItem(im[1], 'image', im[1]);
+  }
+
+  // ── Method 5: <video src="..."> HTML tag ──────────────────────────────────
+  if (items.length === 0) {
+    const vTagRe = /<video[^>]+src="([^"]+)"/gi;
+    let vt;
+    while ((vt = vTagRe.exec(html)) !== null) addItem(vt[1], 'video', '');
+  }
+
+  // ── Method 6: og:video meta tag ───────────────────────────────────────────
+  // Even completely stripped embed pages include og: tags in <head>.
+  // This is the reliable floor for any public post including sponsored ones.
+  if (items.length === 0) {
+    const ogVid =
+      html.match(/<meta[^>]+property="og:video(?::url)?"\s+content="([^"]+)"/i) ||
+      html.match(/<meta[^>]+content="([^"]+)"[^>]+property="og:video(?::url)?"/i);
+    if (ogVid) {
+      const u = ogVid[1].replace(/&amp;/g, '&');
+      if (u.startsWith('http')) addItem(u, 'video', '');
     }
+  }
 
-    // Method K: any scontent CDN URL with media extension
-    {
-      const cdnRe = /["'](https?:\/\/scontent[^"']*(?:cdninstagram\.com|fbcdn\.net)[^"']+\.(?:mp4|jpg|jpeg|png|webp)[^"'?]*(?:\?[^"']*)?)["']/gi;
-      let cm;
-      while ((cm = cdnRe.exec(html)) !== null) {
-        const u    = cm[1].replace(/&amp;/g, '&');
-        const type = u.toLowerCase().split('?')[0].endsWith('.mp4') ? 'video' : 'image';
-        addItem(u, type, type === 'image' ? u : '');
-      }
-    }
-  };
-
-  // ════════════════════════════════════════════════════════════════════════════
-  // PHASE 1: Bare post URL with desktop Chrome — returns full Instagram page
-  //          HTML (1–2MB) containing complete carousel_media / sidecar JSON.
-  //          This is the MOST RELIABLE source for carousels and collab posts.
-  // ════════════════════════════════════════════════════════════════════════════
-  const bareUrls = [
-    `https://www.instagram.com/p/${shortcode}/`,
-    `https://www.instagram.com/reel/${shortcode}/`,
-  ];
-
-  for (const url of bareUrls) {
-    const html = await fetchPage(url, DESKTOP_CHROME, 20000);
-    if (html.length > 100000) { // Full page is always >100k
-      extractFromHtml(html);
-      if (items.length > 0) {
-        console.log(`📸 instaEmbed: Phase 1 success — ${items.length} item(s) from bare page`);
-        return items;
+  // ── Method 7: og:image meta tag ───────────────────────────────────────────
+  // Collab posts, sponsored posts, and some reels only expose og:image.
+  if (items.length === 0) {
+    const ogImg =
+      html.match(/<meta[^>]+property="og:image"\s+content="([^"]+)"/i) ||
+      html.match(/<meta[^>]+content="([^"]+)"[^>]+property="og:image"/i);
+    if (ogImg) {
+      const u = ogImg[1].replace(/&amp;/g, '&');
+      if (
+        u.startsWith('http') &&
+        (u.includes('cdninstagram') || u.includes('fbcdn') || u.includes('scontent'))
+      ) {
+        addItem(u, 'image', u);
       }
     }
   }
 
-  // ════════════════════════════════════════════════════════════════════════════
-  // PHASE 2: Captioned embed page — fast (~106k), works for single posts/reels.
-  //          Use mobile Safari first (standard embed UA).
-  // ════════════════════════════════════════════════════════════════════════════
-  const embedVariants = [
-    { url: `https://www.instagram.com/p/${shortcode}/embed/captioned/`,       ua: MOBILE_SAFARI },
-    { url: `https://www.instagram.com/reel/${shortcode}/embed/captioned/`,    ua: MOBILE_SAFARI },
-    { url: `https://www.instagram.com/p/${shortcode}/embed/captioned/`,       ua: DESKTOP_CHROME },
-    { url: `https://www.instagram.com/p/${shortcode}/embed/`,                 ua: MOBILE_SAFARI },
-    { url: `https://www.instagram.com/reel/${shortcode}/embed/`,              ua: MOBILE_SAFARI },
-  ];
-
-  let bestHtml = '';
-  for (const { url, ua } of embedVariants) {
-    const html = await fetchPage(url, ua, 12000);
-    if (html.length > bestHtml.length) bestHtml = html;
-    if (html.length > 50000) {
-      extractFromHtml(html);
-      if (items.length > 0) {
-        console.log(`📸 instaEmbed: Phase 2 success — ${items.length} item(s) from embed`);
-        return items;
-      }
+  // ── Method 8: Instagram/Facebook CDN <img> tags ───────────────────────────
+  if (items.length === 0) {
+    const imgTagRe =
+      /<img[^>]+src="(https?:\/\/[^"]*(?:cdninstagram\.com|fbcdn\.net)[^"]+)"/gi;
+    let it;
+    while ((it = imgTagRe.exec(html)) !== null) {
+      const u = it[1].replace(/&amp;/g, '&');
+      if (u.includes('s150x150') || u.includes('s32x32') || u.includes('emoji')) continue;
+      addItem(u, 'image', u);
     }
   }
 
-  // ════════════════════════════════════════════════════════════════════════════
-  // PHASE 3: Last resort — try bare page with other UAs, use accumulated bestHtml
-  // ════════════════════════════════════════════════════════════════════════════
-  for (const ua of [MOBILE_SAFARI, GOOGLEBOT]) {
-    for (const base of ['p', 'reel']) {
-      const html = await fetchPage(
-        `https://www.instagram.com/${base}/${shortcode}/`, ua, 20000
-      );
-      if (html.length > bestHtml.length) bestHtml = html;
+  // ── Method 9: any CDN URL with media extension anywhere in the HTML ────────
+  if (items.length === 0) {
+    const cdnRe =
+      /["'](https?:\/\/[^"']*(?:cdninstagram\.com|fbcdn\.net)[^"']+\.(?:mp4|jpg|jpeg|png|webp)[^"'?]*(?:\?[^"']*)?)['"]/gi;
+    let cm;
+    while ((cm = cdnRe.exec(html)) !== null) {
+      const u    = cm[1].replace(/&amp;/g, '&');
+      const type = u.toLowerCase().split('?')[0].endsWith('.mp4') ? 'video' : 'image';
+      addItem(u, type, type === 'image' ? u : '');
     }
   }
-
-  extractFromHtml(bestHtml);
 
   if (items.length === 0) {
-    console.error(`📸 instaEmbed DEBUG [${shortcode}] html preview:\n${bestHtml.slice(0, 3000)}`);
+    // Debug: log what Instagram actually returned so we can extend methods later
+    console.error(`📸 instaEmbed DEBUG [${shortcode}] html preview:\n${html.slice(0, 3000)}`);
     throw new Error(`instaEmbed: no media found for ${shortcode}`);
   }
 
-  console.log(`📸 instaEmbed: Phase 3 — ${items.length} item(s) for ${shortcode}`);
+  console.log(`📸 instaEmbed: ${items.length} item(s) for ${shortcode}`);
   return items;
 }
 
