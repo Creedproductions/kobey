@@ -188,45 +188,101 @@ async function scrapeInstaEmbed(igUrl) {
   if (!match) throw new Error('instaEmbed: cannot extract shortcode');
   const shortcode = match[1];
 
-  const resp = await axios.get(
+  // Multiple URL variants — collab posts, sponsored posts, and newer carousel formats
+  // often only serve usable HTML on the bare post URL or non-captioned embed.
+  const embedUrls = [
     `https://www.instagram.com/p/${shortcode}/embed/captioned/`,
-    {
-      timeout: 20000,
-      headers: {
-        'User-Agent':
-          'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) ' +
-          'AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
-        Accept:          'text/html,application/xhtml+xml,*/*;q=0.9',
-        'Accept-Language': 'en-US,en;q=0.9',
-        Referer:         'https://www.instagram.com/',
-        'Cache-Control': 'no-cache',
-      },
-    }
-  );
+    `https://www.instagram.com/p/${shortcode}/embed/`,
+    `https://www.instagram.com/reel/${shortcode}/embed/captioned/`,
+    `https://www.instagram.com/reel/${shortcode}/embed/`,
+    `https://www.instagram.com/p/${shortcode}/`,
+    `https://www.instagram.com/reel/${shortcode}/`,
+  ];
 
-  const html = typeof resp.data === 'string' ? resp.data : '';
-  if (!html || html.length < 500) throw new Error('instaEmbed: empty or too-short response');
+  const userAgents = [
+    // Mobile Safari — works for most public posts
+    'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
+    // Desktop Chrome — some collab/sponsored posts serve richer HTML to desktop
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    // Googlebot — sometimes bypasses soft login walls on public posts
+    'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)',
+  ];
 
-  const items = [];
-  const seen  = new Set();
+  let bestHtml   = '';
+  let bestLength = 0;
 
   const addItem = (url, type, thumbnail) => {
     const clean = unescape(url).replace(/&amp;/g, '&');
     if (!clean || !clean.startsWith('http') || seen.has(clean)) return;
     seen.add(clean);
-    const thumb = thumbnail ? unescape(thumbnail).replace(/&amp;/g, '&') : (type === 'image' ? clean : '');
+    const thumb = thumbnail
+      ? unescape(thumbnail).replace(/&amp;/g, '&')
+      : (type === 'image' ? clean : '');
     items.push({ url: clean, type, thumbnail: thumb });
   };
 
-  // ── Method 1: carousel (edge_sidecar_to_children) ─────────────────────────
-  // Instagram stores all carousel nodes in a JSON blob inside a <script> tag.
+  const items = [];
+  const seen  = new Set();
+
+  // ── Fetch: iterate URL/UA combos, stop as soon as we find media-rich HTML ─
+  outerLoop:
+  for (const embedUrl of embedUrls) {
+    for (const ua of userAgents) {
+      try {
+        const resp = await axios.get(embedUrl, {
+          timeout: 15000,
+          maxRedirects: 5,
+          validateStatus: (s) => s < 500,
+          headers: {
+            'User-Agent':      ua,
+            Accept:            'text/html,application/xhtml+xml,*/*;q=0.9',
+            'Accept-Language': 'en-US,en;q=0.9',
+            Referer:           'https://www.instagram.com/',
+            'Cache-Control':   'no-cache',
+            'Sec-Fetch-Dest':  'document',
+            'Sec-Fetch-Mode':  'navigate',
+            'Sec-Fetch-Site':  'none',
+          },
+        });
+
+        const html = typeof resp.data === 'string' ? resp.data : '';
+        const slug = embedUrl.replace('https://www.instagram.com', '');
+        console.log(`📸 instaEmbed: ${html.length} chars [${slug}] ua=${ua.slice(0, 30)}...`);
+
+        // Keep the largest/richest response seen so far
+        if (html.length > bestLength) {
+          bestLength = html.length;
+          bestHtml   = html;
+        }
+
+        // If this page has actual media JSON, use it immediately
+        if (
+          html.includes('video_url')    ||
+          html.includes('display_url')  ||
+          html.includes('edge_sidecar') ||
+          html.includes('playable_url')
+        ) {
+          bestHtml = html;
+          break outerLoop;
+        }
+      } catch (e) {
+        const slug = embedUrl.replace('https://www.instagram.com', '');
+        console.warn(`📸 instaEmbed fetch failed [${slug}]: ${e.message}`);
+      }
+    }
+  }
+
+  const html = bestHtml;
+  if (!html || html.length < 200) {
+    throw new Error(`instaEmbed: all fetch attempts returned empty HTML for ${shortcode}`);
+  }
+
+  // ── Method 1: full carousel (edge_sidecar_to_children JSON blob) ──────────
   const sidecarRe = /"edge_sidecar_to_children"\s*:\s*\{"edges"\s*:\s*(\[[\s\S]*?\])\}/;
   const sidecarM  = html.match(sidecarRe);
   if (sidecarM) {
     try {
-      // The JSON is JS-encoded — unescape before parsing
-      const raw   = unescape(sidecarM[1]);
-      const edges = JSON.parse(raw);
+      const edges = JSON.parse(unescape(sidecarM[1]));
       edges.forEach((edge) => {
         const node = edge.node || edge || {};
         if (node.is_video && node.video_url) {
@@ -241,53 +297,102 @@ async function scrapeInstaEmbed(igUrl) {
     }
   }
 
-  // ── Method 2: single video ─────────────────────────────────────────────────
+  // ── Method 2: video_url JSON key (single video / reel) ────────────────────
   if (items.length === 0) {
-    // Find all "video_url":"..." occurrences
-    const vidRe  = /"video_url"\s*:\s*"([^"]+)"/g;
+    const vidRe   = /"video_url"\s*:\s*"([^"]+)"/g;
     const thumbRe = /"display_url"\s*:\s*"([^"]+)"/;
-    let   vm;
-    const thumbM = html.match(thumbRe);
-    const thumb  = thumbM ? thumbM[1] : '';
-    while ((vm = vidRe.exec(html)) !== null) {
-      addItem(vm[1], 'video', thumb);
-    }
+    const thumbM  = html.match(thumbRe);
+    const thumb   = thumbM ? thumbM[1] : '';
+    let vm;
+    while ((vm = vidRe.exec(html)) !== null) addItem(vm[1], 'video', thumb);
   }
 
-  // ── Method 3: single image ────────────────────────────────────────────────
+  // ── Method 3: playable_url JSON key (alternate video key) ─────────────────
+  if (items.length === 0) {
+    const playRe  = /"playable_url"\s*:\s*"([^"]+)"/g;
+    const thumbRe = /"display_url"\s*:\s*"([^"]+)"/;
+    const thumbM  = html.match(thumbRe);
+    const thumb   = thumbM ? thumbM[1] : '';
+    let pm;
+    while ((pm = playRe.exec(html)) !== null) addItem(pm[1], 'video', thumb);
+  }
+
+  // ── Method 4: display_url JSON key (single image) ─────────────────────────
   if (items.length === 0) {
     const imgRe = /"display_url"\s*:\s*"([^"]+)"/g;
     let im;
-    while ((im = imgRe.exec(html)) !== null) {
-      addItem(im[1], 'image', im[1]);
-    }
+    while ((im = imgRe.exec(html)) !== null) addItem(im[1], 'image', im[1]);
   }
 
-  // ── Method 4: <video src="..."> tag ──────────────────────────────────────
+  // ── Method 5: <video src="..."> HTML tag ──────────────────────────────────
   if (items.length === 0) {
     const vTagRe = /<video[^>]+src="([^"]+)"/gi;
     let vt;
-    while ((vt = vTagRe.exec(html)) !== null) {
-      addItem(vt[1], 'video', '');
+    while ((vt = vTagRe.exec(html)) !== null) addItem(vt[1], 'video', '');
+  }
+
+  // ── Method 6: og:video meta tag ───────────────────────────────────────────
+  // Even completely stripped embed pages include og: tags in <head>.
+  // This is the reliable floor for any public post including sponsored ones.
+  if (items.length === 0) {
+    const ogVid =
+      html.match(/<meta[^>]+property="og:video(?::url)?"\s+content="([^"]+)"/i) ||
+      html.match(/<meta[^>]+content="([^"]+)"[^>]+property="og:video(?::url)?"/i);
+    if (ogVid) {
+      const u = ogVid[1].replace(/&amp;/g, '&');
+      if (u.startsWith('http')) addItem(u, 'video', '');
     }
   }
 
-  // ── Method 5: Instagram/Facebook CDN <img> tags ───────────────────────────
+  // ── Method 7: og:image meta tag ───────────────────────────────────────────
+  // Collab posts, sponsored posts, and some reels only expose og:image.
   if (items.length === 0) {
-    const imgTagRe = /<img[^>]+src="(https?:\/\/[^"]*(?:cdninstagram\.com|fbcdn\.net)[^"]+)"/gi;
+    const ogImg =
+      html.match(/<meta[^>]+property="og:image"\s+content="([^"]+)"/i) ||
+      html.match(/<meta[^>]+content="([^"]+)"[^>]+property="og:image"/i);
+    if (ogImg) {
+      const u = ogImg[1].replace(/&amp;/g, '&');
+      if (
+        u.startsWith('http') &&
+        (u.includes('cdninstagram') || u.includes('fbcdn') || u.includes('scontent'))
+      ) {
+        addItem(u, 'image', u);
+      }
+    }
+  }
+
+  // ── Method 8: Instagram/Facebook CDN <img> tags ───────────────────────────
+  if (items.length === 0) {
+    const imgTagRe =
+      /<img[^>]+src="(https?:\/\/[^"]*(?:cdninstagram\.com|fbcdn\.net)[^"]+)"/gi;
     let it;
     while ((it = imgTagRe.exec(html)) !== null) {
       const u = it[1].replace(/&amp;/g, '&');
-      // skip tiny avatars / emoji
       if (u.includes('s150x150') || u.includes('s32x32') || u.includes('emoji')) continue;
       addItem(u, 'image', u);
     }
   }
 
-  if (items.length === 0) throw new Error(`instaEmbed: no media found for ${shortcode}`);
+  // ── Method 9: any CDN URL with media extension anywhere in the HTML ────────
+  if (items.length === 0) {
+    const cdnRe =
+      /["'](https?:\/\/[^"']*(?:cdninstagram\.com|fbcdn\.net)[^"']+\.(?:mp4|jpg|jpeg|png|webp)[^"'?]*(?:\?[^"']*)?)['"]/gi;
+    let cm;
+    while ((cm = cdnRe.exec(html)) !== null) {
+      const u    = cm[1].replace(/&amp;/g, '&');
+      const type = u.toLowerCase().split('?')[0].endsWith('.mp4') ? 'video' : 'image';
+      addItem(u, type, type === 'image' ? u : '');
+    }
+  }
+
+  if (items.length === 0) {
+    // Debug: log what Instagram actually returned so we can extend methods later
+    console.error(`📸 instaEmbed DEBUG [${shortcode}] html preview:\n${html.slice(0, 3000)}`);
+    throw new Error(`instaEmbed: no media found for ${shortcode}`);
+  }
 
   console.log(`📸 instaEmbed: ${items.length} item(s) for ${shortcode}`);
-  return items; // [{ url, type, thumbnail }]
+  return items;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
