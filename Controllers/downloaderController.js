@@ -445,15 +445,17 @@ const normalizeMediaItem = (item, index, fallbackThumbnail = PLACEHOLDER_THUMBNA
   }
 
   // ── thumbnail ──────────────────────────────────────────────────────────────
-  // Image items: the image URL itself is the best preview — no ambiguity.
-  // Video items: use scraper thumbnail only if it actually points to a video thumbnail;
-  //              otherwise fall back to placeholder.
+  // Image items: ALWAYS use the download URL as the thumbnail.
+  // Never trust scraper-provided thumbnails for image items — igdl sets the
+  // same post cover /thumb token on every carousel item, so all previews would
+  // show item[0]'s image.  The download URL IS the image, so it is always the
+  // correct per-item preview.
+  //
+  // Video items: use scraper-supplied thumbnail only if it actually points to a
+  // video thumbnail; otherwise fall back to placeholder.
   let thumbnail;
   if (type === 'image') {
-    // For image-typed items, the media URL IS the thumbnail.
-    // Prefer any explicit thumbnail the scraper gave us, but fall back to the URL itself.
-    const rawThumb = item.thumbnail || item.cover || item.image || '';
-    thumbnail = rawThumb || url;
+    thumbnail = url;
   } else {
     const rawThumb = item.thumbnail || item.cover || item.image || '';
     thumbnail = isThumbnailValidForType(rawThumb, 'video')
