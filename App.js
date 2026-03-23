@@ -18,11 +18,9 @@ const WEB_ORIGINS = [
 const setupMiddleware = () => {
   app.use(express.json());
 
-  // The proxy-download and proxy-test routes are called by the Flutter mobile
-  // app which sends NO Origin header — a strict origin whitelist blocks it.
-  // Allow all origins for those two routes, keep the whitelist for everything else.
   app.use('/api/proxy-download', cors());
   app.use('/api/proxy-test',     cors());
+  app.use('/api/download',       cors()); // ← add this line
 
   app.use(cors({
     origin: WEB_ORIGINS,
