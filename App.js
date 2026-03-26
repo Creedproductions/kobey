@@ -8,20 +8,24 @@ const app = express();
 const PORT = config.PORT || process.env.PORT || 8000;
 const NODE_ENV = process.env.NODE_ENV || 'development';
 
-// Web app origins (for the browser-based frontend)
+// Allowed origins — Creed Motions web app + local dev
 const WEB_ORIGINS = [
-  'https://savedownloader.vercel.app',
-  'https://savedownloaderweb.vercel.app',
-  'http://localhost:5173'
+  'https://creedmotions.store',
+  'https://www.creedmotions.store',
+  'http://localhost:3000',
+  'http://localhost:5173',
 ];
 
 const setupMiddleware = () => {
   app.use(express.json());
 
+  // These routes need open CORS so the browser can call them directly
   app.use('/api/proxy-download', cors());
   app.use('/api/proxy-test',     cors());
-  app.use('/api/download',       cors()); // ← add this line
+  app.use('/api/proxy',          cors());  // used by web downloader blob streaming
+  app.use('/api/download',       cors());  // Instagram / TikTok / Facebook / Pinterest
 
+  // All other /api routes restricted to allowed origins
   app.use(cors({
     origin: WEB_ORIGINS,
     methods: ['GET', 'POST', 'OPTIONS'],
@@ -50,7 +54,7 @@ const setupRoutes = () => {
         health:        '/health',
         download:      '/api/download',
         proxyDownload: '/api/proxy-download',
-        mockVideos:    '/api/mock-videos'
+        proxy:         '/api/proxy',
       }
     });
   });
