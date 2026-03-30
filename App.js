@@ -8,7 +8,7 @@ const app = express();
 const PORT = config.PORT || process.env.PORT || 8000;
 const NODE_ENV = process.env.NODE_ENV || 'development';
 
-// Allowed origins — Creed Motions web app + local dev
+// Allowed origins for restricted routes
 const WEB_ORIGINS = [
   'https://creedmotions.store',
   'https://www.creedmotions.store',
@@ -19,13 +19,43 @@ const WEB_ORIGINS = [
 const setupMiddleware = () => {
   app.use(express.json());
 
-  // These routes need open CORS so the browser can call them directly
-  app.use('/api/proxy-download', cors());
-  app.use('/api/proxy-test',     cors());
-  app.use('/api/proxy',          cors());  // used by web downloader blob streaming
-  app.use('/api/download',       cors());  // Instagram / TikTok / Facebook / Pinterest
+  // Open CORS for every route the browser calls directly from creedmotions.store.
+  // Must be registered BEFORE the restricted cors() middleware below.
+  const openCors = cors();
+  app.use('/api/proxy-download', openCors);
+  app.use('/api/proxy-test',     openCors);
+  app.use('/api/proxy',          openCors);
+  app.use('/api/download',       openCors);
+  app.use('/api/youtube',        openCors);
+  app.use('/api/twitter',        openCors);
+  app.use('/api/reddit',         openCors);
+  app.use('/api/soundcloud',     openCors);
+  app.use('/api/dailymotion',    openCors);
+  app.use('/api/vimeo',          openCors);
+  app.use('/api/streamable',     openCors);
+  app.use('/api/tumblr',         openCors);
+  app.use('/api/snapchat',       openCors);
+  app.use('/api/douyin',         openCors);
+  app.use('/api/bilibili',       openCors);
+  app.use('/api/ok',             openCors);
+  app.use('/api/vk',             openCors);
+  app.use('/api/rumble',         openCors);
+  app.use('/api/bandcamp',       openCors);
+  app.use('/api/twitch',         openCors);
+  app.use('/api/linkedin',       openCors);
+  app.use('/api/meta',           openCors);
+  app.use('/api/tiktok',         openCors);
+  app.use('/api/pinterest',      openCors);
+  app.use('/api/threads',        openCors);
+  app.use('/api/bluesky',        openCors);
+  app.use('/api/spotify',        openCors);
+  app.use('/api/mixcloud',       openCors);
+  app.use('/api/capcut',         openCors);
+  app.use('/api/kuaishou',       openCors);
+  app.use('/api/terabox',        openCors);
+  app.use('/api/likee',          openCors);
 
-  // All other /api routes restricted to allowed origins
+  // Restrict any remaining routes to known origins
   app.use(cors({
     origin: WEB_ORIGINS,
     methods: ['GET', 'POST', 'OPTIONS'],
@@ -48,13 +78,14 @@ const setupRoutes = () => {
 
   app.get('/', (req, res) => {
     res.status(200).json({
-      message: 'Media Downloader API',
+      message: 'Media Downloader API — Creed Motions',
       status: 'running',
       endpoints: {
         health:        '/health',
         download:      '/api/download',
         proxyDownload: '/api/proxy-download',
         proxy:         '/api/proxy',
+        youtube:       '/api/youtube/download',
       }
     });
   });
@@ -63,9 +94,7 @@ const setupRoutes = () => {
 const setupErrorHandling = () => {
   process.on('uncaughtException', (error) => {
     console.error('Uncaught Exception:', error);
-    if (NODE_ENV !== 'production') {
-      process.exit(1);
-    }
+    if (NODE_ENV !== 'production') process.exit(1);
   });
 
   process.on('unhandledRejection', (reason, promise) => {
@@ -74,20 +103,14 @@ const setupErrorHandling = () => {
 
   process.on('SIGTERM', () => {
     console.log('SIGTERM received, shutting down gracefully');
-    if (server) {
-      server.close(() => { process.exit(0); });
-    } else {
-      process.exit(0);
-    }
+    if (server) server.close(() => process.exit(0));
+    else process.exit(0);
   });
 
   process.on('SIGINT', () => {
     console.log('SIGINT received, shutting down gracefully');
-    if (server) {
-      server.close(() => { process.exit(0); });
-    } else {
-      process.exit(0);
-    }
+    if (server) server.close(() => process.exit(0));
+    else process.exit(0);
   });
 };
 
@@ -97,6 +120,7 @@ const startServer = () => {
     console.log(`💡 Environment: ${NODE_ENV}`);
     console.log(`📋 Health check: http://localhost:${PORT}/health`);
     console.log(`📥 Download API: http://localhost:${PORT}/api/download`);
+    console.log(`▶️  YouTube API:  http://localhost:${PORT}/api/youtube/download`);
     console.log(`🔄 Proxy route:  http://localhost:${PORT}/api/proxy-download`);
   });
 
@@ -119,8 +143,6 @@ const initializeApp = () => {
 };
 
 let server;
-if (require.main === module) {
-  server = initializeApp();
-}
+if (require.main === module) server = initializeApp();
 
 module.exports = app;
