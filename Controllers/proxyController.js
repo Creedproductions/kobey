@@ -117,6 +117,24 @@ const guessExtFromContentType = (ct) => {
 
 // ─── Main handler ────────────────────────────────────────────────────────────
 
+const UA_TIKTOK_APP =
+  'com.zhiliaoapp.musically/2023600040 (Linux; U; Android 13; en_US; ' +
+  'Pixel 7; Build/TQ2A.230505.002.A1; Cronet/58.0.2991.0)';
+
+async function fetchUpstream(targetUrl, headers, method) {
+  return axios({
+    method,
+    url:              targetUrl,
+    headers,
+    responseType:     method === 'HEAD' ? 'arraybuffer' : 'stream',
+    timeout:          60_000,
+    maxRedirects:     10,
+    validateStatus:   (s) => s < 500,
+    maxContentLength: Infinity,
+    maxBodyLength:    Infinity,
+  });
+}
+
 const proxyDownload = async (req, res) => {
   const targetUrl = req.query.url;
   const platform  = String(req.query.platform || 'default').toLowerCase();
@@ -126,30 +144,43 @@ const proxyDownload = async (req, res) => {
     return res.status(400).json({ error: 'Missing or invalid url parameter' });
   }
 
-  console.log(`🔄 Proxy download: platform=${platform} url=${targetUrl.slice(0, 150)}`);
+  console.log(`🔄 Proxy ${reqMethod} [${platform}]: ${targetUrl.slice(0, 150)}`);
 
   // Build upstream headers — start with platform defaults, then forward any
   // Range header from the client so resumable / partial-content downloads work.
   const upstreamHeaders = { ...(HEADERS_BY_PLATFORM[platform] || HEADERS_BY_PLATFORM.default) };
-  if (req.headers.range)        upstreamHeaders.Range            = req.headers.range;
-  if (req.headers['if-range'])  upstreamHeaders['If-Range']       = req.headers['if-range'];
+  if (req.headers.range)        upstreamHeaders.Range      = req.headers.range;
+  if (req.headers['if-range'])  upstreamHeaders['If-Range'] = req.headers['if-range'];
+
+  // TikTok CDN often refuses GET without an explicit Range header. Adding a
+  // bytes=0- range is harmless for normal downloads and unblocks streaming.
+  if (platform === 'tiktok' && reqMethod === 'GET' && !upstreamHeaders.Range) {
+    upstreamHeaders.Range = 'bytes=0-';
+  }
 
   let upstream;
+  let attempt = 'primary';
   try {
-    upstream = await axios({
-      method:         reqMethod === 'HEAD' ? 'HEAD' : 'GET',
-      url:            targetUrl,
-      headers:        upstreamHeaders,
-      responseType:   reqMethod === 'HEAD' ? 'arraybuffer' : 'stream',
-      timeout:        60_000,
-      maxRedirects:   10,
-      // Surface 4xx (e.g. 403, 404) to the client instead of throwing — the
-      // app can then decide how to handle them. Only 5xx errors throw.
-      validateStatus: (s) => s < 500,
-      // Big files: don't buffer in memory
-      maxContentLength: Infinity,
-      maxBodyLength:    Infinity,
-    });
+    const httpMethod = reqMethod === 'HEAD' ? 'HEAD' : 'GET';
+    upstream = await fetchUpstream(targetUrl, upstreamHeaders, httpMethod);
+
+    // TikTok-specific recovery: if the desktop UA gets blocked (403/451/etc),
+    // retry once with the TikTok app UA. Many tikwm-derived URLs are signed
+    // for app clients and reject browser-style fetches.
+    if (
+      platform === 'tiktok' &&
+      [401, 403, 451].includes(upstream.status) &&
+      httpMethod === 'GET'
+    ) {
+      console.warn(`⚠️ tiktok primary returned ${upstream.status}, retrying with app UA`);
+      // Drain the failed stream so the connection is freed
+      if (upstream.data && typeof upstream.data.destroy === 'function') {
+        upstream.data.destroy();
+      }
+      const retryHeaders = { ...upstreamHeaders, 'User-Agent': UA_TIKTOK_APP };
+      upstream = await fetchUpstream(targetUrl, retryHeaders, httpMethod);
+      attempt = 'app-ua';
+    }
   } catch (err) {
     const upstreamStatus = err.response?.status;
     console.error(
@@ -167,6 +198,17 @@ const proxyDownload = async (req, res) => {
     return;
   }
 
+  // Always log the upstream outcome — this is critical for debugging which
+  // URLs/platforms are being rejected and why.
+  const ct       = upstream.headers['content-type']   || '';
+  const cl       = upstream.headers['content-length'] || '?';
+  console.log(
+    `   ↳ upstream ${upstream.status} [${attempt}] ct=${ct} len=${cl}`
+  );
+  if (upstream.status >= 400) {
+    console.warn(`   ↳ NON-OK status — client will see ${upstream.status}`);
+  }
+
   // Forward status + relevant headers
   res.status(upstream.status);
   for (const h of FORWARD_HEADERS) {
@@ -176,7 +218,6 @@ const proxyDownload = async (req, res) => {
 
   // Always set a sensible Content-Disposition so the client saves the file
   // with our intended name rather than the upstream's generic filename.
-  const ct       = upstream.headers['content-type'] || '';
   const ext      = guessExtFromContentType(ct);
   const fname    = safeFilename(req.query.filename, ext);
   res.setHeader('Content-Disposition', `attachment; filename="${fname}"`);

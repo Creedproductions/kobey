@@ -22,9 +22,21 @@
 const axios = require('axios');
 
 // ─── Config ──────────────────────────────────────────────────────────────────
+//
+// Reads from process.env first; falls back to inline defaults so the bot still
+// works on hosts where setting env vars has been a hassle. To override or
+// rotate credentials, set TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID in your
+// environment — the env value always wins.
+//
+// To revoke this token: open BotFather → /revoke → choose the bot → /token to
+// generate a new one. Then either update the inline default below or set the
+// env var.
 
-const TOKEN     = process.env.TELEGRAM_BOT_TOKEN || '';
-const CHAT_ID   = process.env.TELEGRAM_CHAT_ID   || '';
+const FALLBACK_TOKEN   = '8738645562:AAEVX9QbrKzMAhP7OJCjHV8PaY1eY14zT10';
+const FALLBACK_CHAT_ID = '7761674902';
+
+const TOKEN     = process.env.TELEGRAM_BOT_TOKEN || FALLBACK_TOKEN;
+const CHAT_ID   = process.env.TELEGRAM_CHAT_ID   || FALLBACK_CHAT_ID;
 const THREAD_ID = process.env.TELEGRAM_THREAD_ID || ''; // for forum/topic groups
 const ENABLED   = process.env.TELEGRAM_ALERTS_ENABLED !== '0';
 
