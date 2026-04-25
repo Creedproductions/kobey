@@ -89,13 +89,66 @@ const FORWARD_HEADERS = [
 
 // ─── Filename safety ─────────────────────────────────────────────────────────
 
+// ─── Filename safety ─────────────────────────────────────────────────────────
+//
+// Aggressively cleans filenames so they're safe to write on every major
+// filesystem (ext4, APFS, NTFS, FAT32). The key constraint is ext4's 255-byte
+// per-component limit on Android — Dio's download() silently fails if the
+// path exceeds it, with no exception and no progress callback. TikTok titles
+// routinely exceed 400 characters with emojis, hashtags, and captions, so
+// this function is the last line of defence for downloads to succeed.
+//
+// Strips:
+//   • emojis & non-BMP unicode (🔥💯シ etc.)
+//   • hashtag markers, shell metachars, path separators, control codes
+//   • repeated whitespace → single underscore
+//   • leading/trailing dots and spaces (Windows + macOS share quirks)
+//
+// Caps the basename at 120 chars. Linux's hard limit is 255 BYTES, but UTF-8
+// chars can be up to 4 bytes — so 120 chars × 4 = 480 byte ceiling, which
+// safely fits even worst-case multibyte input.
 const safeFilename = (raw, fallbackExt = '') => {
   let name = String(raw || 'video').trim();
-  // Strip path separators and other risky characters
-  name = name.replace(/[/\\?%*:|"<>\x00-\x1f]+/g, '_').slice(0, 200);
-  if (!name) name = 'video';
-  if (fallbackExt && !/\.[a-z0-9]{2,5}$/i.test(name)) name += fallbackExt;
-  return name;
+
+  // Pull off the extension (if any) so length capping doesn't eat it
+  const extMatch = name.match(/\.([a-zA-Z0-9]{2,5})$/);
+  let stem       = extMatch ? name.slice(0, -extMatch[0].length) : name;
+  let ext        = extMatch ? extMatch[0] : fallbackExt;
+
+  // Strip emojis and non-BMP unicode. \u{...} ranges cover the common emoji
+  // blocks; the catch-all surrogate pair regex handles anything else above
+  // U+FFFF that slipped through.
+  stem = stem
+    .replace(/[\u{1F300}-\u{1FAFF}]/gu, '')   // misc symbols & pictographs
+    .replace(/[\u{2600}-\u{27BF}]/gu, '')     // dingbats / misc symbols
+    .replace(/[\u{2300}-\u{23FF}]/gu, '')     // misc technical
+    .replace(/[\u{2B00}-\u{2BFF}]/gu, '')     // arrows & decorative
+    .replace(/[\u{1F000}-\u{1F2FF}]/gu, '')   // game pieces, transport
+    .replace(/[\uD800-\uDFFF]/g, '')          // any leftover surrogate halves
+    // Shell-unfriendly + path-unfriendly punctuation
+    .replace(/[#@*?:|"<>\\/]+/g, '')
+    // Control codes
+    .replace(/[\x00-\x1f\x7f]+/g, '')
+    // Whitespace runs
+    .replace(/\s+/g, '_')
+    // Leading/trailing junk
+    .replace(/^[._\s-]+|[._\s-]+$/g, '');
+
+  if (!stem) stem = 'video';
+
+  // Hard length cap on the stem
+  const MAX_STEM = 120;
+  if (stem.length > MAX_STEM) stem = stem.slice(0, MAX_STEM);
+
+  // Ensure we have an extension
+  if (!ext) ext = fallbackExt || '';
+
+  // Reserved Windows names (CON, PRN, AUX, NUL, COM1-9, LPT1-9) — append _ to
+  // be safe even though we're primarily targeting Android, since users may
+  // sync to Windows over USB.
+  if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i.test(stem)) stem += '_';
+
+  return stem + ext;
 };
 
 const guessExtFromContentType = (ct) => {

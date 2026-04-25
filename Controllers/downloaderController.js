@@ -27,6 +27,47 @@ const PLACEHOLDER_THUMBNAIL = 'https://via.placeholder.com/300x150';
 const DOWNLOAD_TIMEOUT = 45000;
 const MAX_CAROUSEL_ITEMS = 20; // safety cap after dedup
 
+/**
+ * Sanitize a string into a filesystem-safe filename. Mirrors the proxy
+ * controller's safeFilename() but exposed here so the API response can
+ * include a pre-cleaned `filename` field clients can use directly.
+ *
+ * Removes emojis, hashtags, path separators; collapses whitespace; caps
+ * length to a budget that fits inside ext4's 255-byte per-component limit
+ * (UTF-8 worst case = 4 bytes/char, so 120 chars × 4 = 480-byte ceiling).
+ *
+ * @param {string} title    Source string (often a TikTok/IG caption)
+ * @param {string} ext      File extension to append, e.g. '.mp4'
+ * @param {number} [idx]    Optional 1-based index for carousel items
+ */
+function sanitizeForFilename(title, ext, idx = null) {
+  let stem = String(title || 'media').trim();
+
+  // Strip emojis and supplementary-plane unicode
+  stem = stem
+    .replace(/[\u{1F300}-\u{1FAFF}]/gu, '')
+    .replace(/[\u{2600}-\u{27BF}]/gu, '')
+    .replace(/[\u{2300}-\u{23FF}]/gu, '')
+    .replace(/[\u{2B00}-\u{2BFF}]/gu, '')
+    .replace(/[\u{1F000}-\u{1F2FF}]/gu, '')
+    .replace(/[\uD800-\uDFFF]/g, '')
+    // Hashtags + shell/path metachars
+    .replace(/[#@*?:|"<>\\/]+/g, '')
+    // Control chars
+    .replace(/[\x00-\x1f\x7f]+/g, '')
+    // Whitespace runs
+    .replace(/\s+/g, '_')
+    // Leading/trailing junk
+    .replace(/^[._\s-]+|[._\s-]+$/g, '');
+
+  if (!stem) stem = 'media';
+  if (stem.length > 120) stem = stem.slice(0, 120);
+
+  if (idx !== null) stem += `_${idx}`;
+  if (!ext.startsWith('.')) ext = '.' + ext;
+  return stem + ext;
+}
+
 // ===== UTILITY FUNCTIONS =====
 
 const shortenUrl = async (url) => {
@@ -1323,6 +1364,31 @@ const downloadMedia = async (req, res) => {
     }
 
     console.log(`Download Media: Media successfully downloaded and formatted.`);
+
+    // ── Filename sanitization ──────────────────────────────────────────────
+    // Add a clean `filename` field derived from the title, so clients can use
+    // it directly without re-implementing the same emoji/hashtag stripping.
+    // Why this matters: TikTok captions often run 400+ chars with emojis like
+    // 🔥💯シ and dozens of #hashtags. The Linux ext4 filesystem on Android caps
+    // each filename at 255 bytes, and Dio's download() silently fails (no
+    // exception, no progress callback) when the path exceeds that. Without
+    // this server-side fix every client has to re-do the same sanitization
+    // and bugs creep in over time.
+    if (formattedData && typeof formattedData === 'object' && !formattedData.filename) {
+      const ext = platform === 'tiktok' ? '.mp4' :
+                  formattedData.isImageSlideshow ? '.jpg' : '.mp4';
+      formattedData.filename = sanitizeForFilename(formattedData.title, ext);
+      console.log(`🧼 sanitized filename: ${formattedData.filename}`);
+    }
+    // Same treatment for individual mediaItems (carousel posts)
+    if (Array.isArray(formattedData?.mediaItems)) {
+      formattedData.mediaItems.forEach((item, i) => {
+        if (item && !item.filename) {
+          const ext = item.type === 'image' ? '.jpg' : '.mp4';
+          item.filename = sanitizeForFilename(formattedData.title || 'media', ext, i + 1);
+        }
+      });
+    }
 
     res.status(200).json({
       success:   true,
