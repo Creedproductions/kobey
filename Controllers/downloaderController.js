@@ -695,8 +695,14 @@ const platformDownloaders = {
   // ─── TIKTOK ───────────────────────────────────────────────────────────────
   // Layered chain: tikwm (with retry) → ssstik → musicaldown → ttdl.
   // See Services/tiktokService.js for details.
-  async tiktok(url) {
-    return downloadWithTimeout(() => downloadTikTok(url), 35000);
+  //
+  // NOTE: req is stashed on the data object so the formatter can wrap CDN URLs
+  // in the proxy. TikTok CDN URLs are IP/region-bound and reject direct client
+  // requests — the server has to fetch them and stream to the app.
+  async tiktok(url, req) {
+    const data = await downloadWithTimeout(() => downloadTikTok(url), 35000);
+    data._req = req;
+    return data;
   },
 
   // ─── FACEBOOK ─────────────────────────────────────────────────────────────
@@ -891,10 +897,28 @@ const dataFormatters = {
   },
 
   // ─── TIKTOK ───────────────────────────────────────────────────────────────
+  // Every TikTok CDN URL is wrapped in the server's /api/proxy-download route.
+  // Direct downloads from tiktokcdn-us.com fail on mobile clients because the
+  // CDN checks IP/region and often expects a Referer header — the proxy
+  // bypasses all of that by having the server fetch and stream the file.
   tiktok(data) {
     console.log('🎵 TikTok: keys=', Object.keys(data || {}),
                 'images len=', data.images?.length ?? 0,
                 'has video=', !!(data.video), 'has audio=', !!(data.audio));
+
+    const req        = data._req || null;
+    const serverBase = req ? getServerBaseUrl(req) : '';
+    const title      = data.title || 'TikTok Post';
+
+    // Wrap any CDN URL in the proxy so the SERVER fetches it (not the client).
+    // No-op when the URL is already proxied or when we can't compute serverBase
+    // (e.g. unit tests with no req).
+    const proxy = (cdnUrl) => {
+      if (!cdnUrl) return '';
+      if (cdnUrl.includes('/api/proxy-download')) return cdnUrl;
+      if (!serverBase) return cdnUrl;
+      return wrapForProxy(cdnUrl, 'tiktok', title, serverBase);
+    };
 
     if (data.images && Array.isArray(data.images) && data.images.length > 0) {
       console.log(`🎵 TikTok: slideshow ${data.images.length} item(s)`);
@@ -910,8 +934,8 @@ const dataFormatters = {
         .map(extractUrl)
         .filter(u => u && u.startsWith('http'))
         .map((imgUrl, index) => ({
-          url:       imgUrl,
-          thumbnail: imgUrl,
+          url:       proxy(imgUrl),
+          thumbnail: imgUrl, // raw CDN URL is fine for thumbnails (just for display)
           type:      'image',
           quality:   'Original Quality',
           index,
@@ -922,11 +946,11 @@ const dataFormatters = {
       if (mediaItems.length > 0) {
         const first = mediaItems[0];
         return {
-          title:            data.title || 'TikTok Post',
+          title,
           url:              first.url,
-          thumbnail:        data.thumbnail || first.url || PLACEHOLDER_THUMBNAIL,
+          thumbnail:        data.thumbnail || first.thumbnail || PLACEHOLDER_THUMBNAIL,
           sizes:            ['Original Quality'],
-          audio:            pickBestUrl(data.audio) || '',
+          audio:            proxy(pickBestUrl(data.audio) || ''),
           source:           'tiktok',
           isImageSlideshow: true,
           ...(mediaItems.length > 1 && { mediaItems }),
@@ -938,11 +962,11 @@ const dataFormatters = {
     const bestVideoUrl = pickBestUrl(data.video);
     console.log('🎵 TikTok: video post url=', String(bestVideoUrl).slice(0, 80));
     return {
-      title:     data.title || 'Untitled Video',
-      url:       bestVideoUrl,
+      title,
+      url:       proxy(bestVideoUrl),
       thumbnail: data.thumbnail || PLACEHOLDER_THUMBNAIL,
       sizes:     ['Best Quality'],
-      audio:     pickBestUrl(data.audio) || '',
+      audio:     proxy(pickBestUrl(data.audio) || ''),
       source:    'tiktok',
     };
   },
@@ -1251,7 +1275,7 @@ const downloadMedia = async (req, res) => {
     const downloader = platformDownloaders[platform];
     if (!downloader) throw new Error(`No downloader available for platform: ${platform}`);
 
-    const data = (platform === 'youtube' || platform === 'facebook')
+    const data = (platform === 'youtube' || platform === 'facebook' || platform === 'tiktok')
       ? await downloader(processedUrl, req)
       : await downloader(processedUrl);
 

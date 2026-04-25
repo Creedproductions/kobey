@@ -424,14 +424,17 @@ async function downloadFacebook(rawUrl) {
   // Canonical first, raw as backup. Dedupe in case they're equal.
   const urls = [...new Set([canonical, rawUrl].filter(Boolean))];
 
-  // Order matters — start with the strategies that are most reliable in 2026.
+  // Order chosen from production logs:
+  //   1. metadownloader  — currently the most reliable working path
+  //   2. direct-scrape   — no external dependency, always available
+  //   3. getfvid         — sometimes 522s but recovers; keep as last resort
+  //
+  // Dropped: fdown (403 blocks), mbasic (FB stopped exposing .mp4), snapsave
+  // (endpoint 404). Add them back to this list if their status changes.
   const strategies = [
-    { name: 'getfvid',         fn: tryGetfvid         },
-    { name: 'fdown',           fn: tryFdown           },
-    { name: 'mbasic',          fn: tryMbasicScrape    },
-    { name: 'snapsave',        fn: trySnapsave        },
     { name: 'metadownloader',  fn: tryMetadownloader  },
     { name: 'direct-scrape',   fn: tryDirectScrape    },
+    { name: 'getfvid',         fn: tryGetfvid         },
   ];
 
   const errors = [];
