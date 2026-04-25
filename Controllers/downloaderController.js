@@ -981,7 +981,12 @@ const dataFormatters = {
 
     const resolveMetaUrl = (raw) => {
       if (!raw) return '';
-      if (raw.startsWith('http')) return raw;
+
+      // Always attempt JWT decode first. Both relative (/render.php?token=…)
+      // and absolute (https://d.rapidcdn.app/v2?token=…) URLs can wrap a real
+      // fbcdn URL inside a JWT — the proxy works much better against the
+      // inner fbcdn URL directly than against the rapidcdn middleman, which
+      // adds its own IP/UA checks on top of Facebook's.
       try {
         const m = raw.match(/[?&]token=([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]*)/);
         if (m) {
@@ -989,9 +994,16 @@ const dataFormatters = {
           const pad     = b64 + '='.repeat((4 - b64.length % 4) % 4);
           const payload = JSON.parse(Buffer.from(pad, 'base64').toString('utf8'));
           const realUrl = payload.video_url || payload.url || payload.u || '';
-          if (realUrl && realUrl.startsWith('http')) return realUrl;
+          if (realUrl && realUrl.startsWith('http')) {
+            console.log(`📘 FB JWT decoded → ${realUrl.slice(0, 80)}…`);
+            return realUrl;
+          }
         }
       } catch (e) { console.warn(`📘 FB JWT decode failed: ${e.message}`); }
+
+      // No JWT (or decode failed) — return absolute URLs as-is, prefix
+      // relative ones onto metadownloader.
+      if (raw.startsWith('http')) return raw;
       return `https://metadownloader.com${raw.startsWith('/') ? raw : '/' + raw}`;
     };
 

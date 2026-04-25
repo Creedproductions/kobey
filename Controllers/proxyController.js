@@ -1,158 +1,215 @@
-/**
- * proxyController.js
- *
- * GET /api/proxy-download?url=<encoded>&filename=<name>&platform=<facebook|etc>
- *
- * Fetches a CDN URL server-side (with platform-specific headers) and streams
- * the response back to the Flutter client. This bypasses Facebook/Instagram
- * CDN restrictions that block direct client downloads.
- */
+// Controllers/proxyController.js
+//
+// Server-side proxy that fetches a CDN URL and streams it to the client.
+// Why this exists:
+//   • CDNs (especially TikTok's) reject direct client requests because the IP
+//     that fetched the metadata must match the IP that downloads the bytes.
+//   • Some CDNs check Referer / User-Agent / Sec-Fetch-* headers.
+//   • Browsers can't follow cross-origin downloads with custom headers.
+//
+// The proxy receives:
+//   GET /api/proxy-download?url=<encoded>&filename=<name>&platform=<id>
+//
+// It then fetches the upstream URL with platform-specific headers, forwards
+// the upstream status + relevant headers, and streams the body to the client.
+// HEAD requests are supported (used by the Dart client to sniff Content-Type).
 
 const axios = require('axios');
 
-// Per-platform request headers to satisfy CDN origin checks
-const PLATFORM_HEADERS = {
+// ─── Platform-specific upstream headers ──────────────────────────────────────
+// Each platform's CDN expects a slightly different header signature.
+// These were derived from observing real browser requests against each CDN.
+
+const UA_DESKTOP =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
+  '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+
+const HEADERS_BY_PLATFORM = {
+  tiktok: {
+    'User-Agent':      UA_DESKTOP,
+    Referer:           'https://www.tiktok.com/',
+    Origin:            'https://www.tiktok.com',
+    Accept:            '*/*',
+    'Accept-Language': 'en-US,en;q=0.9',
+    'Sec-Fetch-Dest':  'video',
+    'Sec-Fetch-Mode':  'no-cors',
+    'Sec-Fetch-Site':  'cross-site',
+  },
   facebook: {
-    Referer:         'https://www.facebook.com/',
-    Origin:          'https://www.facebook.com',
-    'Sec-Fetch-Site': 'same-origin',
-    'Sec-Fetch-Mode': 'navigate',
-    'Sec-Fetch-Dest': 'video',
-    Accept:          'video/webm,video/ogg,video/*;q=0.9,*/*;q=0.1',
+    'User-Agent':      UA_DESKTOP,
+    Referer:           'https://www.facebook.com/',
+    Accept:            '*/*',
+    'Accept-Language': 'en-US,en;q=0.9',
   },
   instagram: {
-    Referer:         'https://www.instagram.com/',
-    Origin:          'https://www.instagram.com',
-    'Sec-Fetch-Site': 'same-origin',
-    'Sec-Fetch-Mode': 'navigate',
-    'Sec-Fetch-Dest': 'video',
-    Accept:          'video/webm,video/ogg,video/*;q=0.9,*/*;q=0.1',
+    'User-Agent':      UA_DESKTOP,
+    Referer:           'https://www.instagram.com/',
+    Accept:            '*/*',
+    'Accept-Language': 'en-US,en;q=0.9',
   },
-  tiktok: {
-    Referer: 'https://www.tiktok.com/',
+  threads: {
+    'User-Agent':      UA_DESKTOP,
+    Referer:           'https://www.threads.com/',
+    Accept:            '*/*',
+  },
+  twitter: {
+    'User-Agent':      UA_DESKTOP,
+    Referer:           'https://twitter.com/',
+    Accept:            '*/*',
+  },
+  pinterest: {
+    'User-Agent':      UA_DESKTOP,
+    Referer:           'https://www.pinterest.com/',
+  },
+  youtube: {
+    'User-Agent':      UA_DESKTOP,
+    Referer:           'https://www.youtube.com/',
+  },
+  linkedin: {
+    'User-Agent':      UA_DESKTOP,
+    Referer:           'https://www.linkedin.com/',
   },
   default: {
-    Accept: '*/*',
+    'User-Agent':      UA_DESKTOP,
+    Accept:            '*/*',
   },
 };
 
-const COMMON_HEADERS = {
-  'User-Agent':
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
-    '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-  'Accept-Language':   'en-US,en;q=0.9',
-  'Accept-Encoding':   'identity', // tell CDN not to compress — we stream raw bytes
-  Connection:          'keep-alive',
-  'Cache-Control':     'no-cache',
+// Headers we forward from upstream → client. Anything not in this list is
+// dropped to keep the response clean (e.g. Set-Cookie from upstream is junk).
+const FORWARD_HEADERS = [
+  'content-type',
+  'content-length',
+  'content-range',
+  'accept-ranges',
+  'last-modified',
+  'etag',
+  'cache-control',
+];
+
+// ─── Filename safety ─────────────────────────────────────────────────────────
+
+const safeFilename = (raw, fallbackExt = '') => {
+  let name = String(raw || 'video').trim();
+  // Strip path separators and other risky characters
+  name = name.replace(/[/\\?%*:|"<>\x00-\x1f]+/g, '_').slice(0, 200);
+  if (!name) name = 'video';
+  if (fallbackExt && !/\.[a-z0-9]{2,5}$/i.test(name)) name += fallbackExt;
+  return name;
 };
 
-// Guess a filename extension from content-type
-function extFromContentType(ct) {
-  if (!ct) return 'mp4';
-  if (ct.includes('mp4'))  return 'mp4';
-  if (ct.includes('webm')) return 'webm';
-  if (ct.includes('ogg'))  return 'ogg';
-  if (ct.includes('jpeg') || ct.includes('jpg')) return 'jpg';
-  if (ct.includes('png'))  return 'png';
-  if (ct.includes('gif'))  return 'gif';
-  if (ct.includes('webp')) return 'webp';
-  if (ct.includes('mp3') || ct.includes('mpeg')) return 'mp3';
-  if (ct.includes('m4a') || ct.includes('aac'))  return 'm4a';
-  return 'mp4';
-}
+const guessExtFromContentType = (ct) => {
+  if (!ct) return '';
+  const c = ct.toLowerCase();
+  if (c.includes('mp4'))      return '.mp4';
+  if (c.includes('webm'))     return '.webm';
+  if (c.includes('quicktime')) return '.mov';
+  if (c.includes('mpegurl'))  return '.m3u8';
+  if (c.includes('mp3') || c.includes('mpeg-audio')) return '.mp3';
+  if (c.includes('aac'))      return '.m4a';
+  if (c.includes('audio/mp4')) return '.m4a';
+  if (c.includes('jpeg'))     return '.jpg';
+  if (c.includes('png'))      return '.png';
+  if (c.includes('webp'))     return '.webp';
+  if (c.includes('gif'))      return '.gif';
+  return '';
+};
+
+// ─── Main handler ────────────────────────────────────────────────────────────
 
 const proxyDownload = async (req, res) => {
-  const { url, filename, platform } = req.query;
+  const targetUrl = req.query.url;
+  const platform  = String(req.query.platform || 'default').toLowerCase();
+  const reqMethod = (req.method || 'GET').toUpperCase();
 
-  if (!url) {
-    return res.status(400).json({ error: 'Missing url parameter', success: false });
+  if (!targetUrl || typeof targetUrl !== 'string' || !targetUrl.startsWith('http')) {
+    return res.status(400).json({ error: 'Missing or invalid url parameter' });
   }
 
-  let decodedUrl;
+  console.log(`🔄 Proxy download: platform=${platform} url=${targetUrl.slice(0, 150)}`);
+
+  // Build upstream headers — start with platform defaults, then forward any
+  // Range header from the client so resumable / partial-content downloads work.
+  const upstreamHeaders = { ...(HEADERS_BY_PLATFORM[platform] || HEADERS_BY_PLATFORM.default) };
+  if (req.headers.range)        upstreamHeaders.Range            = req.headers.range;
+  if (req.headers['if-range'])  upstreamHeaders['If-Range']       = req.headers['if-range'];
+
+  let upstream;
   try {
-    decodedUrl = decodeURIComponent(url);
-    new URL(decodedUrl); // validate
-  } catch (_) {
-    return res.status(400).json({ error: 'Invalid url parameter', success: false });
-  }
-
-  console.log(`🔄 Proxy download: platform=${platform || 'default'} url=${decodedUrl.slice(0, 120)}`);
-
-  const platformKey = (platform || '').toLowerCase();
-  const extraHeaders = PLATFORM_HEADERS[platformKey] || PLATFORM_HEADERS.default;
-  const headers = { ...COMMON_HEADERS, ...extraHeaders };
-
-  try {
-    // Support range requests so Flutter's http client can resume / seek
-    if (req.headers.range) {
-      headers.Range = req.headers.range;
-    }
-
-    const upstream = await axios.get(decodedUrl, {
-      responseType:   'stream',
+    upstream = await axios({
+      method:         reqMethod === 'HEAD' ? 'HEAD' : 'GET',
+      url:            targetUrl,
+      headers:        upstreamHeaders,
+      responseType:   reqMethod === 'HEAD' ? 'arraybuffer' : 'stream',
       timeout:        60_000,
       maxRedirects:   10,
-      headers,
-      validateStatus: (s) => s < 500, // pass 206 partial content through
+      // Surface 4xx (e.g. 403, 404) to the client instead of throwing — the
+      // app can then decide how to handle them. Only 5xx errors throw.
+      validateStatus: (s) => s < 500,
+      // Big files: don't buffer in memory
+      maxContentLength: Infinity,
+      maxBodyLength:    Infinity,
     });
-
-    const contentType   = upstream.headers['content-type']   || 'video/mp4';
-    const contentLength = upstream.headers['content-length'] || '';
-    const accept_ranges = upstream.headers['accept-ranges']  || 'bytes';
-
-    // Derive filename
-    const ext     = extFromContentType(contentType);
-    const dlName  = filename
-      ? (filename.endsWith(`.${ext}`) ? filename : `${filename}.${ext}`)
-      : `video.${ext}`;
-
-    // ── headers to client ──────────────────────────────────────────────────
-    res.setHeader('Content-Type',        contentType);
-    res.setHeader('Content-Disposition', `attachment; filename="${dlName}"`);
-    res.setHeader('Accept-Ranges',       accept_ranges);
-    res.setHeader('Cache-Control',       'no-cache, no-store');
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('X-Proxy-Platform',    platformKey || 'unknown');
-
-    if (contentLength) {
-      res.setHeader('Content-Length', contentLength);
-    }
-
-    // Pass through 206 Partial Content for range requests
-    const statusCode = upstream.status === 206 ? 206 : 200;
-    if (upstream.status === 206 && upstream.headers['content-range']) {
-      res.setHeader('Content-Range', upstream.headers['content-range']);
-    }
-
-    res.status(statusCode);
-
-    // ── stream ─────────────────────────────────────────────────────────────
-    upstream.data.pipe(res);
-
-    upstream.data.on('error', (err) => {
-      console.error(`🔄 Proxy stream error: ${err.message}`);
-      if (!res.headersSent) {
-        res.status(500).json({ error: 'Stream error', details: err.message });
-      } else {
-        res.end();
-      }
-    });
-
-    req.on('close', () => {
-      // Client disconnected — destroy upstream to free the connection
-      upstream.data.destroy();
-    });
-
   } catch (err) {
-    console.error(`🔄 Proxy download error: ${err.message}`);
+    const upstreamStatus = err.response?.status;
+    console.error(
+      `❌ Proxy upstream failed [${platform}]: ${err.message}` +
+      (upstreamStatus ? ` (status ${upstreamStatus})` : '')
+    );
     if (!res.headersSent) {
-      res.status(502).json({
-        error:   'Proxy fetch failed',
-        details: err.message,
-        success: false,
+      res.status(upstreamStatus || 502).json({
+        error:    'Proxy fetch failed',
+        details:  err.message,
+        platform,
+        upstream: upstreamStatus || null,
       });
     }
+    return;
   }
+
+  // Forward status + relevant headers
+  res.status(upstream.status);
+  for (const h of FORWARD_HEADERS) {
+    const v = upstream.headers[h];
+    if (v) res.setHeader(h, v);
+  }
+
+  // Always set a sensible Content-Disposition so the client saves the file
+  // with our intended name rather than the upstream's generic filename.
+  const ct       = upstream.headers['content-type'] || '';
+  const ext      = guessExtFromContentType(ct);
+  const fname    = safeFilename(req.query.filename, ext);
+  res.setHeader('Content-Disposition', `attachment; filename="${fname}"`);
+
+  // CORS — open by default since this is a download endpoint
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Expose-Headers',
+    'Content-Length, Content-Range, Accept-Ranges, Content-Disposition, Content-Type');
+
+  // HEAD: status + headers only, no body
+  if (reqMethod === 'HEAD') {
+    res.end();
+    return;
+  }
+
+  // GET: pipe the stream to the client. Handle disconnects + upstream errors.
+  upstream.data.on('error', (err) => {
+    console.error(`❌ Proxy stream error [${platform}]: ${err.message}`);
+    if (!res.headersSent) {
+      res.status(502).json({ error: 'Stream error', details: err.message });
+    } else {
+      res.destroy(err);
+    }
+  });
+
+  req.on('close', () => {
+    // Client disconnected — kill the upstream so we stop wasting bandwidth.
+    if (upstream.data && typeof upstream.data.destroy === 'function') {
+      upstream.data.destroy();
+    }
+  });
+
+  upstream.data.pipe(res);
 };
 
 module.exports = { proxyDownload };
