@@ -149,14 +149,9 @@ const proxyDownload = async (req, res) => {
   // Build upstream headers — start with platform defaults, then forward any
   // Range header from the client so resumable / partial-content downloads work.
   const upstreamHeaders = { ...(HEADERS_BY_PLATFORM[platform] || HEADERS_BY_PLATFORM.default) };
-  if (req.headers.range)        upstreamHeaders.Range      = req.headers.range;
-  if (req.headers['if-range'])  upstreamHeaders['If-Range'] = req.headers['if-range'];
-
-  // TikTok CDN often refuses GET without an explicit Range header. Adding a
-  // bytes=0- range is harmless for normal downloads and unblocks streaming.
-  if (platform === 'tiktok' && reqMethod === 'GET' && !upstreamHeaders.Range) {
-    upstreamHeaders.Range = 'bytes=0-';
-  }
+  const clientSentRange = !!req.headers.range;
+  if (clientSentRange)             upstreamHeaders.Range      = req.headers.range;
+  if (req.headers['if-range'])     upstreamHeaders['If-Range'] = req.headers['if-range'];
 
   let upstream;
   let attempt = 'primary';
@@ -200,18 +195,30 @@ const proxyDownload = async (req, res) => {
 
   // Always log the upstream outcome — this is critical for debugging which
   // URLs/platforms are being rejected and why.
-  const ct       = upstream.headers['content-type']   || '';
-  const cl       = upstream.headers['content-length'] || '?';
+  const ct  = upstream.headers['content-type']    || '';
+  const cl  = upstream.headers['content-length']  || '?';
+  const cr  = upstream.headers['content-range']   || '';
   console.log(
-    `   ↳ upstream ${upstream.status} [${attempt}] ct=${ct} len=${cl}`
+    `   ↳ upstream ${upstream.status} [${attempt}] ct=${ct} len=${cl}${cr ? ` range=${cr}` : ''}`
   );
   if (upstream.status >= 400) {
     console.warn(`   ↳ NON-OK status — client will see ${upstream.status}`);
   }
 
-  // Forward status + relevant headers
-  res.status(upstream.status);
+  // Status normalization: if the client didn't request a Range but the
+  // upstream returned 206, present it to the client as a normal 200. Some
+  // HTTP clients (notably Dio's download method) get confused by 206
+  // responses they didn't ask for — they may treat the body as a partial
+  // chunk and either truncate the file or trigger retry storms. Stripping
+  // Content-Range here keeps the response shape consistent with a plain GET.
+  if (!clientSentRange && upstream.status === 206) {
+    res.status(200);
+  } else {
+    res.status(upstream.status);
+  }
+
   for (const h of FORWARD_HEADERS) {
+    if (h === 'content-range' && !clientSentRange) continue; // see comment above
     const v = upstream.headers[h];
     if (v) res.setHeader(h, v);
   }
