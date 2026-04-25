@@ -16,7 +16,7 @@ function decodeMergeUrl(mergeUrl, serverBaseUrl, title = '') {
   
   return mergeUrl;
 }
-
+ 
 function convertMergeUrls(formats, serverBaseUrl, title = '') {
   if (!formats || !Array.isArray(formats)) return formats;
   
