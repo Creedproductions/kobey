@@ -12,6 +12,8 @@ const fetchLinkedinData = require('../Services/linkedinService');
 const facebookInsta = require('../Services/facebookInstaService');
 const { downloadTwmateData } = require('../Services/twitterService');
 const { fetchYouTubeData } = require('../Services/youtubeService');
+const { downloadTikTok } = require('../Services/tiktokService');
+const telegram = require('../Services/telegramService');
 
 const bitly = new BitlyClient(config.BITLY_ACCESS_TOKEN);
 
@@ -691,45 +693,10 @@ const platformDownloaders = {
   },
 
   // ─── TIKTOK ───────────────────────────────────────────────────────────────
+  // Layered chain: tikwm (with retry) → ssstik → musicaldown → ttdl.
+  // See Services/tiktokService.js for details.
   async tiktok(url) {
-    try {
-      const resp = await downloadWithTimeout(async () => {
-        const r = await axios.post(
-          'https://www.tikwm.com/api/',
-          new URLSearchParams({ url, hd: '1' }).toString(),
-          {
-            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-            timeout: 20000,
-          }
-        );
-        return r.data;
-      }, 25000);
-
-      if (resp && resp.code === 0 && resp.data) {
-        const d = resp.data;
-        console.log('🎵 tikwm OK — has images:', !!(d.images?.length), 'has play:', !!(d.play));
-        return {
-          title:     d.title || d.author?.nickname || 'TikTok Post',
-          thumbnail: d.cover || d.origin_cover || '',
-          video:     d.play   ? [d.play]   : (d.wmplay ? [d.wmplay] : []),
-          audio:     d.music  ? [d.music]  : [],
-          ...(d.images && d.images.length > 0 && {
-            images: d.images
-              .map(img => typeof img === 'string' ? img : (img?.url || img?.download || ''))
-              .filter(u => u && u.startsWith('http')),
-          }),
-        };
-      }
-      console.warn('🎵 tikwm returned unexpected shape, falling back to ttdl');
-    } catch (e) {
-      console.warn('🎵 tikwm failed:', e.message, '— falling back to ttdl');
-    }
-
-    const data = await downloadWithTimeout(() => ttdl(url));
-    if (!data || (!data.video && !data.images)) {
-      throw new Error('TikTok: both tikwm and ttdl failed to return usable data');
-    }
-    return data;
+    return downloadWithTimeout(() => downloadTikTok(url), 35000);
   },
 
   // ─── FACEBOOK ─────────────────────────────────────────────────────────────
@@ -1343,6 +1310,12 @@ const downloadMedia = async (req, res) => {
     console.error(`Download Media: Error occurred - ${error.message}`);
     console.error('Error stack:', error.stack);
 
+    const failedPlatform = identifyPlatform(url) || 'unknown';
+
+    // Fire-and-forget Telegram alert. The service handles dedup + rate-limit
+    // internally and will never throw, so we don't await or try/catch here.
+    telegram.notifyDownloadFailure(failedPlatform, url, error).catch(() => {});
+
     let statusCode = 500;
     if (error.message.includes('not available') || error.message.includes('not found')) statusCode = 404;
     else if (error.message.includes('forbidden') || error.message.includes('access'))   statusCode = 403;
@@ -1352,9 +1325,9 @@ const downloadMedia = async (req, res) => {
       error:       'Failed to download media',
       success:     false,
       details:     error.message,
-      platform:    identifyPlatform(url) || 'unknown',
+      platform:    failedPlatform,
       timestamp:   new Date().toISOString(),
-      suggestions: getErrorSuggestions(error.message, identifyPlatform(url))
+      suggestions: getErrorSuggestions(error.message, failedPlatform)
     });
   }
 };

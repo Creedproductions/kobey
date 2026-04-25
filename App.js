@@ -1,7 +1,10 @@
+require('dotenv').config();
+
 const express = require('express');
 const cors = require('cors');
 const downloaderRoutes = require('./Routes/downloaderRoutes');
 const config = require('./Config/config');
+const telegram = require('./Services/telegramService');
 
 const app = express();
 
@@ -122,6 +125,10 @@ const startServer = () => {
     console.log(`📥 Download API: http://localhost:${PORT}/api/download`);
     console.log(`▶️  YouTube API:  http://localhost:${PORT}/api/youtube/download`);
     console.log(`🔄 Proxy route:  http://localhost:${PORT}/api/proxy-download`);
+
+    // Confirm Telegram alerts are wired up. notifyStartup() is silent on
+    // failure, so a missing token won't crash the process.
+    telegram.notifyStartup({ port: PORT }).catch(() => {});
   });
 
   server.on('error', (error) => {
