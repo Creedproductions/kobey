@@ -126,12 +126,17 @@ async function fetchUpstream(targetUrl, headers, method) {
     method,
     url:              targetUrl,
     headers,
-    responseType:     method === 'HEAD' ? 'arraybuffer' : 'stream',
-    timeout:          60_000,
+    // Buffer the entire body before resolving. This eliminates streaming
+    // race conditions (premature close, mid-flight header issues) that
+    // some hosting platforms — Render in particular — exhibit with
+    // piped responses. The 100 MB cap is plenty for TikTok / IG / FB
+    // videos and prevents runaway memory on huge files.
+    responseType:     'arraybuffer',
+    timeout:          90_000,
     maxRedirects:     10,
     validateStatus:   (s) => s < 500,
-    maxContentLength: Infinity,
-    maxBodyLength:    Infinity,
+    maxContentLength: 100 * 1024 * 1024,
+    maxBodyLength:    100 * 1024 * 1024,
   });
 }
 
@@ -144,7 +149,7 @@ const proxyDownload = async (req, res) => {
     return res.status(400).json({ error: 'Missing or invalid url parameter' });
   }
 
-  console.log(`🔄 Proxy ${reqMethod} [${platform}]: ${targetUrl.slice(0, 150)}`);
+  console.log(`🔄 Proxy ${reqMethod} [${platform}]: ${targetUrl.slice(0, 250)}`);
 
   // Build upstream headers — start with platform defaults, then forward any
   // Range header from the client so resumable / partial-content downloads work.
@@ -240,24 +245,31 @@ const proxyDownload = async (req, res) => {
     return;
   }
 
-  // GET: pipe the stream to the client. Handle disconnects + upstream errors.
-  upstream.data.on('error', (err) => {
-    console.error(`❌ Proxy stream error [${platform}]: ${err.message}`);
+  // GET: send the buffered body in one shot. upstream.data is already a
+  // Buffer (because of responseType: 'arraybuffer'), so this is reliable
+  // and bypasses any platform-level stream mangling.
+  try {
+    const body     = Buffer.from(upstream.data);
+    const expected = Number(upstream.headers['content-length']) || 0;
+    const ok       = !expected || body.length === expected;
+
+    console.log(
+      `   ↳ sending ${body.length}/${expected || '?'} bytes to client ` +
+      `${ok ? '✓' : '⚠ MISMATCH (upstream sent fewer bytes than Content-Length advertised)'}`
+    );
+
+    // Re-set Content-Length to the actual byte count we have. Otherwise the
+    // client sits waiting for bytes that will never arrive and eventually
+    // times out / retries. This is the fix for upstream CDNs that lie about
+    // size and close the connection early.
+    res.setHeader('Content-Length', body.length.toString());
+    res.end(body);
+  } catch (err) {
+    console.error(`❌ Proxy send failed [${platform}]: ${err.message}`);
     if (!res.headersSent) {
-      res.status(502).json({ error: 'Stream error', details: err.message });
-    } else {
-      res.destroy(err);
+      res.status(502).json({ error: 'Send failed', details: err.message });
     }
-  });
-
-  req.on('close', () => {
-    // Client disconnected — kill the upstream so we stop wasting bandwidth.
-    if (upstream.data && typeof upstream.data.destroy === 'function') {
-      upstream.data.destroy();
-    }
-  });
-
-  upstream.data.pipe(res);
+  }
 };
 
 module.exports = { proxyDownload };
