@@ -40,25 +40,36 @@ const MAX_CAROUSEL_ITEMS = 20; // safety cap after dedup
  * @param {string} ext      File extension to append, e.g. '.mp4'
  * @param {number} [idx]    Optional 1-based index for carousel items
  */
+/**
+ * Sanitize a string into a filesystem-safe filename. Mirrors the proxy
+ * controller's safeFilename() but exposed here so the API response can
+ * include a pre-cleaned `filename` field clients can use directly.
+ *
+ * WHITELIST APPROACH: only keeps ASCII letters/digits/dashes/dots/underscores
+ * /parens. Everything else (emojis, CJK, exotic Unicode, hashtags, shell
+ * metachars, control codes) is stripped.
+ *
+ * Why whitelist not blacklist: TikTok titles contain a wild assortment of
+ * Unicode that earlier regexes kept missing — Katakana シ (U+30B7), various
+ * dingbats, future emoji blocks. Whitelisting means future platform changes
+ * can't sneak past us. The key constraint is ext4's 255-byte per-component
+ * filename limit on Android — Dio's download() silently fails (no exception,
+ * no progress callback) when the path exceeds that. A clean ASCII filename
+ * is one byte per char, so 120 chars × 1 byte fits easily.
+ *
+ * @param {string} title    Source string (often a TikTok/IG caption)
+ * @param {string} ext      File extension to append, e.g. '.mp4'
+ * @param {number} [idx]    Optional 1-based index for carousel items
+ */
 function sanitizeForFilename(title, ext, idx = null) {
   let stem = String(title || 'media').trim();
 
-  // Strip emojis and supplementary-plane unicode
-  stem = stem
-    .replace(/[\u{1F300}-\u{1FAFF}]/gu, '')
-    .replace(/[\u{2600}-\u{27BF}]/gu, '')
-    .replace(/[\u{2300}-\u{23FF}]/gu, '')
-    .replace(/[\u{2B00}-\u{2BFF}]/gu, '')
-    .replace(/[\u{1F000}-\u{1F2FF}]/gu, '')
-    .replace(/[\uD800-\uDFFF]/g, '')
-    // Hashtags + shell/path metachars
-    .replace(/[#@*?:|"<>\\/]+/g, '')
-    // Control chars
-    .replace(/[\x00-\x1f\x7f]+/g, '')
-    // Whitespace runs
-    .replace(/\s+/g, '_')
-    // Leading/trailing junk
-    .replace(/^[._\s-]+|[._\s-]+$/g, '');
+  // Whitelist: keep only ASCII letters, digits, basic punctuation, whitespace
+  stem = stem.replace(/[^\w\s.\-()]/g, '');
+  // Collapse whitespace runs to a single underscore
+  stem = stem.replace(/\s+/g, '_');
+  // Trim leading/trailing junk
+  stem = stem.replace(/^[._\s-]+|[._\s-]+$/g, '');
 
   if (!stem) stem = 'media';
   if (stem.length > 120) stem = stem.slice(0, 120);
@@ -1378,24 +1389,65 @@ const downloadMedia = async (req, res) => {
     // ── Filename sanitization ──────────────────────────────────────────────
     // Add a clean `filename` field derived from the title, so clients can use
     // it directly without re-implementing the same emoji/hashtag stripping.
+    //
     // Why this matters: TikTok captions often run 400+ chars with emojis like
     // 🔥💯シ and dozens of #hashtags. The Linux ext4 filesystem on Android caps
     // each filename at 255 bytes, and Dio's download() silently fails (no
     // exception, no progress callback) when the path exceeds that. Without
     // this server-side fix every client has to re-do the same sanitization
     // and bugs creep in over time.
-    if (formattedData && typeof formattedData === 'object' && !formattedData.filename) {
+    //
+    // We sanitize THREE fields:
+    //   1. `filename`  — primary clean field for the file write
+    //   2. `title`     — also sanitized, because the deployed Dart code falls
+    //                    back to title when filename isn't picked correctly.
+    //                    UI doesn't display titles for downloads, so this is
+    //                    safe. Original raw title preserved as `rawTitle`
+    //                    for any client that needs it for display.
+    //   3. mediaItems[].filename — same treatment for carousel items
+    //
+    // ALWAYS sanitize — never skip even if upstream set a filename, because
+    // upstream may have set it to the raw title (dirty). Re-sanitizing
+    // already-clean input is a safe no-op.
+    if (formattedData && typeof formattedData === 'object') {
       const ext = platform === 'tiktok' ? '.mp4' :
                   formattedData.isImageSlideshow ? '.jpg' : '.mp4';
-      formattedData.filename = sanitizeForFilename(formattedData.title, ext);
+
+      // Preserve the original rich title in case any client wants it for
+      // display (e.g. captions, share text, etc.)
+      if (formattedData.title) {
+        formattedData.rawTitle = formattedData.title;
+      }
+
+      // Source for the filename: prefer existing filename if set, fall back to title
+      const source = formattedData.filename || formattedData.title;
+      formattedData.filename = sanitizeForFilename(source, ext);
+
+      // Replace the title with the sanitized basename (no extension) so
+      // any Dart code that builds `${title}.mp4` for a path will still get
+      // a safe ASCII filename. The .mp4 extension gets re-added by the
+      // download code based on Content-Type.
+      const cleanStem = formattedData.filename.replace(/\.[a-z0-9]{2,5}$/i, '');
+      formattedData.title = cleanStem;
+
       console.log(`🧼 sanitized filename: ${formattedData.filename}`);
+      console.log(`🧼 sanitized title:    ${formattedData.title}`);
     }
-    // Same treatment for individual mediaItems (carousel posts)
+
+    // Same treatment for individual mediaItems (carousel posts) — always
+    // re-sanitize, even if upstream set a filename.
     if (Array.isArray(formattedData?.mediaItems)) {
       formattedData.mediaItems.forEach((item, i) => {
-        if (item && !item.filename) {
+        if (item) {
           const ext = item.type === 'image' ? '.jpg' : '.mp4';
-          item.filename = sanitizeForFilename(formattedData.title || 'media', ext, i + 1);
+          // For carousel: use item's own title if set, else parent title, else 'media'
+          const source = item.filename || item.title || formattedData.rawTitle || 'media';
+          item.filename = sanitizeForFilename(source, ext, i + 1);
+          // Sanitize item.title too if it exists
+          if (item.title) {
+            item.rawTitle = item.title;
+            item.title = item.filename.replace(/\.[a-z0-9]{2,5}$/i, '');
+          }
         }
       });
     }
