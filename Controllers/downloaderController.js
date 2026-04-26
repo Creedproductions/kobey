@@ -151,7 +151,17 @@ function getServerBaseUrl(req) {
 
 function wrapForProxy(cdnUrl, platform, title, serverBaseUrl) {
   if (!cdnUrl) return cdnUrl;
-  const encoded  = encodeURIComponent(cdnUrl);
+  // Repair any malformed CDN URLs before encoding. tikwm sometimes returns
+  // URLs with double ampersands, trailing fragments, and other artifacts
+  // that some HTTP clients normalize differently — leading to signature
+  // mismatches when the upstream verifies the URL. Clean here once.
+  let cleanUrl = String(cdnUrl)
+    .replace(/&{2,}/g, '&')
+    .replace(/[?&]+$/, '');
+  const hashIdx = cleanUrl.indexOf('#');
+  if (hashIdx !== -1) cleanUrl = cleanUrl.slice(0, hashIdx);
+
+  const encoded  = encodeURIComponent(cleanUrl);
   const safeName = encodeURIComponent((title || 'video').replace(/[^a-zA-Z0-9_\- ]/g, '').trim() || 'video');
   return `${serverBaseUrl}/api/proxy-download?url=${encoded}&filename=${safeName}&platform=${platform}`;
 }
@@ -1378,6 +1388,81 @@ const downloadMedia = async (req, res) => {
       const ext = platform === 'tiktok' ? '.mp4' :
                   formattedData.isImageSlideshow ? '.jpg' : '.mp4';
       formattedData.filename = sanitizeForFilename(formattedData.title, ext);
+      console.log(`🧼 sanitized filename: ${formattedData.filename}`);
+    }
+    // Same treatment for individual mediaItems (carousel posts)
+    if (Array.isArray(formattedData?.mediaItems)) {
+      formattedData.mediaItems.forEach((item, i) => {
+        if (item && !item.filename) {
+          const ext = item.type === 'image' ? '.jpg' : '.mp4';
+          item.filename = sanitizeForFilename(formattedData.title || 'media', ext, i + 1);
+        }
+      });
+    }
+
+    res.status(200).json({
+      success:   true,
+      data:      formattedData,
+      platform:  platform,
+      timestamp: new Date().toISOString(),
+      debug: {
+        originalUrl:      url,
+        cleanedUrl:       cleanedUrl,
+        processedUrl:     processedUrl,
+        hasValidUrl:      !!formattedData.url,
+        finalUrlLength:   formattedData.url ? formattedData.url.length : 0,
+        hasMultipleItems: hasMultiple,
+        mediaItemsCount:  formattedData.mediaItems?.length || 1,
+        hasFormats:       !!formattedData.formats,
+        formatsCount:     formattedData.formats?.length || 0,
+      }
+    });
+
+  } catch (error) {
+    console.error(`Download Media: Error occurred - ${error.message}`);
+    console.error('Error stack:', error.stack);
+
+    const failedPlatform = identifyPlatform(url) || 'unknown';
+
+    // Fire-and-forget Telegram alert. The service handles dedup + rate-limit
+    // internally and will never throw, so we don't await or try/catch here.
+    telegram.notifyDownloadFailure(failedPlatform, url, error).catch(() => {});
+
+    let statusCode = 500;
+    if (error.message.includes('not available') || error.message.includes('not found')) statusCode = 404;
+    else if (error.message.includes('forbidden') || error.message.includes('access'))   statusCode = 403;
+    else if (error.message.includes('timeout'))                                           statusCode = 408;
+
+    res.status(statusCode).json({
+      error:       'Failed to download media',
+      success:     false,
+      details:     error.message,
+      platform:    failedPlatform,
+      timestamp:   new Date().toISOString(),
+      suggestions: getErrorSuggestions(error.message, failedPlatform)
+    });
+  }
+};
+
+const getErrorSuggestions = (errorMessage, platform) => {
+  const suggestions = [];
+  if (platform === 'instagram') {
+    suggestions.push('Ensure the post is public and not from a private account');
+    suggestions.push('Stories and highlights are not supported — only posts and reels');
+    suggestions.push('Some sponsored/ad posts cannot be downloaded');
+  }
+  if (platform === 'threads') {
+    suggestions.push('Ensure the Threads post contains video content (not just images or text)');
+    suggestions.push('Check if the post is public and not deleted');
+  }
+  if (platform === 'youtube' && errorMessage.includes('timeout')) {
+    suggestions.push('YouTube videos may take longer to process — please try again');
+    suggestions.push('Check your frontend code to ensure it waits for the full response');
+  }
+  return suggestions;
+};
+
+module.exports = { downloadMedia };tizeForFilename(formattedData.title, ext);
       console.log(`🧼 sanitized filename: ${formattedData.filename}`);
     }
     // Same treatment for individual mediaItems (carousel posts)

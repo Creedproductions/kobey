@@ -254,9 +254,72 @@ async function tryTtdl(url) {
   };
 }
 
+// ─── URL resolution for short URLs ───────────────────────────────────────────
+//
+// vm.tiktok.com / vt.tiktok.com URLs are short redirects — tikwm and ssstik
+// often fail to parse them directly with "Url parsing is failed!". We follow
+// the redirect first to get the canonical tiktok.com/@user/video/<id> URL
+// that all scrapers handle reliably.
+
+const SHORT_URL_HOSTS = ['vm.tiktok.com', 'vt.tiktok.com'];
+
+async function resolveShortUrl(url) {
+  let host = '';
+  try { host = new URL(url).hostname; } catch (_) { return url; }
+  if (!SHORT_URL_HOSTS.includes(host)) return url;
+
+  try {
+    const resp = await axios.head(url, {
+      timeout:        10000,
+      maxRedirects:   10,
+      validateStatus: () => true,
+      headers:        { 'User-Agent': UA_DESKTOP },
+    });
+    const final = resp.request?.res?.responseUrl ||
+                  resp.request?.responseURL      ||
+                  (resp.config?.url !== url ? resp.config?.url : null);
+    if (final && final !== url) {
+      console.log(`🎵 TikTok: resolved short URL → ${final.slice(0, 120)}`);
+      // Strip tracking params (everything after ?) — they break some scrapers
+      try {
+        const u = new URL(final);
+        return `${u.origin}${u.pathname}`;
+      } catch (_) {
+        return final.split('?')[0];
+      }
+    }
+  } catch (e) {
+    console.warn(`🎵 TikTok: short URL HEAD failed: ${e.message}`);
+  }
+  return url;
+}
+
+// ─── Story / live detection ──────────────────────────────────────────────────
+//
+// TikTok Stories (tiktok.com/@user/story) and Live streams (tiktok.com/@user/live)
+// aren't downloadable via any public scraper. Detect them early and return a
+// clear error so users aren't left wondering why a "TikTok" link failed.
+
+function detectUnsupported(url) {
+  if (/tiktok\.com\/@[^/]+\/(story|live)/i.test(url)) {
+    if (url.includes('/story')) {
+      return 'TikTok Stories are not downloadable — they require login and use ephemeral signed URLs that expire too fast for scrapers.';
+    }
+    return 'TikTok Live streams cannot be downloaded — they\'re real-time-only and not stored.';
+  }
+  return null;
+}
+
 // ─── Orchestrator ────────────────────────────────────────────────────────────
 
-async function downloadTikTok(url) {
+async function downloadTikTok(rawUrl) {
+  // Stage 1 — bail early on stories/live with a useful message
+  const unsupported = detectUnsupported(rawUrl);
+  if (unsupported) throw new Error(unsupported);
+
+  // Stage 2 — resolve short URLs to canonical form
+  const url = await resolveShortUrl(rawUrl);
+
   const strategies = [
     { name: 'tikwm',       fn: tryTikwm       },
     { name: 'ssstik',      fn: trySSStik      },

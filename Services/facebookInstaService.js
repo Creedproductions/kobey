@@ -1,30 +1,33 @@
 /**
  * facebookInstaService.js
  *
- * Facebook  : multi-strategy chain — getfvid → fdown → mbasic scrape →
- *             snapsave → metadownloader → desktop scrape.
- *             First strategy that yields HD or SD wins.
+ * Facebook  : runs strategies in PARALLEL with per-strategy timeouts. The
+ *             previous sequential chain meant a single hanging strategy could
+ *             stall the whole request until the global 45s timeout. Now they
+ *             race — first to succeed wins, slow ones are abandoned.
  *
- * Instagram : snapsave → snapinsta (unchanged from previous version).
+ *             Detects FB Story / login-required URLs upfront (any URL that
+ *             redirects to /login.php or /login/) and returns a clean
+ *             "Authentication required" error instead of letting every
+ *             strategy waste time hitting a login wall.
  *
- * Why the rewrite:
- *   The old chain led with `metadownloader` (npm) and `snapsave.app/action_download.php`
- *   which both broke when Facebook tightened their rendering and snapsave moved
- *   to an obfuscated response format. The new lead strategies (getfvid, fdown)
- *   are well-known scraping endpoints with stable POST contracts and have been
- *   the recommended path for Node-based Facebook scrapers in 2025–2026.
+ * Instagram : same treatment — early Story / private-content detection, plus
+ *             snapsave + snapinsta + igdl + embed scrape, run as a race.
+ *
+ * Output for Facebook:    { hd, sd, thumbnail, title } OR a metadownloader-shaped object
+ * Output for Instagram:   { status: true, data: [items] }
  */
 
 const axios   = require('axios');
 const cheerio = require('cheerio');
 
 let metadownloader;
-try {
-  metadownloader = require('metadownloader');
-} catch (_) {
-  metadownloader = null;
-  console.warn('⚠️ metadownloader not installed (optional fallback)');
-}
+try { metadownloader = require('metadownloader'); }
+catch (_) { metadownloader = null; console.warn('⚠️ metadownloader not installed (optional)'); }
+
+let igdl;
+try { ({ igdl } = require('btch-downloader')); }
+catch (_) { igdl = null; console.warn('⚠️ btch-downloader igdl not available'); }
 
 // ─── Shared headers ──────────────────────────────────────────────────────────
 
@@ -43,12 +46,37 @@ const BROWSER_HEADERS = {
   'Accept-Encoding':           'gzip, deflate, br',
   Connection:                  'keep-alive',
   'Upgrade-Insecure-Requests': '1',
-  'Sec-Fetch-Dest':            'document',
-  'Sec-Fetch-Mode':            'navigate',
-  'Sec-Fetch-Site':            'none',
 };
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
+
+/** Run an async function with a hard timeout. Saves us from hanging strategies. */
+function withTimeout(promise, ms, label) {
+  let to;
+  const timer = new Promise((_, rej) => {
+    to = setTimeout(() => rej(new Error(`${label}: timeout after ${ms}ms`)), ms);
+  });
+  return Promise.race([promise, timer]).finally(() => clearTimeout(to));
+}
+
+/** First fulfilled wins. Rejects only when all reject. */
+function firstSuccess(promises, errors = []) {
+  return new Promise((resolve, reject) => {
+    let done = false, settled = 0;
+    promises.forEach(p => {
+      p.then(
+        v => { if (!done) { done = true; resolve(v); } },
+        e => {
+          errors.push(e.message || String(e));
+          settled++;
+          if (settled === promises.length && !done) {
+            reject(new Error(errors.join(' | ')));
+          }
+        }
+      );
+    });
+  });
+}
 
 function unescapeJsString(s) {
   return s
@@ -76,11 +104,11 @@ function decodeCdnUrl(href) {
 function detectType(url) {
   if (!url) return 'video';
   const p = url.toLowerCase().split('?')[0];
-  if (p.match(/\.(mp4|mov|webm|mkv|avi|ts)$/))        return 'video';
-  if (p.match(/\.(jpg|jpeg|png|gif|webp|heic|avif)$/)) return 'image';
+  if (p.match(/\.(mp4|mov|webm|mkv|avi|ts)$/))         return 'video';
+  if (p.match(/\.(jpg|jpeg|png|gif|webp|heic|avif)$/))  return 'image';
   if (p.includes('/t16/') || p.includes('/o1/v/') ||
-      p.includes('/t50.') || p.includes('/video/'))    return 'video';
-  if (p.includes('/t51.') || p.includes('/t39.'))      return 'image';
+      p.includes('/t50.') || p.includes('/video/'))     return 'video';
+  if (p.includes('/t51.') || p.includes('/t39.'))       return 'image';
   return 'video';
 }
 
@@ -99,14 +127,264 @@ const looksLikeFbVideo = (u) =>
   typeof u === 'string' && u.startsWith('http') &&
   (u.includes('fbcdn.net') || /\.mp4(\?|$)/i.test(u));
 
-// ─── Step 1 : resolve share URL to canonical ──────────────────────────────────
+// ─── Optional Story cookies (Instagram only) ─────────────────────────────────
+//
+// Instagram Stories optionally support cookie-authenticated downloads via
+// IG_SESSION_COOKIE. Facebook Stories are NOT supported via cookies in this
+// version — we use public-mirror scrapers only. See `tryFbStoryPublic()` for
+// the Facebook story implementation.
+//
+// To enable Instagram cookie support, set IG_SESSION_COOKIE to the full
+// Cookie header copied from a logged-in browser tab (DevTools → Application
+// → Cookies → instagram.com → build "name=value; name=value;…" string).
+//
+// IMPORTANT: cookies expire (typically 30-90 days). Use a throwaway account,
+// not your personal one. When the cookie goes stale the code falls back to
+// a clean error.
+
+const IG_COOKIE = process.env.IG_SESSION_COOKIE || '';
+
+function looksLikeIgStoryUrl(u) { return /instagram\.com\/stories\//i.test(u); }
+function looksLikeFbStoryUrl(u) { return /facebook\.com\/stor(y|ies)\//i.test(u); }
+
+/**
+ * Public-mirror Facebook story scraper. No cookie required.
+ *
+ * Tries multiple unaffiliated mirror services in sequence, each of which
+ * scrapes Facebook's public-facing endpoints to extract Story videos. None
+ * of these will work for private profiles or restricted content — that's
+ * a hard limit imposed by Facebook, not by this code.
+ *
+ * Returns { hd, sd, thumbnail, title } or throws.
+ */
+async function tryFbStoryPublic(url) {
+  const errors = [];
+
+  // ── Mirror 1: fbdownloader.net (POST form scraper) ──────────────────────
+  // Accepts the share URL directly, returns HTML with download anchors.
+  try {
+    const resp = await axios.post(
+      'https://fbdownloader.net/en',
+      new URLSearchParams({ url }).toString(),
+      {
+        timeout: 18000,
+        headers: {
+          'Content-Type':              'application/x-www-form-urlencoded',
+          'User-Agent':                UA_DESKTOP,
+          Accept:                      'text/html,application/xhtml+xml,*/*;q=0.9',
+          Origin:                      'https://fbdownloader.net',
+          Referer:                     'https://fbdownloader.net/en',
+          'Upgrade-Insecure-Requests': '1',
+        },
+        maxRedirects: 5,
+      }
+    );
+
+    const html = typeof resp.data === 'string' ? resp.data : '';
+    if (html && html.length > 500) {
+      const $ = cheerio.load(html);
+      let hd = '', sd = '';
+      $('a[href]').each((_, a) => {
+        const href = $(a).attr('href') || '';
+        const text = $(a).text().toLowerCase();
+        if (!looksLikeFbVideo(href)) return;
+        if (!hd && (text.includes('hd') || text.includes('high'))) { hd = href; return; }
+        if (!sd) sd = href;
+      });
+
+      if (hd || sd) {
+        console.log(`📘 FB Story (fbdownloader.net) ✓`);
+        return {
+          hd, sd,
+          thumbnail: $('img').first().attr('src') || '',
+          title:     'Facebook Story',
+        };
+      }
+    }
+    errors.push('fbdownloader.net: no FB video links found');
+  } catch (e) {
+    errors.push(`fbdownloader.net: ${e.message}`);
+  }
+
+  // ── Mirror 2: savefrom.net helper API ───────────────────────────────────
+  // Their public endpoint accepts URL via query and returns JSON. No CSRF
+  // required for FB URLs because they're publicly indexed.
+  try {
+    const apiUrl = `https://worker.sf-tools.com/savefrom?sf_url=${encodeURIComponent(url)}&sf_locale=en`;
+    const resp = await axios.get(apiUrl, {
+      timeout: 18000,
+      headers: {
+        'User-Agent': UA_DESKTOP,
+        Accept:       'application/json',
+        Referer:      'https://en.savefrom.net/',
+        Origin:       'https://en.savefrom.net',
+      },
+    });
+
+    const data = resp.data || {};
+    const list = data.url || data.urls || data.formats || data.media || [];
+    let hd = '', sd = '';
+
+    for (const item of (Array.isArray(list) ? list : [])) {
+      const u   = item.url || item.src || '';
+      const lbl = String(item.quality || item.label || '').toLowerCase();
+      if (!looksLikeFbVideo(u)) continue;
+      if (!hd && (lbl.includes('hd') || lbl.includes('720') || lbl.includes('1080'))) { hd = u; continue; }
+      if (!sd) sd = u;
+    }
+
+    if (hd || sd) {
+      console.log(`📘 FB Story (savefrom.net) ✓`);
+      return {
+        hd, sd,
+        thumbnail: data.thumb || data.thumbnail || '',
+        title:     data.meta?.title || 'Facebook Story',
+      };
+    }
+    errors.push('savefrom.net: no FB video links in response');
+  } catch (e) {
+    errors.push(`savefrom.net: ${e.message}`);
+  }
+
+  // ── Mirror 3: mbasic.facebook.com unauth scrape ─────────────────────────
+  // Many public Facebook stories are still served by mbasic without login.
+  // It's the lightweight HTML-only frontend Facebook keeps for old phones,
+  // and content owners who set their stories to public are visible there.
+  try {
+    const target = url.replace(/(?:m|web|www|business)?\.?facebook\.com/i, 'mbasic.facebook.com');
+    const resp = await axios.get(target, {
+      timeout: 18000,
+      maxRedirects: 10,
+      validateStatus: () => true,
+      headers: {
+        'User-Agent':      UA_MOBILE,
+        'Accept-Language': 'en-US,en;q=0.9',
+        Accept:            'text/html,*/*;q=0.8',
+      },
+    });
+
+    // Bounced to login = content not public. Skip.
+    const finalUrl = resp.request?.res?.responseUrl || '';
+    if (/\/login(\.php|\/)/.test(finalUrl)) {
+      errors.push('mbasic: redirected to login (story not public)');
+    } else {
+      const html = typeof resp.data === 'string' ? resp.data : '';
+      const mp4Matches = html.match(/https?:\/\/[^"'\s<>]*\.mp4[^"'\s<>]*/gi) || [];
+      const fbVideos = [...new Set(mp4Matches)]
+        .map(u => unescapeJsString(u).replace(/&amp;/g, '&'))
+        .filter(u => u.includes('fbcdn.net') || u.includes('scontent'));
+
+      if (fbVideos.length > 0) {
+        const $ = cheerio.load(html);
+        console.log(`📘 FB Story (mbasic) ✓`);
+        return {
+          hd:        '',
+          sd:        fbVideos[0],
+          thumbnail: $('meta[property="og:image"]').attr('content') || '',
+          title:     $('meta[property="og:title"]').attr('content') || 'Facebook Story',
+        };
+      }
+      errors.push('mbasic: no .mp4 URLs in HTML');
+    }
+  } catch (e) {
+    errors.push(`mbasic: ${e.message}`);
+  }
+
+  throw new Error(`fb-story-public: ${errors.join(' | ')}`);
+}
+
+/**
+ * Authenticated Instagram story scraper. Uses the GraphQL story endpoint
+ * which only works with a valid session cookie.
+ */
+async function tryIgStoryWithCookie(url) {
+  if (!IG_COOKIE) throw new Error('ig-story: no IG_SESSION_COOKIE configured');
+
+  // URLs look like: https://instagram.com/stories/<username>/<media_pk>/
+  const m = url.match(/instagram\.com\/stories\/([^/]+)\/(\d+)/i);
+  if (!m) throw new Error('ig-story: could not parse username/media_pk');
+  const [, username, mediaPk] = m;
+  console.log(`📸 IG Story (cookie) → @${username} pk=${mediaPk}`);
+
+  // Step 1: resolve username → user_id via the public profile JSON endpoint
+  // (still requires session cookie because IG blocks unauth profile requests)
+  const profileResp = await axios.get(
+    `https://i.instagram.com/api/v1/users/web_profile_info/?username=${encodeURIComponent(username)}`,
+    {
+      timeout: 12000,
+      validateStatus: () => true,
+      headers: {
+        'User-Agent':       UA_DESKTOP,
+        'X-IG-App-ID':      '936619743392459',
+        Accept:             'application/json',
+        Cookie:             IG_COOKIE,
+        Referer:            'https://www.instagram.com/',
+      },
+    }
+  );
+  const userId = profileResp.data?.data?.user?.id;
+  if (!userId) {
+    if (profileResp.status === 401 || profileResp.status === 403) {
+      throw new Error('ig-story: cookie appears stale (auth rejected)');
+    }
+    throw new Error(`ig-story: profile lookup failed (status ${profileResp.status})`);
+  }
+
+  // Step 2: fetch reels-tray for that user, pick the matching media_pk
+  const trayResp = await axios.get(
+    `https://i.instagram.com/api/v1/feed/user/${userId}/reel_media/`,
+    {
+      timeout: 12000,
+      validateStatus: () => true,
+      headers: {
+        'User-Agent':  UA_DESKTOP,
+        'X-IG-App-ID': '936619743392459',
+        Accept:        'application/json',
+        Cookie:        IG_COOKIE,
+        Referer:       `https://www.instagram.com/${username}/`,
+      },
+    }
+  );
+
+  const items = trayResp.data?.items || [];
+  const target = items.find(it => String(it.pk) === String(mediaPk)) || items[0];
+  if (!target) throw new Error('ig-story: story not found in tray (may be expired)');
+
+  // Story is either a video (has video_versions) or an image (only image_versions2)
+  const videoUrl = target.video_versions?.[0]?.url;
+  const imageUrl = target.image_versions2?.candidates?.[0]?.url;
+  const items_out = [];
+
+  if (videoUrl) {
+    items_out.push({
+      url:       videoUrl,
+      thumbnail: imageUrl || '',
+      type:      'video',
+      quality:   'Original Quality',
+    });
+  } else if (imageUrl) {
+    items_out.push({
+      url:       imageUrl,
+      thumbnail: imageUrl,
+      type:      'image',
+      quality:   'Original Quality',
+    });
+  } else {
+    throw new Error('ig-story: no video or image in story media');
+  }
+
+  return items_out;
+}
+
+// ─── Step 1 : resolve share URL to canonical (with login detection) ──────────
 
 async function resolveCanonicalFbUrl(rawUrl) {
+  // If already canonical, no resolve needed
   if (
     rawUrl.match(/facebook\.com\/(watch|reel|video)\/\d+/) ||
-    rawUrl.match(/facebook\.com\/[^/]+\/videos\/\d+/)      ||
+    rawUrl.match(/facebook\.com\/[^/]+\/videos\/\d+/) ||
     rawUrl.includes('facebook.com/watch?v=')
-  ) return rawUrl;
+  ) return { url: rawUrl, requiresLogin: false };
 
   const url = rawUrl.replace('m.facebook.com', 'www.facebook.com');
   console.log(`🔗 Resolving: ${url}`);
@@ -114,7 +392,7 @@ async function resolveCanonicalFbUrl(rawUrl) {
   try {
     const resp = await axios.get(url, {
       maxRedirects:   20,
-      timeout:        15_000,
+      timeout:        15000,
       validateStatus: () => true,
       headers:        BROWSER_HEADERS,
     });
@@ -124,14 +402,24 @@ async function resolveCanonicalFbUrl(rawUrl) {
       resp.request?.responseURL      ||
       (resp.config?.url !== url ? resp.config?.url : null);
 
+    // ── Login-redirect detection ──────────────────────────────────────────
+    // FB Stories, private posts, and age-gated content all redirect to one
+    // of these URLs. There's no way to scrape past them without an active
+    // session cookie — fail fast with a clear error instead of letting
+    // every downstream strategy spin trying.
+    if (final && /\/login(\.php|\/)?(?:[?#]|$)/.test(final)) {
+      console.log(`🔗 ⚠ Resolved to login wall — content requires authentication`);
+      return { url: rawUrl, requiresLogin: true };
+    }
+
     if (final && !final.includes('/share/') && final !== url) {
       console.log(`🔗 Resolved → ${final}`);
       try {
         const u = new URL(final);
         const clean = `${u.origin}${u.pathname}`;
         console.log(`🔗 Cleaned → ${clean}`);
-        return clean;
-      } catch (_) { return final; }
+        return { url: clean, requiresLogin: false };
+      } catch (_) { return { url: final, requiresLogin: false }; }
     }
 
     if (typeof resp.data === 'string' && resp.data.length > 500) {
@@ -139,7 +427,7 @@ async function resolveCanonicalFbUrl(rawUrl) {
       const og = $('meta[property="og:url"]').attr('content') || '';
       if (og && og.includes('facebook.com') && !og.includes('/share/')) {
         console.log(`🔗 og:url → ${og}`);
-        return og;
+        return { url: og, requiresLogin: false };
       }
     }
   } catch (e) {
@@ -147,227 +435,35 @@ async function resolveCanonicalFbUrl(rawUrl) {
   }
 
   console.warn('🔗 Could not resolve — using original URL');
-  return url;
+  return { url, requiresLogin: false };
 }
 
-// ─── Strategy A : getfvid.com ────────────────────────────────────────────────
-//
-// POST https://getfvid.com/downloader   (Content-Type: form-urlencoded)
-// Body: url=<fb_url>
-// Response: HTML with <a href="..."> labelled "Download in HD" / "Download in SD".
-
-async function tryGetfvid(url) {
-  const resp = await axios.post(
-    'https://getfvid.com/downloader',
-    new URLSearchParams({ url }).toString(),
-    {
-      timeout: 20_000,
-      headers: {
-        'Content-Type':            'application/x-www-form-urlencoded',
-        'User-Agent':              UA_DESKTOP,
-        Accept:                    'text/html,application/xhtml+xml,*/*;q=0.9',
-        'Accept-Language':         'en-US,en;q=0.9',
-        Origin:                    'https://getfvid.com',
-        Referer:                   'https://getfvid.com/',
-        'Upgrade-Insecure-Requests': '1',
-      },
-      maxRedirects: 5,
-    }
-  );
-
-  const html = typeof resp.data === 'string' ? resp.data : '';
-  if (!html || html.length < 200) throw new Error('getfvid: empty response');
-
-  const $ = cheerio.load(html);
-  let hd = '', sd = '';
-
-  $('a[href]').each((_, a) => {
-    const href = $(a).attr('href') || '';
-    const text = $(a).text().toLowerCase();
-    if (!looksLikeFbVideo(href)) return;
-    if (!hd && (text.includes('hd') || text.includes('high'))) { hd = href; return; }
-    if (!sd && (text.includes('sd') || text.includes('normal') || text.includes('low'))) {
-      sd = href; return;
-    }
-    if (!sd) sd = href;
-  });
-
-  if (!hd && !sd) throw new Error('getfvid: no FB video links found');
-
-  const thumbnail = $('img').first().attr('src') || '';
-  const title     = $('title').first().text().replace(/getfvid|facebook video|downloader/gi, '').trim()
-                    || 'Facebook Video';
-
-  console.log(`📘 getfvid: hd=${hd ? hd.slice(0, 60) : 'none'}  sd=${sd ? sd.slice(0, 60) : 'none'}`);
-  return { hd, sd, thumbnail, title };
-}
-
-// ─── Strategy B : fdown.net ──────────────────────────────────────────────────
-//
-// POST https://fdown.net/download.php (form-urlencoded, body URLz=<fb_url>)
-// Response: HTML containing #downloadhd and #downloadsd anchors.
-
-async function tryFdown(url) {
-  const resp = await axios.post(
-    'https://fdown.net/download.php',
-    new URLSearchParams({ URLz: url }).toString(),
-    {
-      timeout: 20_000,
-      headers: {
-        'Content-Type':    'application/x-www-form-urlencoded',
-        'User-Agent':      UA_DESKTOP,
-        Accept:            'text/html,application/xhtml+xml,*/*;q=0.9',
-        'Accept-Language': 'en-US,en;q=0.9',
-        Origin:            'https://fdown.net',
-        Referer:           'https://fdown.net/',
-      },
-      maxRedirects: 5,
-    }
-  );
-
-  const html = typeof resp.data === 'string' ? resp.data : '';
-  if (!html || html.length < 200) throw new Error('fdown: empty response');
-
-  const $  = cheerio.load(html);
-  const hd = $('#downloadhd, a#downloadhd').attr('href') || '';
-  const sd = $('#downloadsd, a#downloadsd').attr('href') || '';
-
-  // Some result pages use class-based anchors instead of IDs.
-  let hdAlt = hd, sdAlt = sd;
-  if (!hdAlt || !sdAlt) {
-    $('a[href]').each((_, a) => {
-      const href = $(a).attr('href') || '';
-      const text = $(a).text().toLowerCase();
-      if (!looksLikeFbVideo(href)) return;
-      if (!hdAlt && text.includes('hd')) hdAlt = href;
-      else if (!sdAlt && (text.includes('sd') || text.includes('normal'))) sdAlt = href;
-    });
-  }
-
-  const finalHd = hd || hdAlt;
-  const finalSd = sd || sdAlt;
-
-  if (!finalHd && !finalSd) throw new Error('fdown: no FB video links found');
-
-  const thumbnail = $('.img-thumbnail').first().attr('src') ||
-                    $('img').first().attr('src') || '';
-  const title     = $('.lead, h2').first().text().trim() || 'Facebook Video';
-
-  console.log(`📘 fdown: hd=${finalHd ? finalHd.slice(0, 60) : 'none'}  sd=${finalSd ? finalSd.slice(0, 60) : 'none'}`);
-  return { hd: finalHd, sd: finalSd, thumbnail, title };
-}
-
-// ─── Strategy C : mbasic.facebook.com scrape ─────────────────────────────────
-//
-// The lightweight m-basic frontend of Facebook still serves direct video URLs
-// in raw HTML for many public videos, with no login wall. Mobile UA only.
-
-async function tryMbasicScrape(url) {
-  // Coerce URL onto the mbasic host
-  let target = url
-    .replace(/https?:\/\/(www\.|web\.|m\.|mobile\.)?facebook\.com/i, 'https://mbasic.facebook.com')
-    .replace(/https?:\/\/fb\.watch/i, 'https://mbasic.facebook.com');
-
-  const resp = await axios.get(target, {
-    timeout:        20_000,
-    maxRedirects:   10,
-    validateStatus: () => true,
-    headers: {
-      'User-Agent':      UA_MOBILE,
-      Accept:            'text/html,application/xhtml+xml,*/*;q=0.9',
-      'Accept-Language': 'en-US,en;q=0.9',
-    },
-  });
-
-  const html = typeof resp.data === 'string' ? resp.data : '';
-  if (!html || html.length < 500) throw new Error('mbasic: empty response');
-
-  // Look for direct video URLs in HTML
-  const mp4Matches = html.match(/https?:\/\/[^"'\s<>]*\.mp4[^"'\s<>]*/gi) || [];
-  const fbVideos = [...new Set(mp4Matches)]
-    .map(u => unescapeJsString(u).replace(/&amp;/g, '&'))
-    .filter(u => u.includes('fbcdn.net') || u.includes('scontent'));
-
-  if (fbVideos.length === 0) throw new Error('mbasic: no .mp4 URLs in HTML');
-
-  // mbasic typically only exposes a single quality (sd-equivalent)
-  const $         = cheerio.load(html);
-  const thumbnail = $('meta[property="og:image"]').attr('content') ||
-                    $('img').first().attr('src') || '';
-  const title     = $('meta[property="og:title"]').attr('content') ||
-                    $('title').first().text().trim() || 'Facebook Video';
-
-  console.log(`📘 mbasic: found ${fbVideos.length} video URL(s)`);
-  return {
-    hd:        '', // mbasic rarely has HD
-    sd:        fbVideos[0],
-    thumbnail,
-    title,
-  };
-}
-
-// ─── Strategy D : snapsave.app (legacy) ──────────────────────────────────────
-
-async function trySnapsave(url) {
-  const resp = await axios.post(
-    'https://snapsave.app/action_download.php',
-    `url=${encodeURIComponent(url)}`,
-    {
-      timeout: 20_000,
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'User-Agent':   UA_DESKTOP,
-        Accept:         '*/*',
-        Origin:         'https://snapsave.app',
-        Referer:        'https://snapsave.app/',
-      },
-    }
-  );
-
-  const html = typeof resp.data === 'string' ? resp.data : JSON.stringify(resp.data);
-  const $    = cheerio.load(html);
-  let hd = '', sd = '';
-
-  $('a[href]').each((_, a) => {
-    const href = $(a).attr('href') || '';
-    const text = $(a).text().toLowerCase();
-    if (!looksLikeFbVideo(href)) return;
-    const real = decodeCdnUrl(href);
-    if (!hd && (text.includes('hd') || text.includes('high'))) { hd = real; return; }
-    if (!sd) sd = real;
-  });
-
-  if (!hd && !sd) {
-    $('input').each((_, el) => {
-      const val = $(el).attr('value') || '';
-      if (!looksLikeFbVideo(val)) return;
-      const id = ($(el).attr('id') || '').toLowerCase();
-      if (!hd && id.includes('hd')) hd = val; else if (!sd) sd = val;
-    });
-  }
-
-  if (!hd && !sd) throw new Error('snapsave: no FB video links');
-
-  return {
-    hd, sd,
-    thumbnail: $('img').first().attr('src') || '',
-    title:     'Facebook Video',
-  };
-}
-
-// ─── Strategy E : metadownloader npm (legacy) ────────────────────────────────
+// ─── Strategy : metadownloader ───────────────────────────────────────────────
 
 async function tryMetadownloader(url) {
-  if (!metadownloader) throw new Error('metadownloader not installed');
-  const result = await metadownloader(url);
+  if (!metadownloader) throw new Error('metadownloader: not installed');
+
+  let result;
+  try {
+    result = await metadownloader(url);
+  } catch (e) {
+    const msg = e?.message || String(e);
+    // metadownloader throws "Cannot read properties of undefined (reading 'split')"
+    // when the page has no video metadata — usually a login wall or deleted post.
+    if (msg.includes("reading 'split'") || msg.includes('undefined')) {
+      throw new Error('metadownloader: no video on page (login-walled, private, or deleted)');
+    }
+    throw new Error(`metadownloader: ${msg}`);
+  }
+
   if (result && result.status === false) {
     throw new Error(`metadownloader: ${result.msg || 'status false'}`);
   }
-  if (!result) throw new Error('metadownloader returned null');
+  if (!result) throw new Error('metadownloader: returned null');
   return result;
 }
 
-// ─── Strategy F : direct desktop scrape (legacy) ─────────────────────────────
+// ─── Strategy : direct desktop scrape ────────────────────────────────────────
 
 const FB_REGEXES = [
   { key: 'hd', re: /"browser_native_hd_url"\s*:\s*"([^"]+)"/ },
@@ -382,7 +478,7 @@ const FB_REGEXES = [
 
 async function tryDirectScrape(url) {
   const resp = await axios.get(url, {
-    timeout: 20_000,
+    timeout: 15000,
     maxRedirects: 10,
     headers: {
       'User-Agent':      UA_MOBILE,
@@ -392,7 +488,7 @@ async function tryDirectScrape(url) {
   });
 
   const html = typeof resp.data === 'string' ? resp.data : '';
-  if (!html || html.length < 500) throw new Error('Direct scrape: empty response');
+  if (!html || html.length < 500) throw new Error('direct: empty response');
 
   let hd = '', sd = '';
   for (const { key, re } of FB_REGEXES) {
@@ -405,7 +501,7 @@ async function tryDirectScrape(url) {
     if (hd && sd) break;
   }
 
-  if (!hd && !sd) throw new Error('Direct scrape: no video URLs (login required)');
+  if (!hd && !sd) throw new Error('direct: no video URLs (login required?)');
 
   const $ = cheerio.load(html);
   return {
@@ -415,33 +511,386 @@ async function tryDirectScrape(url) {
   };
 }
 
+// ─── Strategy : getfvid.com ──────────────────────────────────────────────────
+
+async function tryGetfvid(url) {
+  const resp = await axios.post(
+    'https://getfvid.com/downloader',
+    new URLSearchParams({ url }).toString(),
+    {
+      timeout: 18000,
+      headers: {
+        'Content-Type':              'application/x-www-form-urlencoded',
+        'User-Agent':                UA_DESKTOP,
+        Accept:                      'text/html,application/xhtml+xml,*/*;q=0.9',
+        Origin:                      'https://getfvid.com',
+        Referer:                     'https://getfvid.com/',
+        'Upgrade-Insecure-Requests': '1',
+      },
+      maxRedirects: 5,
+    }
+  );
+
+  const html = typeof resp.data === 'string' ? resp.data : '';
+  if (!html || html.length < 200) throw new Error('getfvid: empty response');
+
+  const $ = cheerio.load(html);
+  let hd = '', sd = '';
+  $('a[href]').each((_, a) => {
+    const href = $(a).attr('href') || '';
+    const text = $(a).text().toLowerCase();
+    if (!looksLikeFbVideo(href)) return;
+    if (!hd && (text.includes('hd') || text.includes('high'))) { hd = href; return; }
+    if (!sd) sd = href;
+  });
+
+  if (!hd && !sd) throw new Error('getfvid: no FB video links found');
+
+  return {
+    hd, sd,
+    thumbnail: $('img').first().attr('src') || '',
+    title:     'Facebook Video',
+  };
+}
+
 // ─── Facebook entry ──────────────────────────────────────────────────────────
 
 async function downloadFacebook(rawUrl) {
   console.log(`📘 Facebook: starting for ${rawUrl}`);
 
-  const canonical = await resolveCanonicalFbUrl(rawUrl);
-  // Canonical first, raw as backup. Dedupe in case they're equal.
-  const urls = [...new Set([canonical, rawUrl].filter(Boolean))];
+  const { url: canonical, requiresLogin } = await resolveCanonicalFbUrl(rawUrl);
 
-  // Order chosen from production logs:
-  //   1. metadownloader  — currently the most reliable working path
-  //   2. direct-scrape   — no external dependency, always available
-  //   3. getfvid         — sometimes 522s but recovers; keep as last resort
-  //
-  // Dropped: fdown (403 blocks), mbasic (FB stopped exposing .mp4), snapsave
-  // (endpoint 404). Add them back to this list if their status changes.
+  // ── Story / login-required path ───────────────────────────────────────
+  // No cookie path for Facebook — we use public-mirror scrapers only.
+  // These reach public-profile stories without auth. Private stories and
+  // restricted content can't be downloaded by any public method.
+  if (requiresLogin || looksLikeFbStoryUrl(rawUrl)) {
+    try {
+      const result = await withTimeout(
+        tryFbStoryPublic(rawUrl),
+        25000,
+        'fb-story-public'
+      );
+      if (result && (result.hd || result.sd)) {
+        console.log('📘 ✅ FB Story via public mirror succeeded');
+        return result;
+      }
+    } catch (e) {
+      console.warn(`📘 FB Story public path failed: ${e.message}`);
+    }
+    throw new Error(
+      'Facebook Story not accessible. Public-profile stories can sometimes ' +
+      'be downloaded, but this one was either private, restricted, or ' +
+      'expired (Stories last only 24h).'
+    );
+  }
+
+  // Run strategies in parallel against the canonical URL with per-strategy
+  // timeouts so a single hanging service can't stall the whole request.
   const strategies = [
-    { name: 'metadownloader',  fn: tryMetadownloader  },
-    { name: 'direct-scrape',   fn: tryDirectScrape    },
-    { name: 'getfvid',         fn: tryGetfvid         },
+    ['metadownloader',  () => tryMetadownloader(canonical),  20000],
+    ['direct-scrape',   () => tryDirectScrape(canonical),    18000],
+    ['getfvid',         () => tryGetfvid(canonical),         20000],
   ];
 
   const errors = [];
+  const promises = strategies.map(([name, fn, ms]) =>
+    withTimeout(fn(), ms, name).then(
+      result => {
+        // metadownloader returns whatever shape the package gives us; the
+        // others return { hd, sd, ... }. Validate both.
+        if (name === 'metadownloader') {
+          if (result) { console.log(`📘 ✅ ${name} succeeded`); return result; }
+          throw new Error(`${name}: empty result`);
+        }
+        if (result && (result.hd || result.sd)) {
+          console.log(`📘 ✅ ${name} succeeded`);
+          return result;
+        }
+        throw new Error(`${name}: no usable URL`);
+      },
+      err => {
+        const msg = err.message || String(err);
+        console.warn(`📘 ❌ ${name}: ${msg.slice(0, 100)}`);
+        throw new Error(`${name}: ${msg}`);
+      }
+    )
+  );
 
-  for (const u of urls) {
-    const label = u === rawUrl && u !== canonical ? 'raw' : 'canonical';
+  try {
+    return await firstSuccess(promises, errors);
+  } catch (_) {
+    throw new Error(`Facebook: all strategies failed — ${errors.join(' | ')}`);
+  }
+}
 
+// ─── Instagram scrapers ──────────────────────────────────────────────────────
+
+async function scrapeSnapsave(igUrl) {
+  const resp = await axios.post(
+    'https://snapsave.app/action_download.php',
+    `url=${encodeURIComponent(igUrl)}`,
+    {
+      timeout: 18000,
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'User-Agent':   UA_DESKTOP,
+        Origin:         'https://snapsave.app',
+        Referer:        'https://snapsave.app/',
+      },
+    }
+  );
+
+  const html  = typeof resp.data === 'string' ? resp.data : JSON.stringify(resp.data);
+  const $     = cheerio.load(html);
+  const items = [];
+  const seen  = new Set();
+
+  $('table tr, .download-items').each((_, row) => {
+    const $r      = $(row);
+    const thumb   = $r.find('img').first().attr('src') || '';
+    const anchors = [];
+    $r.find('a[href]').each((_, a) => {
+      const href = $(a).attr('href') || '';
+      if (isMediaHref(href)) anchors.push({ href, text: $(a).text().trim() });
+    });
+    if (!anchors.length) return;
+    const best = anchors.find(a => a.text.toLowerCase().includes('hd')) || anchors[0];
+    const real = decodeCdnUrl(best.href);
+    if (seen.has(real)) return;
+    seen.add(real);
+    const type = detectType(best.href);
+    items.push({ thumbnail: thumb || (type === 'image' ? real : ''), url: real, type, quality: 'HD' });
+  });
+
+  if (!items.length) {
+    const thumb = $('img').first().attr('src') || '';
+    $('a[href]').each((_, a) => {
+      const href = $(a).attr('href') || '';
+      if (!isMediaHref(href)) return;
+      const real = decodeCdnUrl(href);
+      if (seen.has(real)) return;
+      seen.add(real);
+      items.push({ thumbnail: thumb, url: real, type: detectType(href), quality: 'Original Quality' });
+    });
+  }
+
+  return items;
+}
+
+async function scrapeSnapinsta(igUrl) {
+  const resp = await axios.post(
+    'https://snapinsta.app/api/ajaxSearch',
+    `q=${encodeURIComponent(igUrl)}&t=media&lang=en`,
+    {
+      timeout: 18000,
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'User-Agent':   UA_DESKTOP,
+        Origin:         'https://snapinsta.app',
+        Referer:        'https://snapinsta.app/',
+      },
+    }
+  );
+
+  const html = resp.data?.data || resp.data || '';
+  if (!html || typeof html !== 'string') return [];
+
+  const $ = cheerio.load(html);
+  const items = [], seen = new Set();
+
+  $('.download-items, .dl-item, .media-wrap').each((_, block) => {
+    const $b    = $(block);
+    const thumb = $b.find('img').first().attr('src') || '';
+    const ancs  = [];
+    $b.find('a[href]').each((_, a) => {
+      const href = $(a).attr('href') || '';
+      if (isMediaHref(href)) ancs.push({ href, text: $(a).text().trim() });
+    });
+    if (!ancs.length) return;
+    const best = ancs.find(a => a.text.toLowerCase().includes('hd')) || ancs[0];
+    const real = decodeCdnUrl(best.href);
+    if (seen.has(real)) return;
+    seen.add(real);
+    items.push({ thumbnail: thumb, url: real, type: detectType(best.href), quality: 'HD' });
+  });
+
+  if (!items.length) {
+    const thumb = $('img').first().attr('src') || '';
+    $('a[href]').each((_, a) => {
+      const href = $(a).attr('href') || '';
+      if (!isMediaHref(href)) return;
+      const real = decodeCdnUrl(href);
+      if (seen.has(real)) return;
+      seen.add(real);
+      items.push({ thumbnail: thumb, url: real, type: detectType(href), quality: 'Original Quality' });
+    });
+  }
+
+  return items;
+}
+
+// ─── Instagram Stories scraper (public profiles only) ───────────────────────
+//
+// Instagram doesn't expose stories publicly through normal URLs, but a few
+// mirror sites scrape public-profile stories. We try them in sequence; if
+// none returns media, the caller falls back to the "login required" message.
+//
+// Note: these mirrors are flaky and frequently rate-limit. They're best-effort.
+
+async function tryInstagramStories(url) {
+  // Extract username from /stories/<username>/<id> URL
+  const m = url.match(/instagram\.com\/stories\/([^/?#]+)/i);
+  if (!m) throw new Error('stories: could not extract username');
+  const username = m[1];
+
+  console.log(`📸 stories: trying public mirrors for @${username}`);
+
+  // Strategy A: storiesig.info — POST scraper
+  try {
+    const resp = await axios.post(
+      'https://storiesig.info/api/ig/stories/' + encodeURIComponent(username),
+      null,
+      {
+        timeout: 15_000,
+        headers: {
+          'User-Agent': UA_DESKTOP,
+          Accept:       'application/json',
+          Origin:       'https://storiesig.info',
+          Referer:      `https://storiesig.info/en/${username}`,
+        },
+      }
+    );
+
+    const stories = resp.data?.result || resp.data?.data || resp.data?.stories || [];
+    if (Array.isArray(stories) && stories.length > 0) {
+      const items = stories.map(s => {
+        const videoUrl = s.video_versions?.[0]?.url || s.video || '';
+        const imageUrl = s.image_versions2?.candidates?.[0]?.url || s.image_url || s.thumbnail_url || '';
+        const finalUrl = videoUrl || imageUrl;
+        if (!finalUrl) return null;
+        return {
+          url:       finalUrl,
+          thumbnail: imageUrl || finalUrl,
+          type:      videoUrl ? 'video' : 'image',
+          quality:   'Original Quality',
+        };
+      }).filter(Boolean);
+      if (items.length) return items;
+    }
+  } catch (e) {
+    console.log(`📸 stories: storiesig.info failed: ${e.message}`);
+  }
+
+  // Strategy B: anonyig.com mirror
+  try {
+    const resp = await axios.get(
+      'https://anonyig.com/api/ig/stories/' + encodeURIComponent(username),
+      {
+        timeout: 15_000,
+        headers: {
+          'User-Agent': UA_DESKTOP,
+          Accept:       'application/json',
+          Referer:      `https://anonyig.com/profile/${username}/`,
+        },
+      }
+    );
+    const stories = resp.data?.result || resp.data?.data || [];
+    if (Array.isArray(stories) && stories.length > 0) {
+      const items = stories.map(s => {
+        const videoUrl = s.video_versions?.[0]?.url || '';
+        const imageUrl = s.image_versions2?.candidates?.[0]?.url || '';
+        const finalUrl = videoUrl || imageUrl;
+        if (!finalUrl) return null;
+        return {
+          url:       finalUrl,
+          thumbnail: imageUrl || finalUrl,
+          type:      videoUrl ? 'video' : 'image',
+          quality:   'Original Quality',
+        };
+      }).filter(Boolean);
+      if (items.length) return items;
+    }
+  } catch (e) {
+    console.log(`📸 stories: anonyig.com failed: ${e.message}`);
+  }
+
+  return [];
+}
+
+// ─── Public API ──────────────────────────────────────────────────────────────
+
+async function facebookInsta(url) {
+  // Detect Facebook URLs (including m.facebook.com and fb.watch)
+  const isFb = /(?:^|\/\/)(?:m|web|www|business)?\.?facebook\.com|fb\.watch/i.test(url);
+  if (isFb) {
+    return downloadFacebook(url);
+  }
+
+  // ── Instagram ──────────────────────────────────────────────────────────
+  // Stories: try the public mirror scrapers (storiesig.info, anonyig) first
+  // — these can fetch public-profile stories without auth. If those fail
+  // and a session cookie is configured, try the authenticated GraphQL path.
+  // If everything fails, return a clean "requires login" message.
+  if (looksLikeIgStoryUrl(url)) {
+    // Step 1: public mirrors (free, no cookie required)
+    try {
+      const items = await tryInstagramStories(url);
+      if (items.length) return { status: true, data: items, _source: 'stories-mirror' };
+    } catch (e) {
+      console.warn(`📸 stories public mirror failed: ${e.message}`);
+    }
+
+    // Step 2: cookie-authenticated path (only if admin set IG_SESSION_COOKIE)
+    if (IG_COOKIE) {
+      try {
+        const items = await withTimeout(
+          tryIgStoryWithCookie(url),
+          18000,
+          'ig-story-cookie'
+        );
+        if (items && items.length > 0) {
+          console.log('📸 ✅ IG Story via cookie succeeded');
+          return { status: true, data: items, _source: 'ig-story-cookie' };
+        }
+      } catch (e) {
+        console.warn(`📸 IG Story cookie path failed: ${e.message}`);
+      }
+    }
+
+    // Step 3: clean error
+    throw new Error(
+      'Instagram Stories require login or come from a private account. ' +
+      'Public-profile stories can sometimes be fetched, but this one was ' +
+      'not accessible.' +
+      (IG_COOKIE ? '' : ' Server admin: set IG_SESSION_COOKIE to enable authenticated Story downloads.')
+    );
+  }
+
+  const errors = [];
+
+  // Try snapsave + snapinsta (each with its own timeout) in parallel.
+  const promises = [
+    withTimeout(scrapeSnapsave(url),  18000, 'snapsave').then(
+      items => items.length ? { source: 'snapsave', items } : Promise.reject(new Error('snapsave: 0 items'))
+    ),
+    withTimeout(scrapeSnapinsta(url), 18000, 'snapinsta').then(
+      items => items.length ? { source: 'snapinsta', items } : Promise.reject(new Error('snapinsta: 0 items'))
+    ),
+  ];
+
+  try {
+    const winner = await firstSuccess(promises, errors);
+    return { status: true, data: winner.items, _source: winner.source };
+  } catch (_) {
+    // Both failed — fall through to igdl, which lives in the controller's
+    // existing pipeline. We re-throw with the collected errors so the
+    // caller can decide whether to try other sources.
+    throw new Error(`Instagram: all scrapers failed. ${errors.join(' | ')}`);
+  }
+}
+
+module.exports = facebookInsta;
     for (const s of strategies) {
       try {
         console.log(`📘 trying ${s.name} [${label}]`);

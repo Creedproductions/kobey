@@ -194,13 +194,28 @@ async function fetchUpstream(targetUrl, headers, method) {
 }
 
 const proxyDownload = async (req, res) => {
-  const targetUrl = req.query.url;
+  let targetUrl   = req.query.url;
   const platform  = String(req.query.platform || 'default').toLowerCase();
   const reqMethod = (req.method || 'GET').toUpperCase();
 
   if (!targetUrl || typeof targetUrl !== 'string' || !targetUrl.startsWith('http')) {
     return res.status(400).json({ error: 'Missing or invalid url parameter' });
   }
+
+  // ── URL repair for TikTok / scraper-derived URLs ───────────────────────
+  // tikwm and similar services return URLs that often contain malformed
+  // query strings: double ampersands ("&&bt=") that create empty params,
+  // trailing fragments stuck onto the query ("?#"), and URL-encoded chars
+  // that some axios versions handle inconsistently. Clean these up before
+  // passing to axios — otherwise the request to upstream may either 400 or
+  // hash to a different cache key than the one tikwm signed.
+  try {
+    // Strip double-ampersands and trailing junk
+    targetUrl = targetUrl.replace(/&{2,}/g, '&').replace(/[?&]+$/, '');
+    // Drop any fragment — fragments shouldn't be in URLs sent to servers
+    const hashIdx = targetUrl.indexOf('#');
+    if (hashIdx !== -1) targetUrl = targetUrl.slice(0, hashIdx);
+  } catch (_) {}
 
   console.log(`🔄 Proxy ${reqMethod} [${platform}]: ${targetUrl.slice(0, 250)}`);
 
