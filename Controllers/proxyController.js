@@ -179,17 +179,28 @@ async function fetchUpstream(targetUrl, headers, method) {
     method,
     url:              targetUrl,
     headers,
-    // Buffer the entire body before resolving. This eliminates streaming
-    // race conditions (premature close, mid-flight header issues) that
-    // some hosting platforms — Render in particular — exhibit with
-    // piped responses. The 100 MB cap is plenty for TikTok / IG / FB
-    // videos and prevents runaway memory on huge files.
-    responseType:     'arraybuffer',
-    timeout:          90_000,
-    maxRedirects:     10,
-    validateStatus:   (s) => s < 500,
-    maxContentLength: 100 * 1024 * 1024,
-    maxBodyLength:    100 * 1024 * 1024,
+    // STREAMING: pipe bytes directly from upstream to client without
+    // buffering the whole file in memory. This is critical for two reasons:
+    //
+    //   1. Memory: buffering even a single 50 MB FB video uses 50 MB of RAM.
+    //      With a few concurrent users, the 256 MB Koyeb instance OOMs and
+    //      gets killed (we saw this in production).
+    //
+    //   2. Size limit: axios defaults to a 100 MB cap when buffering. Long
+    //      Facebook reels and TikToks routinely exceed this — the upstream
+    //      throws "maxContentLength size of 104857600 exceeded" and the
+    //      phone sees a dropped connection, which the user perceives as
+    //      "downloads work sometimes".
+    //
+    // Streaming has neither problem: bytes flow upstream → proxy → client
+    // with constant ~64 KB memory per request regardless of file size.
+    //
+    // Caveat: stream errors must be handled explicitly (see proxyDownload).
+    // Without that, a mid-stream upstream disconnect would crash the process.
+    responseType:   'stream',
+    timeout:        90_000,
+    maxRedirects:   10,
+    validateStatus: (s) => s < 500,
   });
 }
 
@@ -307,37 +318,55 @@ const proxyDownload = async (req, res) => {
   res.setHeader('Access-Control-Expose-Headers',
     'Content-Length, Content-Range, Accept-Ranges, Content-Disposition, Content-Type');
 
-  // HEAD: status + headers only, no body
+  // HEAD: status + headers only, drain any inbound stream so the connection
+  // is freed cleanly.
   if (reqMethod === 'HEAD') {
+    if (upstream.data && typeof upstream.data.destroy === 'function') {
+      upstream.data.destroy();
+    }
     res.end();
     return;
   }
 
-  // GET: send the buffered body in one shot. upstream.data is already a
-  // Buffer (because of responseType: 'arraybuffer'), so this is reliable
-  // and bypasses any platform-level stream mangling.
-  try {
-    const body     = Buffer.from(upstream.data);
-    const expected = Number(upstream.headers['content-length']) || 0;
-    const ok       = !expected || body.length === expected;
+  // GET: pipe upstream stream directly to client. This avoids buffering in
+  // memory, so file size is unlimited and RAM usage is constant per request.
+  //
+  // Error handling: a streaming pipe must handle errors on BOTH ends.
+  //   - Upstream error (CDN drops connection mid-flight): we close client
+  //     gracefully. Phone sees a partial download and our retry logic
+  //     handles the rest.
+  //   - Client error (user closed app, bad network): we destroy the
+  //     upstream stream so we don't leak a worker waiting for bytes nobody
+  //     will read.
+  // Without this, mid-stream upstream disconnects crash the entire Node
+  // process (unhandled 'error' on a Readable). DO NOT remove these.
+  let bytesSent = 0;
+  upstream.data.on('data', (chunk) => { bytesSent += chunk.length; });
 
-    console.log(
-      `   ↳ sending ${body.length}/${expected || '?'} bytes to client ` +
-      `${ok ? '✓' : '⚠ MISMATCH (upstream sent fewer bytes than Content-Length advertised)'}`
-    );
-
-    // Re-set Content-Length to the actual byte count we have. Otherwise the
-    // client sits waiting for bytes that will never arrive and eventually
-    // times out / retries. This is the fix for upstream CDNs that lie about
-    // size and close the connection early.
-    res.setHeader('Content-Length', body.length.toString());
-    res.end(body);
-  } catch (err) {
-    console.error(`❌ Proxy send failed [${platform}]: ${err.message}`);
+  upstream.data.on('error', (err) => {
+    console.error(`❌ Upstream stream error [${platform}] after ${bytesSent} bytes: ${err.message}`);
     if (!res.headersSent) {
-      res.status(502).json({ error: 'Send failed', details: err.message });
+      res.status(502).json({ error: 'Upstream stream failed', details: err.message });
+    } else {
+      res.destroy(err);
     }
-  }
+  });
+
+  res.on('close', () => {
+    // Client closed connection (downloaded everything OR cancelled). Either
+    // way, kill the upstream stream so we don't waste CPU/sockets.
+    if (!upstream.data.destroyed) {
+      upstream.data.destroy();
+    }
+    const expected = Number(upstream.headers['content-length']) || 0;
+    if (expected && bytesSent < expected) {
+      console.warn(`⚠ client closed early [${platform}]: sent ${bytesSent}/${expected} bytes`);
+    } else {
+      console.log(`   ↳ streamed ${bytesSent}/${expected || '?'} bytes to client ✓`);
+    }
+  });
+
+  upstream.data.pipe(res);
 };
 
 module.exports = { proxyDownload };
