@@ -123,31 +123,119 @@ function isMediaHref(href) {
   );
 }
 
+
 const looksLikeFbVideo = (u) =>
   typeof u === 'string' && u.startsWith('http') &&
-  (u.includes('fbcdn.net') || /\.mp4(\?|$)/i.test(u));
+  (u.includes('fbcdn.net') || u.includes('scontent') || /\.mp4(\?|$)/i.test(u));
 
-// ─── NEW: normalizeFacebookUrl ────────────────────────────────────────────────
+function looksLikeLoginWall(html = '', finalUrl = '') {
+  return (
+    /\/login(\.php|\/)?(?:[?#]|$)/i.test(finalUrl || '') ||
+    /login_form|id=[\"']loginbutton[\"']|checkpoint|Log in to Facebook/i.test(html || '') ||
+    String(html || '').includes('recover/initiate')
+  );
+}
 
-function normalizeFacebookUrl(rawUrl) {
+function isFacebookShareUrl(url = '') {
+  return /facebook\.com\/share\/(v|r|p)\//i.test(url);
+}
+
+function cleanFbUrlKeepImportant(rawUrl) {
   try {
-    let url = String(rawUrl || '').trim();
-
-    // remove tracking junk but keep important v=
-    const u = new URL(url);
-
+    const u = new URL(String(rawUrl || '').trim());
     const keep = new URLSearchParams();
-    if (u.searchParams.get('v')) keep.set('v', u.searchParams.get('v'));
-
+    for (const k of ['v', 'story_fbid', 'id']) {
+      const v = u.searchParams.get(k);
+      if (v) keep.set(k, v);
+    }
     u.search = keep.toString();
-
-    // fb.watch links must stay original because redirect gives real video page
-    if (/fb\.watch/i.test(url)) return url;
-
+    u.hash = '';
     return u.toString();
   } catch (_) {
     return rawUrl;
   }
+}
+
+function buildFacebookCandidateUrls(rawUrl, canonical = '') {
+  const out = [];
+  const add = (u) => {
+    if (!u || typeof u !== 'string') return;
+    const x = u.trim();
+    if (!x || out.includes(x)) return;
+    out.push(x);
+  };
+
+  add(rawUrl);
+  add(canonical);
+  add(cleanFbUrlKeepImportant(rawUrl));
+  add(cleanFbUrlKeepImportant(canonical));
+
+  for (const u of [...out]) {
+    try {
+      const parsed = new URL(u);
+      const hostVariants = ['www.facebook.com', 'm.facebook.com', 'mbasic.facebook.com'];
+      for (const host of hostVariants) {
+        parsed.hostname = host;
+        add(parsed.toString());
+      }
+      if (/\/reel\/(\d+)/i.test(parsed.pathname)) {
+        const id = parsed.pathname.match(/\/reel\/(\d+)/i)[1];
+        add(`https://www.facebook.com/watch/?v=${id}`);
+        add(`https://m.facebook.com/watch/?v=${id}`);
+        add(`https://mbasic.facebook.com/watch/?v=${id}`);
+      }
+    } catch (_) {}
+  }
+  return [...new Set(out)].slice(0, 18);
+}
+
+function extractFacebookMediaFromHtml(html, pageUrl = '') {
+  const decoded = unescapeJsString(String(html || '')).replace(/&amp;/g, '&');
+  const $ = cheerio.load(decoded);
+  let hd = '', sd = '';
+
+  const regexes = [
+    { key: 'hd', re: /"browser_native_hd_url"\s*:\s*"([^"]+)"/g },
+    { key: 'sd', re: /"browser_native_sd_url"\s*:\s*"([^"]+)"/g },
+    { key: 'hd', re: /"hd_src"\s*:\s*"([^"]+)"/g },
+    { key: 'sd', re: /"sd_src"\s*:\s*"([^"]+)"/g },
+    { key: 'hd', re: /"hd_src_no_ratelimit"\s*:\s*"([^"]+)"/g },
+    { key: 'sd', re: /"sd_src_no_ratelimit"\s*:\s*"([^"]+)"/g },
+    { key: 'hd', re: /"playable_url_quality_hd"\s*:\s*"([^"]+)"/g },
+    { key: 'sd', re: /"playable_url"\s*:\s*"([^"]+)"/g },
+    { key: 'sd', re: /"video_url"\s*:\s*"([^"]+)"/g },
+  ];
+
+  for (const { key, re } of regexes) {
+    let m;
+    while ((m = re.exec(decoded)) !== null) {
+      const u = decodeCdnUrl(m[1]).replace(/\\u0025/g, '%');
+      if (!looksLikeFbVideo(u)) continue;
+      if (key === 'hd' && !hd) hd = u;
+      if (key === 'sd' && !sd) sd = u;
+      if (hd && sd) break;
+    }
+    if (hd && sd) break;
+  }
+
+  if (!hd && !sd) {
+    const mp4s = decoded.match(/https?:\/\/[^"'\s<>\\]+\.mp4[^"'\s<>\\]*/gi) || [];
+    for (const u0 of mp4s) {
+      const u = decodeCdnUrl(u0).replace(/&amp;/g, '&');
+      if (!looksLikeFbVideo(u)) continue;
+      if (!sd) sd = u;
+      if (/hd|720|1080/i.test(u) && !hd) hd = u;
+    }
+  }
+
+  if (!hd && !sd) return null;
+  return {
+    hd,
+    sd,
+    thumbnail: $('meta[property="og:image"]').attr('content') || '',
+    title: $('meta[property="og:title"]').attr('content') || 'Facebook Video',
+    pageUrl,
+  };
 }
 
 // ─── Optional Story cookies (Instagram only) ─────────────────────────────────
@@ -166,6 +254,12 @@ function normalizeFacebookUrl(rawUrl) {
 // a clean error.
 
 const IG_COOKIE = process.env.IG_SESSION_COOKIE || '';
+
+// Optional: self-hosted cobalt API fallback. Do NOT use public api.cobalt.tools.
+// Set COBALT_API_URL=https://your-cobalt-api-domain.com
+// Optional auth: COBALT_API_KEY=...
+const COBALT_API_URL = (process.env.COBALT_API_URL || '').replace(/\/+$/, '');
+const COBALT_API_KEY = process.env.COBALT_API_KEY || '';
 
 function looksLikeIgStoryUrl(u) { return /instagram\.com\/stories\//i.test(u); }
 function looksLikeFbStoryUrl(u) { return /facebook\.com\/stor(y|ies)\//i.test(u); }
@@ -402,115 +496,72 @@ async function tryIgStoryWithCookie(url) {
 // ─── Step 1 : resolve share URL to canonical (with login detection) ──────────
 
 async function resolveCanonicalFbUrl(rawUrl) {
-  // If already canonical, no resolve needed
-  if (
-    rawUrl.match(/facebook\.com\/(watch|reel|video)\/\d+/) ||
-    rawUrl.match(/facebook\.com\/[^/]+\/videos\/\d+/) ||
-    rawUrl.includes('facebook.com/watch?v=')
-  ) return { url: rawUrl, requiresLogin: false };
+  const normalized = normalizeFacebookUrl(rawUrl);
 
-  const url = rawUrl.replace('m.facebook.com', 'www.facebook.com');
+  // Already useful enough; don't waste time resolving direct canonical forms.
+  if (
+    normalized.match(/facebook\.com\/(watch|reel|video)\/\d+/) ||
+    normalized.match(/facebook\.com\/[^/]+\/videos\/\d+/) ||
+    normalized.includes('facebook.com/watch?v=')
+  ) return { url: normalized, requiresLogin: false, loginWall: false };
+
+  const url = normalized.replace('m.facebook.com', 'www.facebook.com');
   console.log(`🔗 Resolving: ${url}`);
 
   try {
     const resp = await axios.get(url, {
       maxRedirects:   20,
-      timeout:        15000,
+      timeout:        12000,
       validateStatus: () => true,
       headers:        BROWSER_HEADERS,
     });
 
+    const html = typeof resp.data === 'string' ? resp.data : '';
     const final =
       resp.request?.res?.responseUrl ||
       resp.request?.responseURL      ||
-      (resp.config?.url !== url ? resp.config?.url : null);
+      (resp.config?.url !== url ? resp.config?.url : null) ||
+      url;
 
-    // ── Login-redirect detection ──────────────────────────────────────────
-    // FB Stories, private posts, and age-gated content all redirect to one
-    // of these URLs. There's no way to scrape past them without an active
-    // session cookie — fail fast with a clear error instead of letting
-    // every downstream strategy spin trying.
-    if (final && /\/login(\.php|\/)?(?:[?#]|$)/.test(final)) {
-      console.log(`🔗 ⚠ Resolved to login wall — content requires authentication`);
-      return { url: rawUrl, requiresLogin: true };
+    // IMPORTANT: share/reel public URLs often show login HTML to datacenter IPs.
+    // Do not stop the whole pipeline here; external/self-hosted fallbacks may still work.
+    const loginWall = looksLikeLoginWall(html, final);
+    if (loginWall) {
+      console.log('🔗 ⚠ FB resolve hit login wall; continuing with fallback candidates');
     }
 
-    // ── Profile-redirect detection ────────────────────────────────────────
-    // Some FB share URLs (the bare /share/<shortcode>/ form, no /p/, /v/, /r/
-    // prefix) resolve to the AUTHOR'S PROFILE, not the post. The profile
-    // page won't have the post's video, so cleaning to /<username> would
-    // silently feed junk to every scraper. Detect this by checking whether
-    // the resolved URL is a "profile-only" pathname (no /posts/, /videos/,
-    // /reel/, /watch/ segment) — if so, prefer the og:url scraped from the
-    // page HTML, which usually points to the actual post.
     const isProfileShape = (u) => {
       try {
         const parts = new URL(u).pathname.split('/').filter(Boolean);
-        if (parts.length === 0) return false;
-        if (parts.length === 1) return true; // /<username>
-        // /<username>?something is also profile-only
         return parts.length === 1;
       } catch { return false; }
     };
 
-    if (final && final !== url) {
-      console.log(`🔗 Resolved → ${final}`);
-
-      // If we landed on a profile, try the page HTML for og:url which
-      // usually has the canonical post URL.
-      if (isProfileShape(final) && typeof resp.data === 'string') {
-        const $ = cheerio.load(resp.data);
-        const og = $('meta[property="og:url"]').attr('content') || '';
-        if (og && og.includes('facebook.com') &&
-            !og.includes('/share/') && !isProfileShape(og)) {
-          console.log(`🔗 Profile redirect → using og:url ${og}`);
-          return { url: og, requiresLogin: false };
-        }
-        // Couldn't extract og:url — keep the ORIGINAL share URL because the
-        // scrapers (especially metadownloader and getfvid) often handle
-        // share URLs better than profile URLs. The share URL is at least
-        // pointing at a single post; the profile URL points at hundreds.
-        console.log(`🔗 Profile redirect, no og:url — keeping share URL ${rawUrl}`);
-        return { url: rawUrl, requiresLogin: false };
-      }
-
-      if (!final.includes('/share/')) {
-        try {
-          const u = new URL(final);
-          const clean = `${u.origin}${u.pathname}`;
-          console.log(`🔗 Cleaned → ${clean}`);
-          return { url: clean, requiresLogin: false };
-        } catch (_) { return { url: final, requiresLogin: false }; }
-      }
-    }
-
-    if (typeof resp.data === 'string' && resp.data.length > 500) {
-      // ── Stronger login-wall detection via HTML content ──────────────────
-      if (
-        resp.data.includes('login_form') ||
-        resp.data.includes('login.php') ||
-        resp.data.includes('id="loginbutton"') ||
-        resp.data.includes('checkpoint')
-      ) {
-        console.log('🔗 ⚠ HTML shows login wall');
-        return { url: rawUrl, requiresLogin: true };
-      }
-
-      const $ = cheerio.load(resp.data);
+    if (html && html.length > 500) {
+      const $ = cheerio.load(html);
       const og = $('meta[property="og:url"]').attr('content') || '';
-      if (og && og.includes('facebook.com') &&
-          !og.includes('/share/') && !isProfileShape(og)) {
+      if (og && og.includes('facebook.com') && !og.includes('/share/') && !isProfileShape(og)) {
         console.log(`🔗 og:url → ${og}`);
-        return { url: og, requiresLogin: false };
+        return { url: cleanFbUrlKeepImportant(og), requiresLogin: false, loginWall };
       }
     }
+
+    if (final && final !== url && !/\/login(\.php|\/)/i.test(final)) {
+      if (!final.includes('/share/') && !isProfileShape(final)) {
+        console.log(`🔗 Resolved → ${final}`);
+        return { url: cleanFbUrlKeepImportant(final), requiresLogin: false, loginWall };
+      }
+    }
+
+    return { url: rawUrl, requiresLogin: false, loginWall };
   } catch (e) {
     console.warn(`🔗 Redirect failed: ${e.message}`);
   }
 
   console.warn('🔗 Could not resolve — using original URL');
-  return { url, requiresLogin: false };
+  return { url: rawUrl, requiresLogin: false, loginWall: false };
 }
+
 
 // ─── Strategy : metadownloader ───────────────────────────────────────────────
 
@@ -551,39 +602,47 @@ const FB_REGEXES = [
 ];
 
 async function tryDirectScrape(url) {
-  const resp = await axios.get(url, {
-    timeout: 15000,
-    maxRedirects: 10,
-    headers: {
-      'User-Agent':      UA_MOBILE,
-      'Accept-Language': 'en-US,en;q=0.9',
-      Accept:            'text/html,*/*;q=0.8',
-    },
-  });
+  const urls = buildFacebookCandidateUrls(url, url);
+  const errors = [];
 
-  const html = typeof resp.data === 'string' ? resp.data : '';
-  if (!html || html.length < 500) throw new Error('direct: empty response');
+  for (const target of urls) {
+    for (const ua of [UA_DESKTOP, UA_MOBILE, 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)']) {
+      try {
+        const resp = await axios.get(target, {
+          timeout: 12000,
+          maxRedirects: 8,
+          validateStatus: () => true,
+          headers: {
+            'User-Agent': ua,
+            'Accept-Language': 'en-US,en;q=0.9',
+            Accept: 'text/html,application/xhtml+xml,*/*;q=0.8',
+            Referer: 'https://www.facebook.com/',
+          },
+        });
 
-  let hd = '', sd = '';
-  for (const { key, re } of FB_REGEXES) {
-    const m = html.match(re);
-    if (m?.[1]) {
-      const clean = unescapeJsString(m[1]);
-      if (key === 'hd' && !hd && clean.startsWith('http')) hd = clean;
-      if (key === 'sd' && !sd && clean.startsWith('http')) sd = clean;
+        const finalUrl = resp.request?.res?.responseUrl || '';
+        const html = typeof resp.data === 'string' ? resp.data : '';
+        if (!html || html.length < 300) {
+          errors.push('empty html');
+          continue;
+        }
+        if (looksLikeLoginWall(html, finalUrl)) {
+          errors.push('login wall');
+          continue;
+        }
+
+        const result = extractFacebookMediaFromHtml(html, target);
+        if (result && (result.hd || result.sd)) return result;
+        errors.push('no media json');
+      } catch (e) {
+        errors.push(e.message);
+      }
     }
-    if (hd && sd) break;
   }
 
-  if (!hd && !sd) throw new Error('direct: no video URLs (login required?)');
-
-  const $ = cheerio.load(html);
-  return {
-    hd, sd,
-    thumbnail: $('meta[property="og:image"]').attr('content') || '',
-    title:     $('meta[property="og:title"]').attr('content') || 'Facebook Video',
-  };
+  throw new Error(`direct: ${errors.slice(0, 8).join(' | ')}`);
 }
+
 
 // ─── Strategy : getfvid.com ──────────────────────────────────────────────────
 
@@ -686,63 +745,102 @@ async function trySnapsaveFb(url) {
   };
 }
 
+
 // ─── Strategy : mbasic / m.facebook.com video scraper ────────────────────────
 
 async function tryMbasicVideo(url) {
   const errors = [];
+  const targets = buildFacebookCandidateUrls(url, url)
+    .filter(u => /facebook\.com/i.test(u))
+    .flatMap(u => {
+      try {
+        const p = new URL(u);
+        return ['mbasic.facebook.com', 'm.facebook.com', 'www.facebook.com'].map(h => {
+          p.hostname = h;
+          return p.toString();
+        });
+      } catch (_) { return [u]; }
+    });
 
-  const targets = [
-    url,
-    url.replace(/(?:m|web|www|business)?\.?facebook\.com/i, 'mbasic.facebook.com'),
-    url.replace(/(?:m|web|www|business)?\.?facebook\.com/i, 'm.facebook.com'),
-  ];
-
-  for (const target of targets) {
+  for (const target of [...new Set(targets)]) {
     try {
       const resp = await axios.get(target, {
         timeout: 12000,
-        maxRedirects: 10,
+        maxRedirects: 8,
         validateStatus: () => true,
         headers: {
           'User-Agent': UA_MOBILE,
           'Accept-Language': 'en-US,en;q=0.9',
           Accept: 'text/html,*/*;q=0.8',
+          Referer: 'https://m.facebook.com/',
         },
       });
 
       const finalUrl = resp.request?.res?.responseUrl || '';
-
-      if (/\/login(\.php|\/)/.test(finalUrl)) {
-        errors.push('redirected to login');
+      const html = typeof resp.data === 'string' ? resp.data : '';
+      if (looksLikeLoginWall(html, finalUrl)) {
+        errors.push('login wall');
         continue;
       }
 
-      const html = typeof resp.data === 'string' ? resp.data : '';
-
-      const mp4Matches =
-        html.match(/https?:\/\/[^"'\s<>]*\.mp4[^"'\s<>]*/gi) || [];
-
-      const videos = [...new Set(mp4Matches)]
-        .map(u => unescapeJsString(u).replace(/&amp;/g, '&'))
-        .filter(u => u.includes('fbcdn.net') || u.includes('scontent'));
-
-      if (videos.length) {
-        const $ = cheerio.load(html);
-        return {
-          hd: '',
-          sd: videos[0],
-          thumbnail: $('meta[property="og:image"]').attr('content') || '',
-          title: $('meta[property="og:title"]').attr('content') || 'Facebook Video',
-        };
-      }
-
+      const parsed = extractFacebookMediaFromHtml(html, target);
+      if (parsed && (parsed.hd || parsed.sd)) return parsed;
       errors.push('no mp4 urls');
     } catch (e) {
       errors.push(e.message);
     }
   }
 
-  throw new Error(`mbasic-video: ${errors.join(' | ')}`);
+  throw new Error(`mbasic-video: ${errors.slice(0, 8).join(' | ')}`);
+}
+
+
+// ─── Strategy : self-hosted cobalt API fallback ──────────────────────────────
+// Official cobalt does not provide a public pre-hosted API for third-party apps.
+// Run your own instance and set COBALT_API_URL. This is optional and skipped if unset.
+
+async function tryCobaltFacebook(url) {
+  if (!COBALT_API_URL) throw new Error('cobalt: COBALT_API_URL not set');
+
+  const resp = await axios.post(
+    `${COBALT_API_URL}/`,
+    {
+      url,
+      downloadMode: 'auto',
+      filenameStyle: 'basic',
+      videoQuality: '720',
+      youtubeVideoCodec: 'h264',
+      youtubeDubLang: 'en',
+    },
+    {
+      timeout: 25000,
+      validateStatus: () => true,
+      headers: {
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
+        ...(COBALT_API_KEY ? { Authorization: `Api-Key ${COBALT_API_KEY}` } : {}),
+      },
+    }
+  );
+
+  if (resp.status >= 400) {
+    throw new Error(`cobalt: HTTP ${resp.status} ${resp.data?.error?.code || resp.data?.error || ''}`.trim());
+  }
+
+  const data = resp.data || {};
+  const direct = data.url || data.download || data.tunnel || '';
+  const picker = Array.isArray(data.picker) ? data.picker : [];
+  const first = picker.find(i => i?.url && (i.type === 'video' || looksLikeFbVideo(i.url))) || picker.find(i => i?.url);
+  const mediaUrl = direct || first?.url || '';
+
+  if (!mediaUrl || !mediaUrl.startsWith('http')) throw new Error('cobalt: no media url');
+
+  return {
+    hd: '',
+    sd: mediaUrl,
+    thumbnail: data.thumb || first?.thumb || '',
+    title: data.filename || data.title || 'Facebook Video',
+  };
 }
 
 // ─── Facebook entry ──────────────────────────────────────────────────────────
@@ -753,86 +851,46 @@ async function downloadFacebook(rawUrl) {
   const normalized = normalizeFacebookUrl(rawUrl);
   const { url: canonical, requiresLogin } = await resolveCanonicalFbUrl(normalized);
 
-  // ── Story / login-required path ───────────────────────────────────────
-  // No cookie path for Facebook — we use public-mirror scrapers only.
-  // These reach public-profile stories without auth. Private stories and
-  // restricted content can't be downloaded by any public method.
-  if (requiresLogin || looksLikeFbStoryUrl(rawUrl)) {
+  // Stories are truly time/auth restricted; keep clean handling.
+  if (looksLikeFbStoryUrl(rawUrl) || looksLikeFbStoryUrl(canonical)) {
     try {
-      const result = await withTimeout(
-        tryFbStoryPublic(rawUrl),
-        25000,
-        'fb-story-public'
-      );
-      if (result && (result.hd || result.sd)) {
-        console.log('📘 ✅ FB Story via public mirror succeeded');
-        return result;
-      }
+      const result = await withTimeout(tryFbStoryPublic(rawUrl), 25000, 'fb-story-public');
+      if (result && (result.hd || result.sd)) return result;
     } catch (e) {
       console.warn(`📘 FB Story public path failed: ${e.message}`);
     }
-    throw new Error(
-      'Facebook Story not accessible. Public-profile stories can sometimes ' +
-      'be downloaded, but this one was either private, restricted, or ' +
-      'expired (Stories last only 24h).'
-    );
+    throw new Error('Facebook Story not accessible. It may be private, restricted, or expired.');
   }
 
-  // Run strategies in parallel against all candidate URLs with per-strategy
-  // timeouts so a single hanging service can't stall the whole request.
-  const candidateUrls = [...new Set([canonical, normalized, rawUrl])];
+  const candidateUrls = buildFacebookCandidateUrls(rawUrl, canonical);
+  console.log(`📘 Facebook candidates: ${candidateUrls.length}`);
 
+  // Snapsave is currently returning 404 often, so keep it last as a weak fallback.
   const strategies = [];
-
   for (const candidate of candidateUrls) {
     strategies.push(
-      [`snapsave-fb`,    () => trySnapsaveFb(candidate),    15000],
-      [`getfvid`,        () => tryGetfvid(candidate),       16000],
-      [`mbasic-video`,   () => tryMbasicVideo(candidate),   12000],
-      [`direct-scrape`,  () => tryDirectScrape(candidate),  12000],
-      [`metadownloader`, () => tryMetadownloader(candidate), 18000],
+      ['cobalt',        () => tryCobaltFacebook(candidate),  25000],
+      ['getfvid',       () => tryGetfvid(candidate),         16000],
+      ['mbasic-video',  () => tryMbasicVideo(candidate),     12000],
+      ['direct-scrape', () => tryDirectScrape(candidate),    12000],
+      ['metadownloader',() => tryMetadownloader(candidate),  18000],
+      ['snapsave-fb',   () => trySnapsaveFb(candidate),      12000],
     );
   }
 
-  const errors = [];
-  const promises = strategies.map(([name, fn, ms]) =>
-    withTimeout(fn(), ms, name).then(
-      result => {
-        // metadownloader returns whatever shape the package gives us; the
-        // others return { hd, sd, ... }. Validate both.
-        if (name === 'metadownloader') {
-          if (result) { console.log(`📘 ✅ ${name} succeeded`); return result; }
-          throw new Error(`${name}: empty result`);
-        }
-        if (result && (result.hd || result.sd)) {
-          console.log(`📘 ✅ ${name} succeeded`);
-          return result;
-        }
-        throw new Error(`${name}: no usable URL`);
-      },
-      err => {
-        const msg = err.message || String(err);
-        console.warn(`📘 ❌ ${name}: ${msg.slice(0, 100)}`);
-        throw new Error(`${name}: ${msg}`);
-      }
-    )
-  );
-
-  try {
-    return await firstSuccess(promises, errors);
-  } catch (_) {
-    console.warn('🔁 Facebook retry once with same candidates');
-
-    const retryErrors = [];
-    const retryPromises = strategies.map(([name, fn, ms]) =>
-      withTimeout(fn(), ms, name).then(
+  const runRound = async (round) => {
+    const errors = [];
+    const promises = strategies.map(([name, fn, ms]) =>
+      withTimeout(fn(), ms, `${name}/${round}`).then(
         result => {
           if (name === 'metadownloader') {
-            if (result) return result;
+            if (result) { console.log(`📘 ✅ ${name} succeeded`); return result; }
             throw new Error(`${name}: empty result`);
           }
-
-          if (result && (result.hd || result.sd)) return result;
+          if (result && (result.hd || result.sd || result.url || result.download)) {
+            console.log(`📘 ✅ ${name} succeeded`);
+            return result;
+          }
           throw new Error(`${name}: no usable URL`);
         },
         err => {
@@ -841,16 +899,25 @@ async function downloadFacebook(rawUrl) {
         }
       )
     );
-
     try {
-      return await firstSuccess(retryPromises, retryErrors);
+      return await firstSuccess(promises, errors);
     } catch (_) {
-      throw new Error(
-        `Facebook: all strategies failed — ${[...errors, ...retryErrors].join(' | ')}`
-      );
+      throw new Error(errors.join(' | '));
+    }
+  };
+
+  try {
+    return await runRound('first');
+  } catch (firstErr) {
+    console.warn(`🔁 Facebook retry once: ${firstErr.message.slice(0, 180)}`);
+    try {
+      return await runRound('retry');
+    } catch (retryErr) {
+      throw new Error(`Facebook: all strategies failed — ${firstErr.message} | retry: ${retryErr.message}`);
     }
   }
 }
+
 
 // ─── Instagram scrapers ──────────────────────────────────────────────────────
 

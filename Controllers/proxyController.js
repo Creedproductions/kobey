@@ -200,6 +200,8 @@ async function fetchUpstream(targetUrl, headers, method) {
     responseType:   'stream',
     timeout:        90_000,
     maxRedirects:   10,
+    maxContentLength: Infinity,
+    maxBodyLength:    Infinity,
     validateStatus: (s) => s < 500,
   });
 }

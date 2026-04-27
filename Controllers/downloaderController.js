@@ -805,7 +805,7 @@ const platformDownloaders = {
   async youtube(url, req) {
     console.log('YouTube: Processing URL:', url);
     try {
-      const timeout = url.includes('/shorts/') ? 30000 : 60000;
+      const timeout = url.includes('/shorts/') ? 75000 : 90000;
       const data    = await downloadWithTimeout(() => fetchYouTubeData(url), timeout);
       if (!data || !data.title) throw new Error('YouTube service returned invalid data');
       console.log('YouTube: Successfully fetched data, formats count:', data.formats?.length || 0);
