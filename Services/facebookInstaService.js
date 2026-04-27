@@ -549,6 +549,10 @@ const FB_REGEXES = [
   { key: 'sd', re: /"sd_src_no_ratelimit"\s*:\s*"([^"]+)"/ },
   { key: 'hd', re: /"playable_url_quality_hd"\s*:\s*"([^"]+)"/ },
   { key: 'sd', re: /"playable_url"\s*:\s*"([^"]+)"/ },
+  // 2024–2025 FB JSON structures (Relay/RSC payloads)
+  { key: 'hd', re: /"video_url"\s*:\s*"(https:\/\/[^"]*fbcdn[^"]+)"/ },
+  { key: 'sd', re: /"stream_url"\s*:\s*"(https:\/\/[^"]*fbcdn[^"]+)"/ },
+  { key: 'hd', re: /"base_url"\s*:\s*"(https:\/\/[^"]*fbcdn[^"]+\.mp4[^"]*)"/ },
 ];
 
 async function tryDirectScrape(url) {
