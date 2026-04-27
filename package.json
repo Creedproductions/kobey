@@ -37,7 +37,7 @@
     "play-dl": "^1.9.7",
     "vm2": "^3.10.0",
     "xml2js": "^0.6.2",
-    "youtubei.js": "^16.0.1",
+    "youtubei.js": "^17.0.1",
     "yt-dlp-wrap": "^2.3.12",
     "ytdl-core": "^4.11.5"
   },

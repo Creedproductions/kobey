@@ -1,6 +1,7 @@
 // Services/youtubeService.js
 
 const axios = require('axios');
+const { execFile } = require('child_process');
 
 const FREE_MAX = 360;
 const COBALT_API_URL = (process.env.COBALT_API_URL || '').replace(/\/+$/, '');
@@ -12,11 +13,16 @@ try {
   console.warn('[yt] youtubei.js not installed');
 }
 
-let vreden = null;
+// vreden removed (dead dependency). Use ytdl-core if available.
+let ytdl = null;
 try {
-  vreden = require('@vreden/youtube_scraper');
+  ytdl = require('@distube/ytdl-core');
 } catch (_) {
-  console.warn('[yt] @vreden/youtube_scraper not installed');
+  try {
+    ytdl = require('ytdl-core'); // fallback
+  } catch (__) {
+    console.warn('[yt] ytdl-core not installed (optional)');
+  }
 }
 
 const UA_DESKTOP =
@@ -34,13 +40,13 @@ async function getInnertube() {
     _yt = await Innertube.create({ retrieve_player: true });
     _ytExpiresAt = now + 60 * 60 * 1000;
   }
-
   return _yt;
 }
 
 async function tryInnertube(videoId) {
   const yt = await getInnertube();
-  const clients = ['IOS', 'ANDROID', 'WEB'];
+  // Added 'TV' client (more forgiving bot detection)
+  const clients = ['IOS', 'ANDROID', 'WEB', 'TV'];
 
   let info = null;
   let usedClient = '';
@@ -62,18 +68,14 @@ async function tryInnertube(videoId) {
   }
 
   const formats = [];
-
   for (const f of info.streaming_data.formats || []) {
     const url =
       f.url ||
       (typeof f.decipher === 'function'
         ? f.decipher(yt.session.player)
         : null);
-
     if (!url) continue;
-
     const h = f.height || parseInt(f.quality_label || '0') || 0;
-
     formats.push({
       url,
       quality: `${h}p`,
@@ -86,7 +88,6 @@ async function tryInnertube(videoId) {
   const audios = (info.streaming_data.adaptive_formats || [])
     .filter(f => f.has_audio && !f.has_video && (f.url || f.decipher))
     .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
-
   if (audios[0]) {
     const a = audios[0];
     const url =
@@ -94,7 +95,6 @@ async function tryInnertube(videoId) {
       (typeof a.decipher === 'function'
         ? a.decipher(yt.session.player)
         : null);
-
     if (url) {
       const kbps = Math.round((a.bitrate || 128000) / 1000);
       formats.push({
@@ -110,9 +110,7 @@ async function tryInnertube(videoId) {
   if (!formats.length) throw new Error('innertube: no usable formats');
 
   const infoBasic = info.basic_info || {};
-
   console.log(`[yt/innertube] ${usedClient} succeeded`);
-
   return {
     title: infoBasic.title || `YouTube ${videoId}`,
     thumbnail: infoBasic.thumbnail?.[0]?.url || null,
@@ -144,27 +142,16 @@ async function tryVidfly(url) {
 
   const formats = [];
   const seen = new Set();
-
   for (const it of data.items) {
     const label = String(it.label || '').toLowerCase();
-
     if (!it.url) continue;
-    if (
-      label.includes('video only') ||
-      label.includes('vid only') ||
-      label.includes('without audio')
-    ) {
-      continue;
-    }
-
+    if (label.includes('video only') || label.includes('vid only') || label.includes('without audio')) continue;
     const isAudio = label.includes('audio') || String(it.type || '').includes('audio');
     const match = label.match(/(\d+)/);
     const qNum = isAudio ? 128 : match ? parseInt(match[1]) : 0;
     const key = `${isAudio ? 'a' : 'v'}:${qNum}`;
-
     if (seen.has(key)) continue;
     seen.add(key);
-
     formats.push({
       url: it.url,
       quality: it.label || (isAudio ? '128kbps' : `${qNum}p`),
@@ -175,9 +162,7 @@ async function tryVidfly(url) {
   }
 
   if (!formats.length) throw new Error('vidfly: no usable formats');
-
   console.log(`[yt/vidfly] ${formats.length} formats`);
-
   return {
     title: data.title || 'YouTube Video',
     thumbnail: data.cover || null,
@@ -187,53 +172,48 @@ async function tryVidfly(url) {
   };
 }
 
-async function tryVreden(url) {
-  if (!vreden) throw new Error('vreden: package not available');
+async function tryYtdlCore(url) {
+  if (!ytdl) throw new Error('ytdl-core not available');
 
-  const meta = await vreden.metadata(url);
-  const qualities = [1080, 720, 480, 360];
+  const info = await ytdl.getInfo(url);
+  const formats = [];
 
-  const results = await Promise.all(
-    qualities.map(async q => {
-      try {
-        const r = await vreden.ytmp4(url, q);
-        return r?.download?.url ? { url: r.download.url, qualityNum: q } : null;
-      } catch (_) {
-        return null;
-      }
-    })
-  );
-
-  const formats = results.filter(Boolean).map(r => ({
-    url: r.url,
-    quality: `${r.qualityNum}p`,
-    qualityNum: r.qualityNum,
-    isAudioOnly: false,
-    hasAudio: true,
-  }));
-
-  try {
-    const a = await vreden.ytmp3(url, 128);
-    if (a?.download?.url) {
-      formats.push({
-        url: a.download.url,
-        quality: '128kbps',
-        qualityNum: 128000,
-        isAudioOnly: true,
-        hasAudio: true,
-      });
+  // Group by itag to avoid duplicates
+  const itagMap = new Map();
+  for (const f of info.formats) {
+    if (f.hasVideo && f.hasAudio) {
+      const h = f.height || 0;
+      const key = `muxed_${h}`;
+      if (!itagMap.has(key)) itagMap.set(key, f);
     }
-  } catch (_) {}
+    // Get best audio-only
+    if (f.hasAudio && !f.hasVideo && f.audioBitrate) {
+      const key = 'audio_best';
+      if (!itagMap.has(key) || f.audioBitrate > itagMap.get(key).audioBitrate) {
+        itagMap.set(key, f);
+      }
+    }
+  }
 
-  if (!formats.length) throw new Error('vreden: no formats');
+  for (const f of itagMap.values()) {
+    const h = f.height || 0;
+    const isAudio = !f.hasVideo && f.hasAudio;
+    formats.push({
+      url: f.url,
+      quality: isAudio ? `${Math.round(f.audioBitrate / 1000)}kbps` : `${h}p`,
+      qualityNum: isAudio ? (f.audioBitrate || 128000) : h,
+      isAudioOnly: isAudio,
+      hasAudio: f.hasAudio,
+    });
+  }
 
-  console.log(`[yt/vreden] ${formats.length} formats`);
-
+  if (!formats.length) throw new Error('ytdl-core: no formats');
+  console.log(`[yt/ytdl-core] ${formats.length} formats`);
   return {
-    title: meta?.title || 'YouTube Video',
-    thumbnail: meta?.image || meta?.thumbnail || null,
-    duration: meta?.duration?.seconds || 0,
-    uploader: meta?.channel_title || meta?.author || 'YouTube',
+    title: info.videoDetails.title || 'YouTube Video',
+    thumbnail: info.videoDetails.thumbnails?.[0]?.url || null,
+    duration: parseInt(info.videoDetails.lengthSeconds) || 0,
+    uploader: info.videoDetails.author?.name || 'YouTube',
     formats,
   };
 }
@@ -260,32 +240,59 @@ async function tryCobalt(url) {
     }
   );
 
-  if (r.status >= 400) {
-    throw new Error(`cobalt: HTTP ${r.status}`);
-  }
+  if (r.status >= 400) throw new Error(`cobalt: HTTP ${r.status}`);
 
   const data = r.data || {};
   const finalUrl = data.url || data.download || data.file || '';
-
-  if (!finalUrl || !String(finalUrl).startsWith('http')) {
-    throw new Error('cobalt: no download url');
-  }
+  if (!finalUrl || !String(finalUrl).startsWith('http')) throw new Error('cobalt: no download url');
 
   return {
     title: data.filename || 'YouTube Video',
     thumbnail: null,
     duration: 0,
     uploader: 'YouTube',
-    formats: [
-      {
-        url: finalUrl,
-        quality: '360p',
-        qualityNum: 360,
-        isAudioOnly: false,
-        hasAudio: true,
-      },
-    ],
+    formats: [{
+      url: finalUrl,
+      quality: '360p',
+      qualityNum: 360,
+      isAudioOnly: false,
+      hasAudio: true,
+    }],
   };
+}
+
+async function tryYtDlp(url) {
+  return new Promise((resolve, reject) => {
+    execFile('yt-dlp', [
+      '-f', 'best[height<=?1080][vcodec!=?vp9]+bestaudio[ext=m4a]/best',
+      '--no-playlist', '--dump-json', url
+    ], { timeout: 20000 }, (err, stdout) => {
+      if (err) return reject(new Error(`yt-dlp: ${err.message}`));
+      try {
+        const info = JSON.parse(stdout);
+        const formats = [];
+        if (info.url) {
+          formats.push({
+            url: info.url,
+            quality: `${info.height || 720}p`,
+            qualityNum: info.height || 720,
+            isAudioOnly: false,
+            hasAudio: true,
+          });
+        }
+        if (!formats.length) throw new Error('yt-dlp: no URL extracted');
+        resolve({
+          title: info.title || 'YouTube Video',
+          thumbnail: info.thumbnail || null,
+          duration: info.duration || 0,
+          uploader: info.uploader || 'YouTube',
+          formats,
+        });
+      } catch (parseErr) {
+        reject(new Error(`yt-dlp: parse error - ${parseErr.message}`));
+      }
+    });
+  });
 }
 
 async function fetchYouTubeData(url) {
@@ -298,8 +305,9 @@ async function fetchYouTubeData(url) {
   const strategies = [
     Innertube && wrap('innertube', tryInnertube(videoId)),
     wrap('vidfly', tryVidfly(normUrl)),
-    vreden && wrap('vreden', tryVreden(normUrl)),
+    ytdl && wrap('ytdl-core', tryYtdlCore(normUrl)),
     COBALT_API_URL && wrap('cobalt', tryCobalt(normUrl)),
+    wrap('yt-dlp', tryYtDlp(normUrl)), // always include if binary exists; errors caught
   ].filter(Boolean);
 
   if (!strategies.length) {
@@ -326,19 +334,16 @@ function firstSuccess(wrapped) {
     for (const p of wrapped) {
       p.then(({ ok, name, r, e }) => {
         settled++;
-
         if (ok && !done) {
           done = true;
           console.log(`YouTube: won by [${name}]`);
           resolve(r);
           return;
         }
-
         if (!ok) {
           errors.push(`[${name}]: ${e}`);
           console.log(`YouTube [${name}] failed: ${String(e).slice(0, 100)}`);
         }
-
         if (settled === wrapped.length && !done) {
           reject(new Error('YouTube all sources failed: ' + errors.join(' | ')));
         }
@@ -405,16 +410,13 @@ function normalizeUrl(url) {
     const id = url.split('youtu.be/')[1].split('?')[0].split('&')[0];
     return `https://www.youtube.com/watch?v=${id}`;
   }
-
   if (url.includes('m.youtube.com')) {
     return url.replace('m.youtube.com', 'www.youtube.com');
   }
-
   if (url.includes('/shorts/')) {
     const id = url.split('/shorts/')[1].split('?')[0].split('&')[0];
     return `https://www.youtube.com/watch?v=${id}`;
   }
-
   return url;
 }
 
@@ -425,12 +427,10 @@ function extractVideoId(url) {
     /\/shorts\/([a-zA-Z0-9_-]{11})/,
     /\/embed\/([a-zA-Z0-9_-]{11})/,
   ];
-
   for (const p of patterns) {
     const m = url.match(p);
     if (m) return m[1];
   }
-
   return null;
 }
 
