@@ -176,7 +176,8 @@ function fbHeaders(extra = {}) {
 // a clean error.
 
 const IG_COOKIE = process.env.IG_SESSION_COOKIE || '';
-const FB_COOKIE = process.env.FB_SESSION_COOKIE || '';
+const FB_COOKIE = String(process.env.FB_SESSION_COOKIE || '').trim();
+console.log(`📘 🍪 FB COOKIE: ${FB_COOKIE ? 'SET' : 'MISSING'}`);
 
 function looksLikeIgStoryUrl(u) { return /instagram\.com\/stories\//i.test(u); }
 function looksLikeFbStoryUrl(u) { return /facebook\.com\/stor(y|ies)\//i.test(u); }
@@ -875,19 +876,23 @@ async function downloadFacebook(rawUrl) {
     );
   }
 
-  // If a non-story resolved to login and no cookie exists, fail cleanly.
-  // If a cookie exists, still try cookie strategy because the unauth resolver
-  // can hit login while the authenticated request succeeds.
+  // If a non-story resolved to login, do NOT stop immediately. Some mirrors
+  // and metadownloader can still resolve share URLs. Cookie strategy is added
+  // only when FB_SESSION_COOKIE exists, so missing cookie no longer pollutes
+  // every failure with "FB_SESSION_COOKIE not configured".
   if (requiresLogin && !FB_COOKIE) {
-    throw new Error('Facebook content requires login. Configure FB_SESSION_COOKIE for this URL.');
+    console.warn('📘 Facebook resolved to login wall and FB_SESSION_COOKIE is missing; trying public fallbacks only');
   }
 
   const candidateUrls = [...new Set([canonical, normalized, rawUrl].filter(Boolean))];
   const strategies = [];
 
   for (const candidate of candidateUrls) {
+    if (FB_COOKIE) {
+      strategies.push(['fb-cookie', () => tryFacebookCookieScrape(candidate), 18000]);
+    }
+
     strategies.push(
-      ['fb-cookie',      () => tryFacebookCookieScrape(candidate), 18000],
       ['mbasic-video',   () => tryMbasicVideo(candidate),          12000],
       ['direct-scrape',  () => tryDirectScrape(candidate),         12000],
       ['getfvid',        () => tryGetfvid(candidate),              16000],
@@ -927,9 +932,11 @@ async function downloadFacebook(rawUrl) {
     try {
       return await firstSuccess(buildPromises(retryErrors), retryErrors);
     } catch (_) {
-      throw new Error(
-        `Facebook: all strategies failed — ${[...errors, ...retryErrors].join(' | ')}`
-      );
+      const allErrors = [...errors, ...retryErrors].join(' | ');
+      const cookieHint = FB_COOKIE
+        ? ''
+        : ' | FB_SESSION_COOKIE missing: Facebook share/reel URLs often require authenticated cookies on server IPs';
+      throw new Error(`Facebook: all strategies failed — ${allErrors}${cookieHint}`);
     }
   }
 }
