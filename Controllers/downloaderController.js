@@ -675,12 +675,19 @@ const platformDownloaders = {
   //
   // Priority: snapsave > igdl > embed
   // If snapsave/igdl both fail we fall through to embed which is the reliable floor.
-  async instagram(url) {
+  async instagram(url, req) {
+    // Pull the per-request IG cookie from the request body, if any.
+    // Forwarded to facebookInsta() so the cookie-authenticated story
+    // path (tryIgStoryWithCookie) is used per-request instead of (or in
+    // addition to) the global env-var fallback.
+    const userCookies = req?.body?.cookies || {};
+    const igCookie    = userCookies.instagram || null;
+
     let snapsResult = null, igdlResult  = null, embedResult = null;
     let snapsErr    = null, igdlErr     = null, embedErr    = null;
 
     await Promise.allSettled([
-      downloadWithTimeout(() => facebookInsta(url), 35000)
+      downloadWithTimeout(() => facebookInsta(url, { igCookie }), 35000)
         .then(d  => { snapsResult = d; })
         .catch(e => {
           snapsErr = e instanceof Error ? e : new Error(String(e));
@@ -769,7 +776,15 @@ const platformDownloaders = {
 
   // ─── FACEBOOK ─────────────────────────────────────────────────────────────
   async facebook(url, req) {
-    const raw = await downloadWithTimeout(() => facebookInsta(url), 60000);
+    // Pull the per-request FB cookie from the request body, if any.
+    // facebookInsta() falls back to FB_SESSION_COOKIE env var when null.
+    const userCookies = req?.body?.cookies || {};
+    const fbCookie    = userCookies.facebook || null;
+
+    const raw = await downloadWithTimeout(
+      () => facebookInsta(url, { fbCookie }),
+      60000,
+    );
     if (!raw) throw new Error('Facebook: no data returned');
     const data = normaliseFacebookData(raw);
     data._req  = req;
@@ -1349,7 +1364,11 @@ const downloadMedia = async (req, res) => {
     const downloader = platformDownloaders[platform];
     if (!downloader) throw new Error(`No downloader available for platform: ${platform}`);
 
-    const data = (platform === 'youtube' || platform === 'facebook' || platform === 'tiktok')
+    // Platforms whose downloader signature is (url, req) — they need
+    // access to req.body.cookies (FB/IG sign-in) or to req for proxy
+    // URL building (YouTube/TikTok).
+    const needsReq = ['youtube', 'facebook', 'tiktok', 'instagram'];
+    const data = needsReq.includes(platform)
       ? await downloader(processedUrl, req)
       : await downloader(processedUrl);
 
@@ -1479,6 +1498,40 @@ const downloadMedia = async (req, res) => {
     // Fire-and-forget Telegram alert. The service handles dedup + rate-limit
     // internally and will never throw, so we don't await or try/catch here.
     telegram.notifyDownloadFailure(failedPlatform, url, error).catch(() => {});
+
+    // ── Login-wall detection ───────────────────────────────────────────
+    // The underlying scrapers throw error strings containing recognizable
+    // phrases when they hit a sign-in requirement (FB stories, IG stories,
+    // private posts, follower-only reels). When that happens we return a
+    // special LOGIN_REQUIRED code so the Flutter app can route the user
+    // into the sign-in flow with the platform browser instead of just
+    // showing a generic "fetch failed".
+    const msg = (error.message || '').toLowerCase();
+    const looksLikeLoginWall =
+      msg.includes('login required')      ||
+      msg.includes('requires login')      ||
+      msg.includes('redirected to login') ||
+      msg.includes('private account')     ||
+      msg.includes('private profile')     ||
+      msg.includes('cookie rejected')     ||
+      msg.includes('cookie appears stale')||
+      msg.includes('fb_session_cookie missing') ||
+      msg.includes('all scrapers failed') || // IG: typically a wall
+      msg.includes('all strategies failed'); // FB: typically a wall
+
+    if (looksLikeLoginWall &&
+        (failedPlatform === 'facebook' ||
+         failedPlatform === 'instagram' ||
+         failedPlatform === 'twitter')) {
+      return res.status(401).json({
+        success:   false,
+        code:      'LOGIN_REQUIRED',
+        platform:  failedPlatform,
+        error:     'Sign in required to download this content',
+        details:   error.message,
+        timestamp: new Date().toISOString(),
+      });
+    }
 
     let statusCode = 500;
     if (error.message.includes('not available') || error.message.includes('not found')) statusCode = 404;

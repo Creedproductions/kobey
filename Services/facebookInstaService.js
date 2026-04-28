@@ -150,12 +150,17 @@ function normalizeFacebookUrl(rawUrl) {
   }
 }
 
-function fbHeaders(extra = {}) {
+// Builds the standard Facebook request headers. The optional second
+// argument lets callers override the cookie per-request (used when the
+// Flutter app has captured a user's session cookies via the platform
+// browser sign-in flow). Falls back to FB_COOKIE env var when null.
+function fbHeaders(extra = {}, overrideCookie = null) {
+  const cookie = overrideCookie || FB_COOKIE;
   return {
     ...BROWSER_HEADERS,
     'User-Agent': UA_DESKTOP,
     Referer: 'https://www.facebook.com/',
-    ...(FB_COOKIE ? { Cookie: FB_COOKIE } : {}),
+    ...(cookie ? { Cookie: cookie } : {}),
     ...extra,
   };
 }
@@ -332,8 +337,11 @@ async function tryFbStoryPublic(url) {
  * Authenticated Instagram story scraper. Uses the GraphQL story endpoint
  * which only works with a valid session cookie.
  */
-async function tryIgStoryWithCookie(url) {
-  if (!IG_COOKIE) throw new Error('ig-story: no IG_SESSION_COOKIE configured');
+async function tryIgStoryWithCookie(url, cookieOverride = null) {
+  const activeCookie = cookieOverride || IG_COOKIE;
+  if (!activeCookie) {
+    throw new Error('ig-story: no cookie supplied (per-request and IG_SESSION_COOKIE both empty)');
+  }
 
   // URLs look like: https://instagram.com/stories/<username>/<media_pk>/
   const m = url.match(/instagram\.com\/stories\/([^/]+)\/(\d+)/i);
@@ -352,7 +360,7 @@ async function tryIgStoryWithCookie(url) {
         'User-Agent':       UA_DESKTOP,
         'X-IG-App-ID':      '936619743392459',
         Accept:             'application/json',
-        Cookie:             IG_COOKIE,
+        Cookie:             activeCookie,
         Referer:            'https://www.instagram.com/',
       },
     }
@@ -375,7 +383,7 @@ async function tryIgStoryWithCookie(url) {
         'User-Agent':  UA_DESKTOP,
         'X-IG-App-ID': '936619743392459',
         Accept:        'application/json',
-        Cookie:        IG_COOKIE,
+        Cookie:        activeCookie,
         Referer:       `https://www.instagram.com/${username}/`,
       },
     }
@@ -701,8 +709,11 @@ async function tryMbasicVideo(url) {
 
 // ─── Strategy : authenticated Facebook scrape using FB_SESSION_COOKIE ─────────
 
-async function tryFacebookCookieScrape(url) {
-  if (!FB_COOKIE) throw new Error('fb-cookie: FB_SESSION_COOKIE not configured');
+async function tryFacebookCookieScrape(url, cookieOverride = null) {
+  const activeCookie = cookieOverride || FB_COOKIE;
+  if (!activeCookie) {
+    throw new Error('fb-cookie: no cookie supplied (per-request and FB_SESSION_COOKIE both empty)');
+  }
 
   const targets = [...new Set([
     url,
@@ -720,10 +731,13 @@ async function tryFacebookCookieScrape(url) {
         timeout: 18000,
         maxRedirects: 15,
         validateStatus: () => true,
-        headers: fbHeaders({
-          'User-Agent': isBasic ? UA_MOBILE : UA_DESKTOP,
-          Accept: 'text/html,application/xhtml+xml,*/*;q=0.9',
-        }),
+        headers: fbHeaders(
+          {
+            'User-Agent': isBasic ? UA_MOBILE : UA_DESKTOP,
+            Accept: 'text/html,application/xhtml+xml,*/*;q=0.9',
+          },
+          activeCookie,
+        ),
       });
 
       const finalUrl = resp.request?.res?.responseUrl || '';
@@ -788,19 +802,21 @@ async function tryFacebookCookieScrape(url) {
 
 // ─── Facebook entry ──────────────────────────────────────────────────────────
 
-async function downloadFacebook(rawUrl) {
+async function downloadFacebook(rawUrl, opts = {}) {
+  const { fbCookie = null } = opts;
   console.log(`📘 Facebook: starting for ${rawUrl}`);
 
   const normalized = normalizeFacebookUrl(rawUrl);
   const { url: canonical, requiresLogin } = await resolveCanonicalFbUrl(normalized);
 
-  // Stories still need the story-specific public path first. If FB_COOKIE is
-  // configured, normal authenticated scrape is also allowed as a fallback below.
+  // Stories still need the story-specific public path first. If a cookie is
+  // available (per-request OR FB_COOKIE env), normal authenticated scrape is
+  // also allowed as a fallback below.
   if (looksLikeFbStoryUrl(rawUrl)) {
-    if (FB_COOKIE) {
+    if (fbCookie || FB_COOKIE) {
       try {
         const cookieResult = await withTimeout(
-          tryFacebookCookieScrape(rawUrl),
+          tryFacebookCookieScrape(rawUrl, fbCookie),
           18000,
           'fb-cookie-story'
         );
@@ -830,24 +846,28 @@ async function downloadFacebook(rawUrl) {
     throw new Error(
       'Facebook Story not accessible. Public-profile stories can sometimes ' +
       'be downloaded, but this one was either private, restricted, expired, ' +
-      'or the FB_SESSION_COOKIE is missing/expired.'
+      'or no valid session cookie was supplied. Sign in to Facebook in the ' +
+      'app to enable Story downloads.'
     );
   }
 
   // If a non-story resolved to login, do NOT stop immediately. Some mirrors
   // and metadownloader can still resolve share URLs. Cookie strategy is added
-  // only when FB_SESSION_COOKIE exists, so missing cookie no longer pollutes
-  // every failure with "FB_SESSION_COOKIE not configured".
-  if (requiresLogin && !FB_COOKIE) {
-    console.warn('📘 Facebook resolved to login wall and FB_SESSION_COOKIE is missing; trying public fallbacks only');
+  // when EITHER a per-request cookie is provided OR FB_SESSION_COOKIE is set.
+  if (requiresLogin && !fbCookie && !FB_COOKIE) {
+    console.warn('📘 Facebook resolved to login wall and no cookie available; trying public fallbacks only');
   }
 
   const candidateUrls = [...new Set([canonical, normalized, rawUrl].filter(Boolean))];
   const strategies = [];
 
   for (const candidate of candidateUrls) {
-    if (FB_COOKIE) {
-      strategies.push(['fb-cookie', () => tryFacebookCookieScrape(candidate), 18000]);
+    if (fbCookie || FB_COOKIE) {
+      strategies.push([
+        'fb-cookie',
+        () => tryFacebookCookieScrape(candidate, fbCookie),
+        18000,
+      ]);
     }
 
     strategies.push(
@@ -890,9 +910,9 @@ async function downloadFacebook(rawUrl) {
       return await firstSuccess(buildPromises(retryErrors), retryErrors);
     } catch (_) {
       const allErrors = [...errors, ...retryErrors].join(' | ');
-      const cookieHint = FB_COOKIE
+      const cookieHint = (fbCookie || FB_COOKIE)
         ? ''
-        : ' | FB_SESSION_COOKIE missing: Facebook share/reel URLs often require authenticated cookies on server IPs';
+        : ' | login required: Facebook share/reel URLs often need a signed-in session — sign in via the in-app browser to enable auth';
       throw new Error(`Facebook: all strategies failed — ${allErrors}${cookieHint}`);
     }
   }
@@ -1087,18 +1107,21 @@ async function tryInstagramStories(url) {
 
 // ─── Public API ──────────────────────────────────────────────────────────────
 
-async function facebookInsta(url) {
+async function facebookInsta(url, opts = {}) {
+  const { fbCookie = null, igCookie = null } = opts;
+
   // Detect Facebook URLs (including m.facebook.com and fb.watch)
   const isFb = /(?:^|\/\/)(?:m|web|www|business)?\.?facebook\.com|fb\.watch/i.test(url);
   if (isFb) {
-    return downloadFacebook(url);
+    return downloadFacebook(url, { fbCookie });
   }
 
   // ── Instagram ──────────────────────────────────────────────────────────
   // Stories: try the public mirror scrapers (storiesig.info, anonyig) first
   // — these can fetch public-profile stories without auth. If those fail
-  // and a session cookie is configured, try the authenticated GraphQL path.
-  // If everything fails, return a clean "requires login" message.
+  // and a session cookie is available (per-request OR env), try the
+  // authenticated GraphQL path. If everything fails, return a clean
+  // "requires login" message that the controller turns into LOGIN_REQUIRED.
   if (looksLikeIgStoryUrl(url)) {
     // Step 1: public mirrors (free, no cookie required)
     try {
@@ -1108,11 +1131,12 @@ async function facebookInsta(url) {
       console.warn(`📸 stories public mirror failed: ${e.message}`);
     }
 
-    // Step 2: cookie-authenticated path (only if admin set IG_SESSION_COOKIE)
-    if (IG_COOKIE) {
+    // Step 2: cookie-authenticated path — accepts per-request cookie too.
+    const activeIgCookie = igCookie || IG_COOKIE;
+    if (activeIgCookie) {
       try {
         const items = await withTimeout(
-          tryIgStoryWithCookie(url),
+          tryIgStoryWithCookie(url, igCookie), // forwards override
           18000,
           'ig-story-cookie'
         );
@@ -1125,12 +1149,13 @@ async function facebookInsta(url) {
       }
     }
 
-    // Step 3: clean error
+    // Step 3: clean error — message is now friendlier since per-request
+    // cookies are available via the in-app browser sign-in flow.
     throw new Error(
       'Instagram Stories require login or come from a private account. ' +
       'Public-profile stories can sometimes be fetched, but this one was ' +
       'not accessible.' +
-      (IG_COOKIE ? '' : ' Server admin: set IG_SESSION_COOKIE to enable authenticated Story downloads.')
+      (activeIgCookie ? '' : ' Sign in to Instagram in the in-app browser to enable Story downloads.')
     );
   }
 
