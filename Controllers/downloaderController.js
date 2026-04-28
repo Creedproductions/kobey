@@ -1506,18 +1506,23 @@ const downloadMedia = async (req, res) => {
     // special LOGIN_REQUIRED code so the Flutter app can route the user
     // into the sign-in flow with the platform browser instead of just
     // showing a generic "fetch failed".
+    // ── Login-wall detection (STRICT) ──────────────────────────────────
+    // Only match phrases that specifically mean "the user needs to sign
+    // in". Earlier versions matched generic phrases like "all scrapers
+    // failed" / "all strategies failed", but those fire on EVERY failure
+    // type — network blips, dead URLs, rate limits, scraper bugs — and
+    // were the root cause of the client looping back into the sign-in
+    // dialog after every failure. Keep this list tight.
     const msg = (error.message || '').toLowerCase();
     const looksLikeLoginWall =
       msg.includes('login required')      ||
       msg.includes('requires login')      ||
       msg.includes('redirected to login') ||
+      msg.includes('login_required')      ||
       msg.includes('private account')     ||
       msg.includes('private profile')     ||
       msg.includes('cookie rejected')     ||
-      msg.includes('cookie appears stale')||
-      msg.includes('fb_session_cookie missing') ||
-      msg.includes('all scrapers failed') || // IG: typically a wall
-      msg.includes('all strategies failed'); // FB: typically a wall
+      msg.includes('cookie appears stale');
 
     if (looksLikeLoginWall &&
         (failedPlatform === 'facebook' ||
