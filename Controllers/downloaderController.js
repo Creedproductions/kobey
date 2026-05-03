@@ -1084,6 +1084,16 @@ const dataFormatters = {
     const serverBase = req ? getServerBaseUrl(req) : '';
     const title      = data.title || 'Facebook Video';
 
+    // lookaside.fbsbx.com/lookaside/crawler/media/?media_id=… is FB's open-
+    // graph crawler endpoint — it returns HTML to non-bot UAs, not video
+    // bytes. If a strategy upstream returned one (the bot-UA path can leak
+    // these into `playable_url` JSON keys) the proxy would stream HTML
+    // labelled as .mp4 to the client, producing a non-playable file.
+    // Reject these here as a safety net so a single buggy strategy can't
+    // corrupt the response.
+    const isLookasideCrawlerUrl = (u) =>
+      typeof u === 'string' && /lookaside\.fbsbx\.com\/lookaside\/crawler/i.test(u);
+
     const resolveMetaUrl = (raw) => {
       if (!raw) return '';
 
@@ -1131,8 +1141,8 @@ const dataFormatters = {
     };
 
     if (data && Array.isArray(data.media) && data.media.length > 0) {
-      const valid = data.media.filter(i => i?.url);
-      if (!valid.length) throw new Error('Facebook media array has no valid URLs');
+      const valid = data.media.filter(i => i?.url && !isLookasideCrawlerUrl(i.url));
+      if (!valid.length) throw new Error('Facebook media array has no usable video URLs (only crawler links found)');
       const best = valid.find(i => i.type === 'video') || valid[0];
       return {
         title,
@@ -1144,7 +1154,7 @@ const dataFormatters = {
       };
     }
 
-    const fbData = data?.data || [];
+    const fbData = (data?.data || []).filter(v => v?.url && !isLookasideCrawlerUrl(v.url));
     if (Array.isArray(fbData) && fbData.length > 0) {
       const sorted = [...fbData].sort((a, b) =>
         fbQualityScore(b.resolution || b.quality || '') -
@@ -1163,7 +1173,9 @@ const dataFormatters = {
       };
     }
 
-    const fallback = data?.url || data?.download || data?.video || data?.videoUrl || '';
+    const fallbackCandidates = [data?.url, data?.download, data?.video, data?.videoUrl]
+      .filter(u => typeof u === 'string' && u && !isLookasideCrawlerUrl(u));
+    const fallback = fallbackCandidates[0] || '';
     if (fallback) {
       return {
         title,
