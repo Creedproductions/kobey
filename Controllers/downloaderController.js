@@ -13,6 +13,7 @@ const facebookInsta = require('../Services/facebookInstaService');
 const { downloadTwmateData } = require('../Services/twitterService');
 const { fetchYouTubeData } = require('../Services/youtubeService');
 const { downloadTikTok } = require('../Services/tiktokService');
+const { downloadGeneric } = require('../Services/genericService');
 const telegram = require('../Services/telegramService');
 
 const bitly = new BitlyClient(config.BITLY_ACCESS_TOKEN);
@@ -104,26 +105,37 @@ const shortenUrl = async (url) => {
   return url;
 };
 
+// Match host suffix, not substring. Substring matching used to mis-route
+// tnaflix.com / 1024terabox.com / ugsnx.com to twitter (because they
+// contain "x.com"-like substrings) which then 500'd inside the Twitter
+// scraper. Using URL.hostname + endsWith eliminates that whole class of
+// bug — only real hosts (or *.host) ever match.
+const HOST_PLATFORM = [
+  ['instagram.com',  'instagram'],
+  ['tiktok.com',     'tiktok'],
+  ['facebook.com',   'facebook'],
+  ['fb.watch',       'facebook'],
+  ['x.com',          'twitter'],
+  ['twitter.com',    'twitter'],
+  ['youtube.com',    'youtube'],
+  ['youtu.be',       'youtube'],
+  ['pinterest.com',  'pinterest'],
+  ['pin.it',         'pinterest'],
+  ['threads.net',    'threads'],
+  ['threads.com',    'threads'],
+  ['linkedin.com',   'linkedin'],
+];
+
 const identifyPlatform = (url) => {
-  const platformMap = {
-    'instagram.com': 'instagram',
-    'tiktok.com':    'tiktok',
-    'facebook.com':  'facebook',
-    'fb.watch':      'facebook',
-    'x.com':         'twitter',
-    'twitter.com':   'twitter',
-    'youtube.com':   'youtube',
-    'youtu.be':      'youtube',
-    'pinterest.com': 'pinterest',
-    'pin.it':        'pinterest',
-    'threads.net':   'threads',
-    'threads.com':   'threads',
-    'linkedin.com':  'linkedin'
-  };
-  for (const [domain, platform] of Object.entries(platformMap)) {
-    if (url.includes(domain)) return platform;
+  let host = '';
+  try { host = new URL(url).hostname.toLowerCase(); } catch (_) { return null; }
+  if (!host) return null;
+  // Normalise leading "www." / "m." / "mobile." / "mbasic." so matching is
+  // host-suffix only (host === domain OR host endsWith ".domain").
+  for (const [domain, platform] of HOST_PLATFORM) {
+    if (host === domain || host.endsWith('.' + domain)) return platform;
   }
-  console.warn('Platform Identification: Unable to identify the platform.');
+  console.warn(`Platform Identification: unrecognised host: ${host}`);
   return null;
 };
 
@@ -800,21 +812,16 @@ const platformDownloaders = {
   },
 
   async twitter(url) {
-    try {
-      const data = await downloadWithTimeout(() => twitter(url));
-      const hasValidData = data.data && (data.data.HD || data.data.SD);
-      const hasValidUrls = Array.isArray(data.url) &&
-        data.url.some(item => item && Object.keys(item).length > 0 && item.url);
-      if (!hasValidData && !hasValidUrls)
-        throw new Error('Twitter primary service returned unusable data');
-      return data;
-    } catch (error) {
-      console.warn('Twitter: Primary service failed, trying custom service...', error.message);
-      const fallbackData = await downloadWithTimeout(() => downloadTwmateData(url));
-      if (!fallbackData || (!Array.isArray(fallbackData) && !fallbackData.data))
-        throw new Error('Twitter download failed - both primary and fallback methods failed');
-      return fallbackData;
+    // The Twitter service now wraps a 4-strategy chain (fxTwitter →
+    // vxTwitter → syndication → btch). It already throws a clean
+    // "Invalid Twitter URL" or "All download methods failed" error when
+    // every strategy fails — no need for a separate primary/fallback split
+    // at this layer.
+    const data = await downloadWithTimeout(() => downloadTwmateData(url));
+    if (!data || (!Array.isArray(data) && !data.data && !data.url)) {
+      throw new Error('Twitter download failed - no usable data returned');
     }
+    return data;
   },
 
   async youtube(url, req) {
@@ -826,18 +833,29 @@ const platformDownloaders = {
       console.log('YouTube: Successfully fetched data, formats count:', data.formats?.length || 0);
       if (data.formats) {
         const serverBaseUrl = getServerBaseUrl(req);
+        // Drop entries whose URL isn't a usable string. Innertube can
+        // produce undefined/null URLs when YT's signature decipher fails
+        // for a single format — without this guard the whole response
+        // 500'd with "format.url.startsWith is not a function".
+        data.formats = data.formats.filter(f => typeof f?.url === 'string' && f.url);
         data.formats.forEach(format => {
-          if (format.url && format.url.startsWith('MERGE:')) {
+          if (typeof format.url === 'string' && format.url.startsWith('MERGE:')) {
             const parts = format.url.split(':');
             if (parts.length >= 3) {
               format.url = `${serverBaseUrl}/api/merge-audio?videoUrl=${encodeURIComponent(parts[1])}&audioUrl=${encodeURIComponent(parts[2])}`;
             }
           }
         });
-        if (data.url && data.url.startsWith('MERGE:')) {
+        if (typeof data.url === 'string' && data.url.startsWith('MERGE:')) {
           const parts = data.url.split(':');
           if (parts.length >= 3)
             data.url = `${serverBaseUrl}/api/merge-audio?videoUrl=${encodeURIComponent(parts[1])}&audioUrl=${encodeURIComponent(parts[2])}`;
+        }
+        // If the chosen `data.url` was the same broken format we just dropped,
+        // re-aim it at the first surviving format so callers always get a
+        // usable downloadable URL.
+        if ((!data.url || typeof data.url !== 'string') && data.formats[0]?.url) {
+          data.url = data.formats[0].url;
         }
       }
       return data;
@@ -894,7 +912,17 @@ const platformDownloaders = {
     const data = await downloadWithTimeout(() => fetchLinkedinData(url));
     if (!data || !data.data) throw new Error('LinkedIn service returned invalid data');
     return data;
-  }
+  },
+
+  // ─── GENERIC (yt-dlp fallback) ────────────────────────────────────────────
+  // Catches every site identifyPlatform() doesn't recognise — reddit,
+  // vimeo, dailymotion, soundcloud, twitch, vk, rumble, bilibili, douyin,
+  // streamable, kick, odysee, plus ~1700 others yt-dlp supports out of
+  // the box. Slower than the dedicated services (yt-dlp spawn + extraction)
+  // but covers the long tail of "abrupt" platforms users share.
+  async generic(url) {
+    return downloadWithTimeout(() => downloadGeneric(url), 55000);
+  },
 };
 
 // ===== DATA FORMATTERS =====
@@ -1200,19 +1228,22 @@ const dataFormatters = {
     let defaultUrl      = data.url;
 
     if (hasFormats || hasAllFormats) {
-      qualityOptions  = data.formats || data.allFormats;
+      // Strip formats with non-string URLs (innertube decipher failures)
+      // before quality selection — otherwise we may pick a broken format.
+      qualityOptions  = (data.formats || data.allFormats)
+        .filter(f => typeof f?.url === 'string' && f.url);
       selectedQuality = qualityOptions.find(opt => opt.quality?.includes('360p')) || qualityOptions[0];
       defaultUrl      = selectedQuality?.url || data.url;
 
       const serverBaseUrl = getServerBaseUrl(req);
       qualityOptions.forEach(format => {
-        if (format.url && format.url.startsWith('MERGE:')) {
+        if (typeof format.url === 'string' && format.url.startsWith('MERGE:')) {
           const parts = format.url.split(':');
           if (parts.length >= 3)
             format.url = `${serverBaseUrl}/api/merge-audio?videoUrl=${encodeURIComponent(parts[1])}&audioUrl=${encodeURIComponent(parts[2])}`;
         }
       });
-      if (selectedQuality?.url?.startsWith('MERGE:')) {
+      if (typeof selectedQuality?.url === 'string' && selectedQuality.url.startsWith('MERGE:')) {
         const parts = selectedQuality.url.split(':');
         if (parts.length >= 3) {
           selectedQuality.url = `${serverBaseUrl}/api/merge-audio?videoUrl=${encodeURIComponent(parts[1])}&audioUrl=${encodeURIComponent(parts[2])}`;
@@ -1312,7 +1343,30 @@ const dataFormatters = {
       sizes:     ['Original Quality'],
       source:    'linkedin',
     };
-  }
+  },
+
+  // ─── GENERIC (yt-dlp output) ─────────────────────────────────────────────
+  // Output of Services/genericService.js already matches the YouTube shape
+  // (title/url/formats/selectedQuality/etc.) so the existing client code
+  // can consume it without changes. The `source` field carries yt-dlp's
+  // extractor key (e.g. "reddit", "vimeo", "twitch") so the client can
+  // tag the download appropriately.
+  generic(data) {
+    if (!data || !data.url) throw new Error('Generic: no URL returned');
+    const formats = Array.isArray(data.formats) ? data.formats : [];
+    return {
+      title:           data.title || 'Media',
+      url:             data.url,
+      thumbnail:       data.thumbnail || PLACEHOLDER_THUMBNAIL,
+      sizes:           formats.map(f => f.quality),
+      duration:        data.duration || 'unknown',
+      source:          (data.platform || 'generic').toLowerCase(),
+      extractor:       data.extractor || 'generic',
+      formats,
+      allFormats:      formats,
+      selectedQuality: data.selectedQuality || formats[0] || null,
+    };
+  },
 };
 
 const formatData = async (platform, data, req) => {
@@ -1343,14 +1397,13 @@ const downloadMedia = async (req, res) => {
     }
 
     const cleanedUrl = urlValidation.cleanedUrl;
-    const platform   = identifyPlatform(cleanedUrl);
-
-    if (!platform) {
-      return res.status(400).json({
-        error: 'Unsupported platform', success: false,
-        supportedPlatforms: SUPPORTED_PLATFORMS
-      });
-    }
+    // identifyPlatform() returns one of the 8 dedicated platforms or null.
+    // null means we fall back to the generic yt-dlp handler, which covers
+    // ~1700 sites (reddit/vimeo/dailymotion/twitch/soundcloud/vk/rumble/
+    // bilibili/douyin/streamable/kick/odysee/etc.). The "Unsupported
+    // platform" 400 is only useful when there is no fallback at all —
+    // since we now have one, we route through it.
+    const platform = identifyPlatform(cleanedUrl) || 'generic';
 
     let processedUrl = cleanedUrl;
     if (platform === 'youtube') {

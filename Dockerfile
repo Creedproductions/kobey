@@ -45,7 +45,7 @@ RUN mkdir -p /app/config && \
     echo "--no-warnings" >> /app/config/yt-dlp.conf && \
     echo "--no-check-certificate" >> /app/config/yt-dlp.conf && \
     echo "--geo-bypass" >> /app/config/yt-dlp.conf && \
-    echo "--extractor-args youtube:player_client=android,mweb,web" >> /app/config/yt-dlp.conf && \
+    echo "--extractor-args youtube:player_client=android_vr,ios,web,web_safari" >> /app/config/yt-dlp.conf && \
     echo "--concurrent-fragments 5" >> /app/config/yt-dlp.conf && \
     echo "--throttled-rate 100K" >> /app/config/yt-dlp.conf && \
     echo "--sleep-interval 3" >> /app/config/yt-dlp.conf && \
@@ -116,7 +116,12 @@ USER appuser
 # ========================================
 # ENVIRONMENT VARIABLES
 # ========================================
+# PATH explicitly includes /opt/yt/bin so the yt-dlp venv binary is found
+# at runtime even when the spawning shell strips PATH. Node's execFile()
+# then also has a YT_DLP_BIN absolute fallback to be doubly safe.
 ENV NODE_ENV=production \
+    PATH="/opt/yt/bin:/usr/local/bin:/usr/bin:/bin" \
+    YT_DLP_BIN=/usr/local/bin/yt-dlp \
     YT_DLP_CONFIG=/app/config/yt-dlp.conf \
     YT_DLP_CACHE_DIR=/tmp/yt-dlp/cache \
     YT_DLP_COOKIES_FILE=/tmp/yt-dlp/cookies.txt \
