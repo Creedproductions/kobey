@@ -607,13 +607,24 @@ const FB_REGEXES = [
 
 async function tryDirectScrape(url) {
   // Try two UAs in order:
-  //   1. facebookexternalhit/1.1 — FB's own crawler UA bypasses soft login
-  //      walls on public videos (reels, share/v/, share/r/, watch/?v=).
-  //   2. iPhone Safari mobile UA — fallback for posts that gate the bot UA.
-  const uas = [UA_FB_BOT, UA_MOBILE];
+  //   1. iPhone Safari mobile UA — produces real fbcdn.net URLs in the
+  //      `playable_url` / `playable_url_quality_hd` JSON keys. This is the
+  //      one that actually downloads.
+  //   2. facebookexternalhit/1.1 — FB's own crawler UA can bypass some soft
+  //      login walls, BUT in 2026 it returns `playable_url` values pointing
+  //      to `lookaside.fbsbx.com/lookaside/crawler/media/?media_id=…`. That
+  //      endpoint is HTML for non-bot fetchers, so our proxy then streams
+  //      300 bytes of HTML labelled .mp4 — a non-playable file. We accept
+  //      bot-UA results ONLY when the resulting URL is a real fbcdn video.
+  //
+  // looksLikeFbVideo() rejects lookaside URLs and any other non-fbcdn /
+  // non-.mp4 string, which is exactly the validation the previous version
+  // was missing.
+  const uas = [UA_MOBILE, UA_FB_BOT];
   let lastErr = '';
 
   for (const ua of uas) {
+    const tag = ua === UA_FB_BOT ? 'bot' : 'ios';
     try {
       const resp = await axios.get(url, {
         timeout: 15000,
@@ -626,7 +637,7 @@ async function tryDirectScrape(url) {
 
       const html = typeof resp.data === 'string' ? resp.data : '';
       if (!html || html.length < 500) {
-        lastErr = `direct(${ua === UA_FB_BOT ? 'bot' : 'ios'}): empty response`;
+        lastErr = `direct(${tag}): empty response`;
         continue;
       }
 
@@ -635,8 +646,12 @@ async function tryDirectScrape(url) {
         const m = html.match(re);
         if (m?.[1]) {
           const clean = unescapeJsString(m[1]);
-          if (key === 'hd' && !hd && clean.startsWith('http')) hd = clean;
-          if (key === 'sd' && !sd && clean.startsWith('http')) sd = clean;
+          // Reject lookaside.fbsbx.com / og:image / non-video matches —
+          // looksLikeFbVideo only accepts fbcdn.net URLs and .mp4 paths,
+          // which is the only thing the proxy can actually stream.
+          if (!looksLikeFbVideo(clean)) continue;
+          if (key === 'hd' && !hd) hd = clean;
+          if (key === 'sd' && !sd) sd = clean;
         }
         if (hd && sd) break;
       }
@@ -648,7 +663,7 @@ async function tryDirectScrape(url) {
       }
 
       if (!hd && !sd) {
-        lastErr = `direct(${ua === UA_FB_BOT ? 'bot' : 'ios'}): no video URLs (login required?)`;
+        lastErr = `direct(${tag}): no video URLs (login required?)`;
         continue;
       }
 
@@ -659,7 +674,7 @@ async function tryDirectScrape(url) {
         title:     $('meta[property="og:title"]').attr('content') || 'Facebook Video',
       };
     } catch (e) {
-      lastErr = `direct(${ua === UA_FB_BOT ? 'bot' : 'ios'}): ${e.message}`;
+      lastErr = `direct(${tag}): ${e.message}`;
     }
   }
 
