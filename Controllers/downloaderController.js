@@ -613,8 +613,21 @@ const isThumbnailValidForType = (thumbUrl, mediaType) => {
 
 const normalizeMediaItem = (item, index, fallbackThumbnail = PLACEHOLDER_THUMBNAIL) => {
   const rawUrl = pickBestUrl(item.url || item.download || item.src || '');
-  const url    = rawUrl;
+
+  // ── unwrap JWT relay URLs ──────────────────────────────────────────────────
+  // igdl returns d.rapidcdn.app/v2?token=<jwt> URLs that wrap the real
+  // cdninstagram.com URL inside a base64-encoded JWT payload. d.rapidcdn.app
+  // is not resolvable from mobile carriers OR from Koyeb's egress, so we MUST
+  // decode the JWT to extract the real CDN URL — the proxy can then fetch it.
+  // Falls back to the raw URL when there is no JWT to decode (snapsave/embed
+  // already return cdninstagram.com URLs directly).
   const cdnUrl = decodeCdnUrl(rawUrl) || rawUrl;
+  const jwtUrl = rawUrl.includes('token=') ? extractJwtCdnUrl(rawUrl) : null;
+  const url    = jwtUrl || cdnUrl || rawUrl;
+
+  if (jwtUrl) {
+    console.log(`🔓 IG JWT decoded → ${jwtUrl.slice(0, 90)}…`);
+  }
 
   // ── type detection ─────────────────────────────────────────────────────────
   let type = '';
@@ -622,7 +635,7 @@ const normalizeMediaItem = (item, index, fallbackThumbnail = PLACEHOLDER_THUMBNA
   if (rawType === 'video' || rawType === 'image') {
     type = rawType;
   } else {
-    type = detectTypeFromUrl(cdnUrl) || detectTypeFromJwtUrl(rawUrl) || 'video';
+    type = detectTypeFromUrl(url) || detectTypeFromJwtUrl(rawUrl) || 'video';
   }
 
   // ── thumbnail ──────────────────────────────────────────────────────────────
@@ -639,8 +652,11 @@ const normalizeMediaItem = (item, index, fallbackThumbnail = PLACEHOLDER_THUMBNA
     thumbnail = url;
   } else {
     const rawThumb = item.thumbnail || item.cover || item.image || '';
+    const decodedThumb = rawThumb && rawThumb.includes('token=')
+      ? (extractJwtCdnUrl(rawThumb) || rawThumb)
+      : rawThumb;
     thumbnail = isThumbnailValidForType(rawThumb, 'video')
-      ? (rawThumb || fallbackThumbnail)
+      ? (decodedThumb || fallbackThumbnail)
       : fallbackThumbnail;
   }
 
@@ -982,7 +998,12 @@ const dataFormatters = {
       rawItems  = data.media;
       postTitle = data.title || postTitle;
     } else {
-      const resolvedUrl = decodeCdnUrl(pickBestUrl(data.url || ''));
+      const rawSingle   = pickBestUrl(data.url || '');
+      const jwtSingle   = rawSingle.includes('token=') ? extractJwtCdnUrl(rawSingle) : null;
+      const resolvedUrl = jwtSingle || decodeCdnUrl(rawSingle) || rawSingle;
+      if (jwtSingle) {
+        console.log(`🔓 IG JWT decoded (single) → ${jwtSingle.slice(0, 90)}…`);
+      }
       console.log('📸 Instagram: single item fallback, url=', resolvedUrl.slice(0, 80));
       return {
         title:     data.title || postTitle,
