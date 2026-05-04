@@ -207,11 +207,14 @@ async function tryInnertube(videoId) {
 }
 
 async function tryVidfly(url) {
+  // Tightened from 30s to 8s — vidfly either responds in ~1s or doesn't
+  // respond at all. The longer ceiling let a single dead vidfly slot block
+  // the whole race for half a minute.
   const r = await axios.get(
     'https://api.vidfly.ai/api/media/youtube/download',
     {
       params: { url },
-      timeout: 30000,
+      timeout: 8000,
       headers: {
         accept: '*/*',
         'content-type': 'application/json',
@@ -316,7 +319,7 @@ async function tryCobalt(url) {
       disableMetadata: false,
     },
     {
-      timeout: 30000,
+      timeout: 10000,
       headers: {
         Accept: 'application/json',
         'Content-Type': 'application/json',
@@ -361,10 +364,11 @@ async function tryYtDlp(url) {
       '--no-check-certificate',
       '--geo-bypass',
       '--extractor-args', 'youtube:player_client=android_vr,ios,web,web_safari',
-      // Larger socket timeout helps when YT throttles initial player JS
-      '--socket-timeout', '15',
+      // Tightened socket timeout from 15s → 8s. yt-dlp now bails fast
+      // when YouTube throttles, freeing the race for the next strategy.
+      '--socket-timeout', '8',
       '--dump-json', url,
-    ], { timeout: 30000, maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
+    ], { timeout: 18000, maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
       if (err) {
         const msg = (stderr || err.message || '').slice(0, 200);
         return reject(new Error(`yt-dlp: ${msg}`));

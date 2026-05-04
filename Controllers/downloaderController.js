@@ -467,6 +467,30 @@ async function scrapeInstaEmbed(igUrl) {
     throw new Error(`instaEmbed: no media found for ${shortcode}`);
   }
 
+  // ── Reel safeguard ─────────────────────────────────────────────────────────
+  // A /reel/ URL is, by definition, a video. When the dynamic JSON is missing
+  // from the embed page (Instagram serves a stripped HTML with no
+  // video_url / playable_url / edge_sidecar keys) the fallback methods 7-9
+  // pick up t51 thumbnail <img> tags instead — and the user ends up
+  // "downloading" three low-res JPEGs that look nothing like the reel.
+  //
+  // Detection: the original URL contains /reel/ AND every extracted item is
+  // an image. We discard the result and throw so the caller (formatter or
+  // the multi-scraper race) treats this scraper as failed and either falls
+  // back to igdl/snapsave or surfaces a clean error to the user.
+  const isReelUrl = /\/reel\//i.test(igUrl);
+  const allImages = items.every((it) => it.type === 'image');
+  if (isReelUrl && allImages) {
+    console.warn(
+      `📸 instaEmbed: /reel/ ${shortcode} produced only images ` +
+      `(${items.length}) — discarding to avoid serving thumbnails as video`
+    );
+    throw new Error(
+      `instaEmbed: reel ${shortcode} returned no video items ` +
+      `(only ${items.length} thumbnail image(s))`
+    );
+  }
+
   console.log(`📸 instaEmbed: ${items.length} item(s) for ${shortcode}`);
   return items;
 }
