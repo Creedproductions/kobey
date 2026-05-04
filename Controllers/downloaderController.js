@@ -760,17 +760,24 @@ const platformDownloaders = {
       );
     }
 
-    // Prefer snapsave (richest metadata), then igdl, then embed
+    // Prefer snapsave (richest metadata), then igdl, then embed.
+    // Stash the request so the formatter can wrap CDN URLs in
+    // /api/proxy-download. Many Instagram-resolved URLs (notably
+    // d.rapidcdn.app from igdl) are server-only — the device can't
+    // resolve their hostnames over typical mobile DNS, so direct
+    // downloads fail with "Failed host lookup". Routing through the
+    // Koyeb proxy fixes that because the SERVER fetches the file and
+    // streams it to the app.
     if (snapsItems?.length > 0) {
       console.log('📸 Using snapsave');
-      return { _items: snapsItems, _source: 'snapsave' };
+      return { _items: snapsItems, _source: 'snapsave', _req: req };
     }
     if (igdlItems?.length > 0) {
       console.log('📸 Using igdl');
-      return { _items: igdlItems, _source: 'igdl' };
+      return { _items: igdlItems, _source: 'igdl', _req: req };
     }
     console.log('📸 Using instaEmbed fallback');
-    return { _items: embedItems, _source: 'embed' };
+    return { _items: embedItems, _source: 'embed', _req: req };
   },
 
   // ─── TIKTOK ───────────────────────────────────────────────────────────────
@@ -933,6 +940,30 @@ const dataFormatters = {
   instagram(data) {
     console.log('📸 Instagram formatter: keys=', Object.keys(data || {}));
 
+    // Stashed by the platformDownloaders.instagram() handler so we can
+    // build /api/proxy-download URLs here. When req is null (e.g.
+    // direct unit-test invocation) we leave URLs untouched.
+    const req        = data?._req || null;
+    const serverBase = req ? getServerBaseUrl(req) : '';
+
+    // Wraps any Instagram CDN URL in the server's /api/proxy-download
+    // route. The server will fetch the upstream and stream it to the
+    // app, bypassing two classes of failures on the client:
+    //   1. DNS-only-on-server hosts (d.rapidcdn.app, the igdl JWT
+    //      relay) — mobile DNS doesn't resolve these.
+    //   2. CDN region/IP gating that rejects requests coming from
+    //      consumer mobile networks (cdninstagram.com sometimes does
+    //      this when the Referer doesn't match).
+    // Already-proxied URLs and non-http URLs short-circuit unchanged.
+    const proxy = (cdnUrl) => {
+      if (!cdnUrl) return cdnUrl;
+      const s = String(cdnUrl);
+      if (s.includes('/api/proxy-download')) return s;
+      if (!serverBase) return s;
+      if (!/^https?:\/\//i.test(s)) return s;
+      return wrapForProxy(s, 'instagram', 'Instagram Post', serverBase);
+    };
+
     let rawItems  = null;
     let postTitle = 'Instagram Post';
 
@@ -955,7 +986,7 @@ const dataFormatters = {
       console.log('📸 Instagram: single item fallback, url=', resolvedUrl.slice(0, 80));
       return {
         title:     data.title || postTitle,
-        url:       resolvedUrl,
+        url:       proxy(resolvedUrl),
         thumbnail: data.thumbnail || PLACEHOLDER_THUMBNAIL,
         sizes:     ['Best Quality'],
         source:    'instagram',
@@ -979,9 +1010,14 @@ const dataFormatters = {
       ? (console.warn(`📸 Capping ${uniqueItems.length} items to ${MAX_CAROUSEL_ITEMS}`), uniqueItems.slice(0, MAX_CAROUSEL_ITEMS))
       : uniqueItems;
 
-    const mediaItems = cappedItems.map((item, index) =>
-      normalizeMediaItem(item, index, item.thumbnail || PLACEHOLDER_THUMBNAIL)
-    );
+    const mediaItems = cappedItems
+      .map((item, index) =>
+        normalizeMediaItem(item, index, item.thumbnail || PLACEHOLDER_THUMBNAIL)
+      )
+      // Wrap each final URL through the proxy. Done AFTER normalize so
+      // type detection (which inspects the original CDN URL pattern)
+      // still runs on the raw URL.
+      .map((it) => ({ ...it, url: proxy(it.url) }));
 
     console.log(`📸 Instagram: ${rawItems.length} raw → ${mediaItems.length} final`);
     mediaItems.forEach((it, i) =>
