@@ -874,7 +874,13 @@ const platformDownloaders = {
   async youtube(url, req) {
     console.log('YouTube: Processing URL:', url);
     try {
-      const timeout = url.includes('/shorts/') ? 75000 : 90000;
+      // 22s outer cap. The youtubeService race now imposes per-strategy
+      // deadlines (max 18s for yt-dlp, 8-12s for the others) and resolves
+      // on the first success — so a healthy fetch lands in 1-6s. The 22s
+      // ceiling is the absolute "all sources failed" budget. Old value
+      // (75-90s) made users wait 1-2 minutes for a known failure to bubble
+      // up; many users gave up before seeing the error.
+      const timeout = 22000;
       const data    = await downloadWithTimeout(() => fetchYouTubeData(url), timeout);
       if (!data || !data.title) throw new Error('YouTube service returned invalid data');
       console.log('YouTube: Successfully fetched data, formats count:', data.formats?.length || 0);

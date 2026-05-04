@@ -29,6 +29,7 @@ const setupMiddleware = () => {
   app.use('/api/proxy-test',     openCors);
   app.use('/api/proxy',          openCors);
   app.use('/api/download',       openCors);
+  app.use('/api/report-failure', openCors);
   app.use('/api/youtube',        openCors);
   app.use('/api/twitter',        openCors);
   app.use('/api/reddit',         openCors);

@@ -416,6 +416,50 @@ async function tryYtDlp(url) {
   });
 }
 
+// ─── Per-strategy hard deadline ──────────────────────────────────────────────
+// Wraps a promise so it rejects with a clean "timeout" error after `ms`. This
+// is critical because some strategies (notably innertube + ytdl-core) can hang
+// silently when YouTube returns a 429 with no body — the underlying axios
+// promise just sits forever and starves the race. Adding a hard deadline per
+// strategy means the slowest path can't drag the whole request past its
+// budget.
+function withDeadline(name, promise, ms) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const t = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      reject(new Error(`${name}: timeout after ${ms}ms`));
+    }, ms);
+    promise.then(
+      (r) => { if (settled) return; settled = true; clearTimeout(t); resolve(r); },
+      (e) => { if (settled) return; settled = true; clearTimeout(t); reject(e); }
+    );
+  });
+}
+
+// Probes whether the resolved yt-dlp path is actually executable. We do this
+// once at boot — without it, the race wastes a full strategy slot every
+// request waiting for yt-dlp's spawn-ENOENT to bubble up. Returns true if a
+// real binary exists, false otherwise. The result is cached.
+let _ytDlpAvailable = null;
+function isYtDlpAvailable() {
+  if (_ytDlpAvailable !== null) return _ytDlpAvailable;
+  const p = resolveYtDlpPath();
+  // resolveYtDlpPath returns the bare 'yt-dlp' name when no absolute path
+  // worked. That's our "not installed" sentinel — running it just produces
+  // ENOENT and burns a strategy slot.
+  if (!p || p === 'yt-dlp') { _ytDlpAvailable = false; return false; }
+  try {
+    fs.accessSync(p, fs.constants.X_OK);
+    _ytDlpAvailable = true;
+  } catch (_) {
+    _ytDlpAvailable = false;
+  }
+  return _ytDlpAvailable;
+}
+isYtDlpAvailable();
+
 async function fetchYouTubeData(url) {
   const videoId = extractVideoId(url);
   if (!videoId) throw new Error('Could not extract YouTube video ID');
@@ -423,16 +467,35 @@ async function fetchYouTubeData(url) {
   const normUrl = normalizeUrl(url);
   console.log(`YouTube: racing for ${videoId}`);
 
-  // Always include innertube — the loader waits for the lazy import, then
-  // either succeeds or throws "youtubei.js not available". Filtering it out
-  // up front meant a slow ESM cold-start dropped the strategy entirely.
+  // Build the strategy list with per-strategy deadlines so a single hung
+  // upstream can't blow the request budget. Numbers reflect the slowest
+  // *successful* response we've observed plus a small safety margin.
+  //
+  //   vidfly       : ~1s on cache hit, fail-fast otherwise → 8s
+  //   innertube    : ~3-6s when YouTube's player JS is fresh           → 10s
+  //   ytdl-core    : ~4-12s, hits bot detection often                  → 12s
+  //   cobalt       : optional self-hosted endpoint                     → 10s
+  //   yt-dlp       : 8-15s when present; SKIPPED when binary missing    → 18s
+  //
+  // SKIPPED strategies (yt-dlp without a binary, ytdl-core not installed,
+  // cobalt without COBALT_API_URL) do NOT participate in the race at all —
+  // previously they ran and immediately failed, taking up an event-loop
+  // slot for nothing.
+  const ytDlpReady = isYtDlpAvailable();
   const strategies = [
-    wrap('innertube', tryInnertube(videoId)),
-    wrap('yt-dlp',    tryYtDlp(normUrl)),
-    ytdl && wrap('ytdl-core', tryYtdlCore(normUrl)),
-    COBALT_API_URL && wrap('cobalt', tryCobalt(normUrl)),
-    wrap('vidfly', tryVidfly(normUrl)),
+    wrap('vidfly',    withDeadline('vidfly',    tryVidfly(normUrl),     8000)),
+    wrap('innertube', withDeadline('innertube', tryInnertube(videoId), 10000)),
+    ytdl                && wrap('ytdl-core', withDeadline('ytdl-core', tryYtdlCore(normUrl),  12000)),
+    COBALT_API_URL      && wrap('cobalt',    withDeadline('cobalt',    tryCobalt(normUrl),    10000)),
+    ytDlpReady          && wrap('yt-dlp',    withDeadline('yt-dlp',    tryYtDlp(normUrl),     18000)),
   ].filter(Boolean);
+
+  console.log(
+    `YouTube strategies: ${strategies.length} active ` +
+    `(yt-dlp=${ytDlpReady ? 'on' : 'OFF'}, ` +
+    `cobalt=${COBALT_API_URL ? 'on' : 'OFF'}, ` +
+    `ytdl-core=${ytdl ? 'on' : 'OFF'})`
+  );
 
   if (!strategies.length) {
     throw new Error('YouTube: no strategies available');
@@ -454,21 +517,26 @@ function firstSuccess(wrapped) {
     let done = false;
     let settled = 0;
     const errors = [];
+    const startedAt = Date.now();
 
     for (const p of wrapped) {
       p.then(({ ok, name, r, e }) => {
         settled++;
         if (ok && !done) {
           done = true;
-          console.log(`YouTube: won by [${name}]`);
+          const ms = Date.now() - startedAt;
+          console.log(`YouTube: won by [${name}] in ${ms}ms`);
           resolve(r);
           return;
         }
         if (!ok) {
+          const ms = Date.now() - startedAt;
           errors.push(`[${name}]: ${e}`);
-          console.log(`YouTube [${name}] failed: ${String(e).slice(0, 100)}`);
+          console.log(`YouTube [${name}] failed in ${ms}ms: ${String(e).slice(0, 100)}`);
         }
         if (settled === wrapped.length && !done) {
+          const ms = Date.now() - startedAt;
+          console.log(`YouTube: ALL ${wrapped.length} strategies failed in ${ms}ms`);
           reject(new Error('YouTube all sources failed: ' + errors.join(' | ')));
         }
       });
