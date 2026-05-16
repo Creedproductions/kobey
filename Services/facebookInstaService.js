@@ -62,6 +62,29 @@ let igdl;
 try { ({ igdl } = require('btch-downloader')); }
 catch (_) { igdl = null; console.warn('⚠️ btch-downloader igdl not available'); }
 
+// yt-dlp is invoked as a child process — used only as a last-resort fallback
+// for Facebook share URLs where every HTTP scraper hits a dead end (share
+// token isn't the canonical ID, no third-party mirror accepts the URL, FB's
+// own plugin endpoint returns no metadata). yt-dlp follows FB's redirect
+// chain natively and can extract the underlying fbcdn URL.
+const _fs = require('fs');
+const { execFile: _execFile } = require('child_process');
+const _YT_DLP_CANDIDATES = [
+  process.env.YT_DLP_BIN,
+  '/opt/yt/bin/yt-dlp',
+  '/usr/local/bin/yt-dlp',
+  '/usr/bin/yt-dlp',
+].filter(Boolean);
+let _ytDlpBin = null;
+function _resolveYtDlp() {
+  if (_ytDlpBin !== null) return _ytDlpBin;
+  for (const p of _YT_DLP_CANDIDATES) {
+    try { _fs.accessSync(p, _fs.constants.X_OK); _ytDlpBin = p; return p; } catch (_) {}
+  }
+  _ytDlpBin = 'yt-dlp';
+  return _ytDlpBin;
+}
+
 // ─── Shared headers ──────────────────────────────────────────────────────────
 
 const UA_DESKTOP =
@@ -1135,6 +1158,78 @@ async function trySaveFbs(url) {
   return { hd, sd, thumbnail: thumb, title };
 }
 
+// ─── Strategy : yt-dlp (last-resort fallback) ────────────────────────────────
+// yt-dlp's Facebook extractor follows the share-URL redirect chain natively
+// using the same JS-eval flow a browser uses. This is the only strategy that
+// reliably resolves share/r/<token>/ URLs where the token isn't equal to the
+// canonical reel ID. Slow (5-20s) so we only run it after all the cheaper
+// HTTP scrapers have failed.
+
+async function tryYtDlpFacebook(url) {
+  const bin = _resolveYtDlp();
+
+  const info = await new Promise((resolve, reject) => {
+    const args = [
+      '-f', 'best[height<=?1080]/best',
+      '--no-playlist',
+      '--no-warnings',
+      '--no-check-certificate',
+      '--geo-bypass',
+      '--socket-timeout', '12',
+      '--retries', '2',
+      '--dump-json',
+      url,
+    ];
+    _execFile(bin, args, {
+      timeout: 28000,
+      maxBuffer: 20 * 1024 * 1024,
+    }, (err, stdout, stderr) => {
+      if (err) {
+        const msg = (stderr || err.message || '').slice(0, 200).trim();
+        return reject(new Error(`yt-dlp-fb: ${msg || 'spawn failed'}`));
+      }
+      try {
+        const firstLine = stdout.split('\n').find(l => l.trim().startsWith('{')) || stdout;
+        resolve(JSON.parse(firstLine));
+      } catch (e) {
+        reject(new Error(`yt-dlp-fb: parse error: ${e.message}`));
+      }
+    });
+  });
+
+  // yt-dlp's info object has either info.url (best muxed) or info.formats[].
+  // For FB the formats array is the more reliable source — picks an explicit
+  // hd + sd pair when available.
+  let hd = '', sd = '';
+  const formats = Array.isArray(info.formats) ? info.formats : [];
+
+  // Filter to video formats with usable URLs
+  const videoFormats = formats.filter(f =>
+    f.url && typeof f.url === 'string' &&
+    (f.vcodec ? f.vcodec !== 'none' : true) &&
+    looksLikeFbVideo(f.url)
+  );
+
+  // Sort by resolution descending
+  videoFormats.sort((a, b) => (b.height || 0) - (a.height || 0));
+
+  if (videoFormats.length > 0) {
+    hd = videoFormats[0].url;
+    if (videoFormats.length > 1) sd = videoFormats[videoFormats.length - 1].url;
+  } else if (info.url && looksLikeFbVideo(info.url)) {
+    // Single muxed URL fallback
+    sd = info.url;
+  }
+
+  if (!hd && !sd) throw new Error('yt-dlp-fb: no usable fbcdn video URLs in info');
+
+  return {
+    hd, sd,
+    thumbnail: info.thumbnail || info.thumbnails?.[0]?.url || '',
+    title:     info.title || info.fulltitle || 'Facebook Video',
+  };
+}
+
 // ─── Strategy : Facebook iframe plugin (anonymous, no third party) ──────────
 // Facebook publishes a public-iframe video player at
 //   https://www.facebook.com/plugins/video.php?href=<encoded URL>
@@ -1486,11 +1581,20 @@ async function downloadFacebook(rawUrl, opts = {}) {
   ].filter(Boolean))];
 
   // Toggles for retired/legacy strategies — opt-in via env so we can re-enable
-  // quickly if a mirror comes back to life.
+  // quickly if a mirror comes back to life. All four below default to OFF
+  // because each is currently broken (proven by production logs):
+  //   - getfvid.com:   DNS EAI_AGAIN from EU regions
+  //   - mbasic.facebook.com: FB removed mp4 playback
+  //   - metadownloader npm: throws split-on-undefined every call
+  //   - fdown.net:     Cloudflare 403 every call
+  //   - fdownloader.net: consistently times out at 10s+
   const ENABLE_GETFVID         = process.env.FB_USE_GETFVID === '1';
   const ENABLE_MBASIC          = process.env.FB_USE_MBASIC === '1';
   const ENABLE_METADOWNLOADER  = process.env.FB_USE_LEGACY_METADOWNLOADER === '1';
-  const ENABLE_FDOWN_NET       = process.env.FB_USE_FDOWN !== '0'; // on by default but easy to kill
+  const ENABLE_FDOWN_NET       = process.env.FB_USE_FDOWN === '1';
+  const ENABLE_FDOWNLOADER_NET = process.env.FB_USE_FDOWNLOADER === '1';
+  // yt-dlp fallback is ON by default. Disable with FB_USE_YTDLP=0.
+  const ENABLE_YTDLP_FB        = process.env.FB_USE_YTDLP !== '0';
 
   const strategies = [];
 
@@ -1529,12 +1633,24 @@ async function downloadFacebook(rawUrl, opts = {}) {
       ['fb-plugin-iframe', () => tryFbPluginIframe(oneUrl),   14000],
       // snapsave-fb resolves share URLs directly without needing canonical.
       ['snapsave-fb',      () => trySnapsaveFb(oneUrl),       12000],
-      // fdownloader.net — different host from fdown.net. Frequently slow;
-      // cap to 10s so it doesn't dominate the race when the others might win.
-      ['fdownloader-net',  () => tryFdownloaderNet(oneUrl),   10000],
       // savefbs.com — newer mirror, useful when the others are blocked.
       ['savefbs',          () => trySaveFbs(oneUrl),          12000],
     );
+    if (ENABLE_FDOWNLOADER_NET) {
+      strategies.push(['fdownloader-net', () => tryFdownloaderNet(oneUrl), 10000]);
+    }
+  }
+
+  // 2b) yt-dlp last-resort — runs on the original URL and resolves share
+  //     tokens to canonical via FB's redirect chain. Slow (5-25s) but works
+  //     when every HTTP scraper above fails (e.g. share/r/<token> URLs where
+  //     the token differs from the reel ID).
+  if (ENABLE_YTDLP_FB) {
+    strategies.push([
+      'yt-dlp-fb',
+      () => tryYtDlpFacebook(rawUrl),
+      28000,
+    ]);
   }
 
   // 3) Canonical-needing strategies — fan out across every candidate URL.
