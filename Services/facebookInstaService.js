@@ -444,8 +444,6 @@ async function tryIgStoryWithCookie(url, cookieOverride = null) {
 // wins the race.
 
 async function resolveCanonicalFbUrl(rawUrl) {
-  const _saveShareHtml = { html: '' };
-
   // If already canonical, return early but still allow candidate variants
   if (
     rawUrl.match(/facebook\.com\/(watch|reel|video)\/\d+/) ||
@@ -453,18 +451,28 @@ async function resolveCanonicalFbUrl(rawUrl) {
     rawUrl.includes('facebook.com/watch?v=')
   ) return { url: rawUrl, candidates: [rawUrl], requiresLogin: false, shareHtml: '' };
 
-  const url = rawUrl.replace('m.facebook.com', 'www.facebook.com');
+  // Strip tracking params (?fs=e, ?mibextid=…) that some FB redirect chains
+  // re-add on every hop, causing maxRedirects to be exceeded.
+  let cleanRaw = String(rawUrl).trim();
+  try {
+    const u = new URL(cleanRaw);
+    ['fs', 'mibextid', 'extid', 'lst', '_rdr'].forEach(k => u.searchParams.delete(k));
+    cleanRaw = u.toString().replace(/\?$/, '');
+  } catch (_) { /* leave as-is */ }
+
+  const url = cleanRaw.replace('m.facebook.com', 'www.facebook.com');
   console.log(`🔗 Resolving: ${url}`);
 
   // ── STEP 1: fetch share page HTML for canonical meta tags & inline JSON ──
-  // Try iPhone UA first (returns richest JSON), then bot UA (bypasses some
-  // soft login walls), then desktop. First non-trivial body wins.
+  // Try bot UA first (cleanest crawler output, fewest redirects), then iPhone
+  // (returns richest JSON when bot is rate-limited), then desktop.
+  // maxRedirects 25 — FB's redirect chain for share URLs can be 12-18 hops.
   let shareHtml = '';
-  const uaProbes = [UA_MOBILE, UA_FB_BOT, UA_DESKTOP];
+  const uaProbes = [UA_FB_BOT, UA_MOBILE, UA_DESKTOP];
   for (const ua of uaProbes) {
     try {
       const resp = await axios.get(url, {
-        maxRedirects: 10,
+        maxRedirects: 25,
         timeout: 12000,
         validateStatus: () => true,
         headers: fbHeaders({
@@ -479,7 +487,6 @@ async function resolveCanonicalFbUrl(rawUrl) {
       // try the next UA
     }
   }
-  _saveShareHtml.html = shareHtml;
 
   const isProfileShape = (u) => {
     try {
@@ -488,23 +495,82 @@ async function resolveCanonicalFbUrl(rawUrl) {
     } catch { return false; }
   };
 
-  // ── STEP 2: parse share page HTML for canonical meta tags ─────────────────
+  // ── STEP 2: parse share page HTML for canonical URL (multiple paths) ─────
+  // FB serves the canonical URL in several places depending on the UA used:
+  //   - <meta property="og:url" content="…"/> (most common)
+  //   - <meta property="al:ios:url"> / <meta property="al:android:url">
+  //   - <link rel="canonical" href="…"/>
+  //   - <meta http-equiv="refresh" content="0; url=…"/>
+  //   - inline JSON: "permalink_url":"…" or "story_url":"…"
+  //   - inline JS:  document.location.replace("…")
   let canonicalFromMeta = '';
   if (shareHtml) {
     const $ = cheerio.load(shareHtml);
 
+    const acceptCanonical = (u) => {
+      if (!u || typeof u !== 'string') return false;
+      const trimmed = u.trim().replace(/&amp;/g, '&');
+      if (!trimmed.includes('facebook.com')) return false;
+      if (trimmed.includes('/share/'))       return false;
+      if (trimmed.includes('/login'))        return false;
+      if (isProfileShape(trimmed))           return false;
+      // Must look like an actual content URL
+      return /\/(watch|reel|video|videos|posts|story|permalink|reels)/i.test(trimmed) ||
+             /watch\/\?v=/i.test(trimmed) ||
+             /story_fbid=/i.test(trimmed);
+    };
+
     const ogUrl = $('meta[property="og:url"]').attr('content');
-    if (ogUrl && ogUrl.includes('facebook.com') && !ogUrl.includes('/share/') && !isProfileShape(ogUrl)) {
+    if (acceptCanonical(ogUrl)) {
       console.log(`🔗 share page og:url → ${ogUrl}`);
       canonicalFromMeta = ogUrl;
     }
 
     if (!canonicalFromMeta) {
-      const alIos = $('meta[property="al:ios:url"]').attr('content') ||
+      const alUrl = $('meta[property="al:ios:url"]').attr('content') ||
                     $('meta[property="al:android:url"]').attr('content');
-      if (alIos && alIos.includes('facebook.com') && !alIos.includes('/share/') && !isProfileShape(alIos)) {
-        console.log(`🔗 share page al:url → ${alIos}`);
-        canonicalFromMeta = alIos;
+      if (acceptCanonical(alUrl)) {
+        console.log(`🔗 share page al:url → ${alUrl}`);
+        canonicalFromMeta = alUrl;
+      }
+    }
+
+    if (!canonicalFromMeta) {
+      const linkCanonical = $('link[rel="canonical"]').attr('href');
+      if (acceptCanonical(linkCanonical)) {
+        console.log(`🔗 link rel=canonical → ${linkCanonical}`);
+        canonicalFromMeta = linkCanonical;
+      }
+    }
+
+    if (!canonicalFromMeta) {
+      const refresh = $('meta[http-equiv="refresh"]').attr('content') || '';
+      const m = refresh.match(/url\s*=\s*['"]?([^'"]+)['"]?/i);
+      if (m && acceptCanonical(m[1])) {
+        console.log(`🔗 meta refresh → ${m[1]}`);
+        canonicalFromMeta = m[1];
+      }
+    }
+
+    if (!canonicalFromMeta) {
+      // Inline JSON / JS patterns Facebook uses in share-page HTML
+      const inlinePatterns = [
+        /"permalink_url"\s*:\s*"([^"]+)"/,
+        /"story_url"\s*:\s*"([^"]+)"/,
+        /"canonical_url"\s*:\s*"([^"]+)"/,
+        /document\.location\.replace\(['"]([^'"]+)['"]\)/,
+        /window\.location\s*=\s*['"]([^'"]+)['"]/,
+      ];
+      for (const re of inlinePatterns) {
+        const m = shareHtml.match(re);
+        if (m?.[1]) {
+          const decoded = unescapeJsString(m[1]);
+          if (acceptCanonical(decoded)) {
+            console.log(`🔗 inline pattern → ${decoded}`);
+            canonicalFromMeta = decoded;
+            break;
+          }
+        }
       }
     }
   }
@@ -540,7 +606,7 @@ async function resolveCanonicalFbUrl(rawUrl) {
   if (/fb\.watch/i.test(url)) {
     try {
       const probe = await axios.get(url, {
-        maxRedirects: 20,
+        maxRedirects: 25,
         timeout: 12000,
         validateStatus: () => true,
         headers: fbHeaders({ 'User-Agent': UA_DESKTOP }),
@@ -561,7 +627,7 @@ async function resolveCanonicalFbUrl(rawUrl) {
     console.warn('🔗 Fallback: following redirects normally');
     try {
       const resp = await axios.get(url, {
-        maxRedirects:   20,
+        maxRedirects:   25,
         timeout:        15000,
         validateStatus: () => true,
         headers:        fbHeaders(),
@@ -579,6 +645,17 @@ async function resolveCanonicalFbUrl(rawUrl) {
     } catch (e) {
       console.warn(`🔗 Redirect fallback failed: ${e.message}`);
     }
+  }
+
+  // For share/r/<id> and share/v/<id>, also try the *mobile* variant. mbasic
+  // and m.facebook.com use plain HTTP 30x redirects (no JS) for many share
+  // URLs, which lets some downstream strategies (like direct-scrape) get to
+  // the canonical content with fewer redirect hops.
+  if (/facebook\.com\/share\//i.test(url)) {
+    const mobile  = url.replace(/(?:www|web|business)\.facebook\.com/i, 'm.facebook.com');
+    const mbasic  = url.replace(/(?:www|web|business|m)\.facebook\.com/i, 'mbasic.facebook.com');
+    if (mobile !== url) candidates.add(mobile);
+    if (mbasic !== url) candidates.add(mbasic);
   }
 
   // Always include the original URL as a candidate — many strategies (snapsave,
@@ -779,7 +856,7 @@ async function tryDirectScrape(url) {
     try {
       const resp = await axios.get(url, {
         timeout: 15000,
-        maxRedirects: 10,
+        maxRedirects: 25,
         validateStatus: () => true,
         headers: fbHeaders({
           'User-Agent': ua,
@@ -1417,6 +1494,21 @@ async function downloadFacebook(rawUrl, opts = {}) {
 
   const strategies = [];
 
+  // ─── Per-strategy URL fan-out policy ─────────────────────────────────────
+  // Some strategies (direct-scrape, fb-cookie, og-meta) need the canonical
+  // URL — they fail fast on the wrong shape. Run them against EVERY candidate
+  // so the race can win on the matching variant.
+  //
+  // Other strategies (fb-plugin-iframe, snapsave-fb, fdownloader-net, savefbs)
+  // do their OWN URL resolution server-side: passing them 5 variants of the
+  // same URL just multiplies request count and wastes timeout budget without
+  // improving success rate. Run them ONCE with the original URL.
+  //
+  // This drops a typical share/r/<id> failure from ~20 fanned-out requests
+  // (most identical) to ~10 distinct requests, and stops the 4x repeated
+  // "snapsave-fb: HTTP 404" lines that flooded the error message.
+  const ORIGINAL_URL_ONLY = [rawUrl];
+
   // 1) og-meta-extract runs once on the resolver's HTML — cheap zero-cost
   //    retry of data we already fetched. Often wins on share/v and share/r.
   if (shareHtml && shareHtml.length > 200) {
@@ -1427,6 +1519,25 @@ async function downloadFacebook(rawUrl, opts = {}) {
     ]);
   }
 
+  // 2) Mirror strategies — run ONCE on the original URL only.
+  for (const oneUrl of ORIGINAL_URL_ONLY) {
+    strategies.push(
+      // fb-plugin-iframe hits facebook.com directly via the public embed
+      // player; no third-party mirror to fail and no auth required. This is
+      // the strategy that lets us survive when third-party mirrors are down
+      // (proven in production: succeeded for fb.watch/H8oCL7_oDX/).
+      ['fb-plugin-iframe', () => tryFbPluginIframe(oneUrl),   14000],
+      // snapsave-fb resolves share URLs directly without needing canonical.
+      ['snapsave-fb',      () => trySnapsaveFb(oneUrl),       12000],
+      // fdownloader.net — different host from fdown.net. Frequently slow;
+      // cap to 10s so it doesn't dominate the race when the others might win.
+      ['fdownloader-net',  () => tryFdownloaderNet(oneUrl),   10000],
+      // savefbs.com — newer mirror, useful when the others are blocked.
+      ['savefbs',          () => trySaveFbs(oneUrl),          12000],
+    );
+  }
+
+  // 3) Canonical-needing strategies — fan out across every candidate URL.
   for (const candidate of candidateUrls) {
     if (fbCookie || FB_COOKIE) {
       strategies.push([
@@ -1437,22 +1548,11 @@ async function downloadFacebook(rawUrl, opts = {}) {
     }
 
     strategies.push(
-      // direct-scrape with iOS/Android/bot UA is the most reliable in 2026.
-      ['direct-scrape',    () => tryDirectScrape(candidate),     15000],
-      // fb-plugin-iframe hits facebook.com directly via the public embed
-      // player; no third-party mirror to fail and no auth required.
-      ['fb-plugin-iframe', () => tryFbPluginIframe(candidate),   14000],
-      // snapsave-fb resolves share URLs directly without needing canonical.
-      ['snapsave-fb',      () => trySnapsaveFb(candidate),       18000],
-      // fdownloader.net is a different host from fdown.net; works when
-      // fdown is Cloudflare-blocking us.
-      ['fdownloader-net',  () => tryFdownloaderNet(candidate),   18000],
-      // savefbs.com — newer mirror, useful when the others are blocked.
-      ['savefbs',          () => trySaveFbs(candidate),          18000],
+      ['direct-scrape', () => tryDirectScrape(candidate), 15000],
     );
 
     if (ENABLE_FDOWN_NET) {
-      strategies.push(['fdown', () => tryFdownNet(candidate), 18000]);
+      strategies.push(['fdown', () => tryFdownNet(candidate), 12000]);
     }
 
     if (ENABLE_MBASIC) {
