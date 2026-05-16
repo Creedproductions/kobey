@@ -67,8 +67,14 @@ catch (_) { igdl = null; console.warn('⚠️ btch-downloader igdl not available
 // token isn't the canonical ID, no third-party mirror accepts the URL, FB's
 // own plugin endpoint returns no metadata). yt-dlp follows FB's redirect
 // chain natively and can extract the underlying fbcdn URL.
+//
+// IMPORTANT: yt-dlp may not be installed (e.g. when running under Koyeb's
+// buildpack fallback). _resolveYtDlp() returns null in that case, and the
+// strategy registers a no-op skip instead of polluting the error log with
+// "spawn yt-dlp ENOENT" lines.
 const _fs = require('fs');
 const { execFile: _execFile } = require('child_process');
+const { execSync: _execSync } = require('child_process');
 const _YT_DLP_CANDIDATES = [
   process.env.YT_DLP_BIN,
   '/opt/yt/bin/yt-dlp',
@@ -76,14 +82,27 @@ const _YT_DLP_CANDIDATES = [
   '/usr/bin/yt-dlp',
 ].filter(Boolean);
 let _ytDlpBin = null;
+let _ytDlpResolved = false;
 function _resolveYtDlp() {
-  if (_ytDlpBin !== null) return _ytDlpBin;
+  if (_ytDlpResolved) return _ytDlpBin;
+  _ytDlpResolved = true;
   for (const p of _YT_DLP_CANDIDATES) {
     try { _fs.accessSync(p, _fs.constants.X_OK); _ytDlpBin = p; return p; } catch (_) {}
   }
-  _ytDlpBin = 'yt-dlp';
-  return _ytDlpBin;
+  // Last resort: try PATH lookup via `which`. If that fails, mark as
+  // unavailable (null) so callers can skip the strategy cleanly.
+  try {
+    const which = _execSync('which yt-dlp', { encoding: 'utf8', timeout: 2000 }).trim();
+    if (which && which.startsWith('/')) {
+      try { _fs.accessSync(which, _fs.constants.X_OK); _ytDlpBin = which; return which; } catch (_) {}
+    }
+  } catch (_) { /* `which` failed - binary not on PATH */ }
+  _ytDlpBin = null;
+  return null;
 }
+// Resolve once at module load so we know upfront whether the strategy is viable
+const _YTDLP_AVAILABLE = !!_resolveYtDlp();
+console.log(`📘 yt-dlp: ${_YTDLP_AVAILABLE ? `✅ available at ${_ytDlpBin}` : '⚠️  not installed — yt-dlp-fb strategy disabled'}`);
 
 // ─── Shared headers ──────────────────────────────────────────────────────────
 
@@ -1167,6 +1186,7 @@ async function trySaveFbs(url) {
 
 async function tryYtDlpFacebook(url) {
   const bin = _resolveYtDlp();
+  if (!bin) throw new Error('yt-dlp-fb: binary not installed (skipped)');
 
   const info = await new Promise((resolve, reject) => {
     const args = [
@@ -1645,7 +1665,13 @@ async function downloadFacebook(rawUrl, opts = {}) {
   //     tokens to canonical via FB's redirect chain. Slow (5-25s) but works
   //     when every HTTP scraper above fails (e.g. share/r/<token> URLs where
   //     the token differs from the reel ID).
-  if (ENABLE_YTDLP_FB) {
+  //
+  //     Only register if yt-dlp is actually installed. Without this guard, on
+  //     Koyeb buildpack deploys (which don't install yt-dlp) the strategy
+  //     fires ENOENT on every Facebook request, eating a race slot and
+  //     polluting the error log with "spawn yt-dlp ENOENT" for users who
+  //     can't act on it anyway.
+  if (ENABLE_YTDLP_FB && _YTDLP_AVAILABLE) {
     strategies.push([
       'yt-dlp-fb',
       () => tryYtDlpFacebook(rawUrl),

@@ -1,4 +1,30 @@
 # koyeb.yaml
+#
+# ⚠️  IMPORTANT — DOCKER BUILD CONFIG MUST BE SET IN THE KOYEB DASHBOARD ⚠️
+#
+# Koyeb services configured to deploy from a Git repo default to BUILDPACK
+# (Heroku-style) builds. Buildpacks do NOT install yt-dlp / ffmpeg, which
+# breaks the Facebook share-URL fallback strategy ("spawn yt-dlp ENOENT" in
+# logs for every share/r/ URL where the token differs from the reel ID).
+#
+# To fix:
+#
+#   Option 1 — Koyeb dashboard (recommended):
+#     Service → Settings → Source → Builder → switch from "Buildpack" to
+#     "Dockerfile" → save → redeploy. Koyeb will then use the Dockerfile in
+#     the repo root which installs yt-dlp via a Python venv.
+#
+#   Option 2 — Koyeb CLI:
+#     koyeb service update <service-id> --git-builder docker \
+#         --git-docker-dockerfile Dockerfile
+#
+#   Option 3 — Verify after redeploy:
+#     Tail the new instance's startup logs and look for:
+#       📘 yt-dlp: ✅ available at /usr/local/bin/yt-dlp
+#     If you instead see:
+#       📘 yt-dlp: ⚠️  not installed — yt-dlp-fb strategy disabled
+#     the builder is still set to Buildpack — repeat Option 1.
+#
 name: unisaver-api
 service:
   name: youtube-downloader
@@ -12,6 +38,8 @@ service:
       value: production
     - name: YT_DLP_CACHE_DIR
       value: /tmp/yt-cache
+    - name: YT_DLP_BIN
+      value: /usr/local/bin/yt-dlp
   instance:
     type: nano
     min: 1
