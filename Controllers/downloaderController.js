@@ -1676,7 +1676,29 @@ const downloadMedia = async (req, res) => {
       msg.includes('cookie rejected')     ||
       msg.includes('cookie appears stale');
 
-    if (looksLikeLoginWall &&
+    // ── PUBLIC URL guard ───────────────────────────────────────────────
+    // Facebook share/v, share/r, share/p, fb.watch, /reel/, /watch/?v=
+    // are PUBLIC content. So are Instagram /p/, /reel/, /tv/. So is any
+    // X/Twitter status URL (status/<id>). These never require login on
+    // other downloader apps. If we got here, the failure is on OUR side
+    // (rate limit, mirror down, scraper bug) — not a missing session.
+    // Returning LOGIN_REQUIRED for a public URL would push the user into
+    // an unnecessary sign-in flow that wouldn't fix anything. Suppress.
+    const isPublicFacebookUrl =
+      /facebook\.com\/share\/(v|r|p)\//i.test(url) ||
+      /fb\.watch/i.test(url)                       ||
+      /facebook\.com\/(watch|reel|video)/i.test(url) ||
+      /facebook\.com\/[^/]+\/(videos|posts)\//i.test(url);
+    const isPublicInstagramUrl =
+      /instagram\.com\/(p|reel|tv)\//i.test(url);
+    const isPublicTwitterUrl =
+      /(?:x|twitter)\.com\/[^/]+\/status\//i.test(url);
+    const urlIsPublic =
+      (failedPlatform === 'facebook'  && isPublicFacebookUrl) ||
+      (failedPlatform === 'instagram' && isPublicInstagramUrl) ||
+      (failedPlatform === 'twitter'   && isPublicTwitterUrl);
+
+    if (looksLikeLoginWall && !urlIsPublic &&
         (failedPlatform === 'facebook' ||
          failedPlatform === 'instagram' ||
          failedPlatform === 'twitter')) {
