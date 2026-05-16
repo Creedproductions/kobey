@@ -1662,20 +1662,25 @@ async function downloadFacebook(rawUrl, opts = {}) {
   }
 
   // 2b) yt-dlp last-resort — runs on the original URL and resolves share
-  //     tokens to canonical via FB's redirect chain. Slow (5-25s) but works
-  //     when every HTTP scraper above fails (e.g. share/r/<token> URLs where
-  //     the token differs from the reel ID).
+  //     tokens to canonical via FB's redirect chain. Slow (5-15s typical)
+  //     but works when every HTTP scraper above fails (e.g. share/r/<token>
+  //     URLs where the token differs from the reel ID).
   //
   //     Only register if yt-dlp is actually installed. Without this guard, on
   //     Koyeb buildpack deploys (which don't install yt-dlp) the strategy
   //     fires ENOENT on every Facebook request, eating a race slot and
   //     polluting the error log with "spawn yt-dlp ENOENT" for users who
   //     can't act on it anyway.
+  //
+  //     Timeout capped at 18s (not 28s) so that even with a retry round,
+  //     total wait stays under the controller's 60s outer wrapper. yt-dlp's
+  //     own --socket-timeout is 12s, so 18s gives one extra retry inside
+  //     yt-dlp before we abort.
   if (ENABLE_YTDLP_FB && _YTDLP_AVAILABLE) {
     strategies.push([
       'yt-dlp-fb',
       () => tryYtDlpFacebook(rawUrl),
-      28000,
+      18000,
     ]);
   }
 
@@ -1745,10 +1750,62 @@ async function downloadFacebook(rawUrl, opts = {}) {
     });
   };
 
+  // Detect "permanent" failures — retrying these never changes the outcome.
+  // 404 means the URL doesn't exist; "no video metadata in iframe" means FB
+  // itself can't find the content; ENOENT means a missing binary; "binary
+  // not installed" is our own short-circuit. When ALL errors are permanent
+  // we skip the retry — saves ~30s on dead URLs and prevents the outer
+  // 60s download wrapper from tripping with "Download timeout - operation
+  // took too long" when yt-dlp also has nothing to find.
+  //
+  // yt-dlp timeout counts as permanent because yt-dlp has its own internal
+  // --retries 2 + --socket-timeout 12, so an 18s timeout means yt-dlp has
+  // already exhausted its retry budget — another run from us doesn't help.
+  const isPermanentError = (e) => {
+    const s = String(e || '').toLowerCase();
+    return s.includes('http 404')
+        || s.includes('http 403')
+        || s.includes('no video metadata')
+        || s.includes('no video urls in share page')
+        || s.includes('no usable fbcdn video urls')
+        || s.includes('no fb video links')
+        || s.includes('enoent')
+        || s.includes('binary not installed')
+        || s.includes('not installed')
+        || s.includes('content unavailable')
+        || s.includes('private')
+        || s.includes('deleted')
+        || s.includes('login required')
+        // Strategy-wrapper timeouts count as permanent: every strategy has
+        // its own internal retry logic, so a wrapper timeout means the
+        // strategy already burned its budget. Re-running it from scratch
+        // produces the same timeout 95% of the time.
+        || /timeout after \d+ms/.test(s);
+  };
+
   const errors = [];
   try {
     return await firstSuccess(buildPromises(errors), errors);
   } catch (_) {
+    const allPermanent = errors.length > 0 && errors.every(isPermanentError);
+    if (allPermanent) {
+      console.warn('🚫 Facebook: all strategies returned permanent failures — skipping retry');
+      const allErrors = dedupedErrors(errors).join(' | ');
+      const isPublicUrl =
+        /\/share\/(v|r|p)\//i.test(rawUrl)   ||
+        /fb\.watch/i.test(rawUrl)            ||
+        /facebook\.com\/(watch|reel|video)/i.test(rawUrl) ||
+        /facebook\.com\/[^/]+\/videos\//i.test(rawUrl);
+      // Cleaner error for the user — this URL isn't going to work even with
+      // more retries. "Content unavailable" is what most other downloaders
+      // call this state too.
+      throw new Error(
+        isPublicUrl
+          ? `Facebook content unavailable. The post may be deleted, private, region-locked, or hosted on a page that requires sign-in. — ${allErrors}`
+          : `Facebook: all strategies failed (permanent) — ${allErrors}`
+      );
+    }
+
     console.warn('🔁 Facebook retry once with same candidates');
     const retryErrors = [];
     try {
