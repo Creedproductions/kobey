@@ -20,8 +20,14 @@ const bitly = new BitlyClient(config.BITLY_ACCESS_TOKEN);
 
 // ===== CONSTANTS =====
 const SUPPORTED_PLATFORMS = [
+  // Dedicated extractors (custom scrapers in /Services/*)
   'instagram', 'tiktok', 'facebook', 'twitter',
-  'youtube', 'pinterest', 'threads', 'linkedin'
+  'youtube', 'pinterest', 'threads', 'linkedin',
+  // Named yt-dlp handlers (better metadata + cleaner platform tagging)
+  'reddit', 'bilibili', 'bbc', 'vimeo', 'dailymotion', 'twitch',
+  'rumble', 'soundcloud', 'vk', 'streamable', 'odysee',
+  // Anything else falls back to 'generic' which uses yt-dlp directly.
+  'generic',
 ];
 
 const PLACEHOLDER_THUMBNAIL = 'https://via.placeholder.com/300x150';
@@ -124,6 +130,29 @@ const HOST_PLATFORM = [
   ['threads.net',    'threads'],
   ['threads.com',    'threads'],
   ['linkedin.com',   'linkedin'],
+  // ── Named handlers added in 2026-Q2 ─────────────────────────────────────
+  // Each of these resolves to a thin wrapper around downloadGeneric (yt-dlp),
+  // but mapping them to a recognised platform name gives:
+  //   • cleaner Telegram alerts (platform tag = "reddit", not "generic")
+  //   • better filenames (extractor picks up the post title)
+  //   • a stable extractor key the Flutter client uses to pick the platform
+  //     badge / colour / icon.
+  ['reddit.com',     'reddit'],
+  ['redd.it',        'reddit'],
+  ['bilibili.com',   'bilibili'],
+  ['b23.tv',         'bilibili'],
+  ['bbc.com',        'bbc'],
+  ['bbc.co.uk',      'bbc'],
+  ['vimeo.com',      'vimeo'],
+  ['dailymotion.com','dailymotion'],
+  ['dai.ly',         'dailymotion'],
+  ['twitch.tv',      'twitch'],
+  ['rumble.com',     'rumble'],
+  ['soundcloud.com', 'soundcloud'],
+  ['vk.com',         'vk'],
+  ['vkvideo.ru',     'vk'],
+  ['streamable.com', 'streamable'],
+  ['odysee.com',     'odysee'],
 ];
 
 const identifyPlatform = (url) => {
@@ -968,14 +997,40 @@ const platformDownloaders = {
   },
 
   // ─── GENERIC (yt-dlp fallback) ────────────────────────────────────────────
-  // Catches every site identifyPlatform() doesn't recognise — reddit,
-  // vimeo, dailymotion, soundcloud, twitch, vk, rumble, bilibili, douyin,
-  // streamable, kick, odysee, plus ~1700 others yt-dlp supports out of
-  // the box. Slower than the dedicated services (yt-dlp spawn + extraction)
-  // but covers the long tail of "abrupt" platforms users share.
+  // Catches every site identifyPlatform() doesn't recognise — vimeo,
+  // dailymotion, soundcloud, twitch, vk, rumble, douyin, streamable, kick,
+  // plus ~1700 others yt-dlp supports out of the box. Slower than the
+  // dedicated services (yt-dlp spawn + extraction) but covers the long
+  // tail of "abrupt" platforms users share.
   async generic(url) {
     return downloadWithTimeout(() => downloadGeneric(url), 55000);
   },
+
+  // ─── NAMED yt-dlp HANDLERS ───────────────────────────────────────────────
+  // These all wrap downloadGeneric (yt-dlp) but pin the platform name in the
+  // response so the client knows which badge / icon to show and so Telegram
+  // alerts route to the right tag. yt-dlp's own `extractor_key` is already
+  // populated; we use it preferentially in the formatter below.
+  //
+  // Why explicit named handlers? Two reasons:
+  //   1. Naming the platform up-front (in HOST_PLATFORM) means the URL
+  //      validation, share-handler routing, and the failure-alert tagging
+  //      all see the right name BEFORE yt-dlp runs (otherwise everything
+  //      is "generic" until extraction completes 5-15s later).
+  //   2. We can override the title / filename per-platform here when yt-dlp's
+  //      default extractor leaves something to be desired (e.g. Reddit's
+  //      "video_<id>" placeholder when the post title is empty).
+  async reddit(url)      { return downloadWithTimeout(() => downloadGeneric(url), 45000); },
+  async bilibili(url)    { return downloadWithTimeout(() => downloadGeneric(url), 55000); },
+  async bbc(url)         { return downloadWithTimeout(() => downloadGeneric(url), 55000); },
+  async vimeo(url)       { return downloadWithTimeout(() => downloadGeneric(url), 45000); },
+  async dailymotion(url) { return downloadWithTimeout(() => downloadGeneric(url), 45000); },
+  async twitch(url)      { return downloadWithTimeout(() => downloadGeneric(url), 55000); },
+  async rumble(url)      { return downloadWithTimeout(() => downloadGeneric(url), 45000); },
+  async soundcloud(url)  { return downloadWithTimeout(() => downloadGeneric(url), 45000); },
+  async vk(url)          { return downloadWithTimeout(() => downloadGeneric(url), 45000); },
+  async streamable(url)  { return downloadWithTimeout(() => downloadGeneric(url), 45000); },
+  async odysee(url)      { return downloadWithTimeout(() => downloadGeneric(url), 45000); },
 };
 
 // ===== DATA FORMATTERS =====
@@ -1466,6 +1521,24 @@ const dataFormatters = {
       selectedQuality: data.selectedQuality || formats[0] || null,
     };
   },
+
+  // ─── NAMED yt-dlp FORMATTERS ─────────────────────────────────────────────
+  // Each delegates to the generic formatter, then overrides `source` with the
+  // platform's canonical name so the Flutter client picks the right badge,
+  // colour, and filename pattern. The override also stabilises the value when
+  // yt-dlp's `extractor_key` capitalisation varies between versions
+  // ("BiliBili" vs "bilibili", "Reddit" vs "reddit").
+  reddit(data)      { return { ...dataFormatters.generic(data), source: 'reddit',      title: data?.title || 'Reddit Post' }; },
+  bilibili(data)    { return { ...dataFormatters.generic(data), source: 'bilibili',    title: data?.title || 'Bilibili Video' }; },
+  bbc(data)         { return { ...dataFormatters.generic(data), source: 'bbc',         title: data?.title || 'BBC Video' }; },
+  vimeo(data)       { return { ...dataFormatters.generic(data), source: 'vimeo',       title: data?.title || 'Vimeo Video' }; },
+  dailymotion(data) { return { ...dataFormatters.generic(data), source: 'dailymotion', title: data?.title || 'Dailymotion Video' }; },
+  twitch(data)      { return { ...dataFormatters.generic(data), source: 'twitch',      title: data?.title || 'Twitch Clip' }; },
+  rumble(data)      { return { ...dataFormatters.generic(data), source: 'rumble',      title: data?.title || 'Rumble Video' }; },
+  soundcloud(data)  { return { ...dataFormatters.generic(data), source: 'soundcloud',  title: data?.title || 'SoundCloud Audio' }; },
+  vk(data)          { return { ...dataFormatters.generic(data), source: 'vk',          title: data?.title || 'VK Video' }; },
+  streamable(data)  { return { ...dataFormatters.generic(data), source: 'streamable',  title: data?.title || 'Streamable Video' }; },
+  odysee(data)      { return { ...dataFormatters.generic(data), source: 'odysee',      title: data?.title || 'Odysee Video' }; },
 };
 
 const formatData = async (platform, data, req) => {

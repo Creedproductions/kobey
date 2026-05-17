@@ -57,9 +57,15 @@ router.get('/test', (req, res) => {
     message: 'Download API is working',
     timestamp: new Date().toISOString(),
     supportedPlatforms: [
+      // Dedicated extractors
       'instagram', 'tiktok', 'facebook', 'twitter', 'youtube', 'pinterest',
-      'threads', 'linkedin', 'douyin', 'reddit', 'vimeo', 'dailymotion',
-      'streamable', 'twitch', 'pornhub', 'xvideos', 'universal'
+      'threads', 'linkedin',
+      // Named yt-dlp handlers (rich metadata + clean filename)
+      'reddit', 'bilibili', 'bbc', 'vimeo', 'dailymotion', 'twitch',
+      'rumble', 'soundcloud', 'vk', 'streamable', 'odysee',
+      // Plus ~1700 sites resolved through the generic yt-dlp fallback
+      'douyin', 'kick', 'twitch-clips', 'pornhub', 'xvideos',
+      'universal',
     ],
     features: ['media_download', 'multiple_qualities', 'universal_downloader']
   });

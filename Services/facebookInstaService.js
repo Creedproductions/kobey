@@ -509,7 +509,18 @@ async function resolveCanonicalFbUrl(rawUrl) {
   // Try bot UA first (cleanest crawler output, fewest redirects), then iPhone
   // (returns richest JSON when bot is rate-limited), then desktop.
   // maxRedirects 25 — FB's redirect chain for share URLs can be 12-18 hops.
+  //
+  // We now also capture the FINAL URL after redirects (responseUrl). For
+  // /share/v/, /share/r/, /share/p/ URLs, Facebook does a server-side 30x
+  // chain that lands on the real canonical (e.g. /<user>/videos/<fbid>/).
+  // Previously we threw that information away and tried to guess the
+  // canonical from the share ID — which produced URLs like
+  //   https://www.facebook.com/watch/?v=<base62>
+  // that always 404 because /watch/?v= expects a numeric FBID, not the
+  // base62 share token. Using the actual redirect target eliminates the
+  // 404 storm seen in production logs.
   let shareHtml = '';
+  let redirectedTo = '';
   const uaProbes = [UA_FB_BOT, UA_MOBILE, UA_DESKTOP];
   for (const ua of uaProbes) {
     try {
@@ -524,6 +535,23 @@ async function resolveCanonicalFbUrl(rawUrl) {
       });
       const body = typeof resp.data === 'string' ? resp.data : '';
       if (body && body.length > shareHtml.length) shareHtml = body;
+
+      // The most reliable canonical signal we have: where did the redirect
+      // chain actually land? We keep the LAST non-login, non-share target.
+      const finalUrl =
+        resp.request?.res?.responseUrl ||
+        resp.request?.responseURL      ||
+        (resp.config?.url !== url ? resp.config?.url : '');
+      if (
+        finalUrl && typeof finalUrl === 'string' &&
+        finalUrl !== url &&
+        !/\/login(\.php|\/)/.test(finalUrl) &&
+        !/\/share\//.test(finalUrl)
+      ) {
+        redirectedTo = finalUrl;
+        console.log(`🔗 share resolver final URL → ${finalUrl}`);
+      }
+
       if (body && body.length > 5000) break;
     } catch (_) {
       // try the next UA
@@ -617,54 +645,113 @@ async function resolveCanonicalFbUrl(rawUrl) {
     }
   }
 
-  // ── STEP 3: build candidate URLs from share ID (multiple variants) ────────
-  // share/v/<id> can resolve to either /reel/<id>, /watch/?v=<id>, or
-  // /videos/<id>. share/r/<id> is normally /reel/<id>. share/p/<id> is a
-  // post which can wrap a video OR a photo set — try /posts/<id> and the
-  // numeric story.php route. Returning all candidates lets the race try
-  // each in parallel without us having to guess right.
+  // ── STEP 3: build candidate URLs ──────────────────────────────────────────
+  // PRIORITY ORDER:
+  //   1. The actual final URL the redirect chain landed on (most reliable)
+  //   2. The canonical URL extracted from <meta og:url> / <link canonical>
+  //   3. ONE guess per share kind, only when the guess is plausibly correct
+  //      for the share-token format
+  //
+  // We previously generated lots of guesses like /watch/?v=<base62> and
+  // /video.php?v=<base62> for share/v URLs, and /<base62>/posts/ for share/p.
+  // Those endpoints REQUIRE numeric FBIDs, so they always returned 404 and
+  // wasted strategy attempts. The share token in /share/v/<id>/ is base62,
+  // NOT a numeric FBID — only /reel/<token>/ accepts base62 in 2026.
   const candidates = new Set();
+
+  if (redirectedTo) candidates.add(redirectedTo);
   if (canonicalFromMeta) candidates.add(canonicalFromMeta);
 
-  const shareMatch = url.match(/facebook\.com\/share\/(v|r|p)\/([A-Za-z0-9_-]+)/i);
+  const isNumericId = (s) => /^\d{6,}$/.test(s);
+
+  const shareMatch = url.match(/facebook\.com\/share\/(v|r|p|s)\/([A-Za-z0-9_-]+)/i);
   if (shareMatch) {
     const kind = shareMatch[1].toLowerCase();
     const id   = shareMatch[2];
+    const numeric = isNumericId(id);
+
     if (kind === 'v') {
-      candidates.add(`https://www.facebook.com/watch/?v=${id}`);
+      // /reel/<base62>/ is the only path that accepts non-numeric share IDs.
+      // The /watch/?v= and /video.php?v= endpoints require numeric FBIDs and
+      // 404 every time a base62 token is passed — never include them.
       candidates.add(`https://www.facebook.com/reel/${id}/`);
-      candidates.add(`https://www.facebook.com/video.php?v=${id}`);
+      if (numeric) {
+        candidates.add(`https://www.facebook.com/watch/?v=${id}`);
+        candidates.add(`https://www.facebook.com/video.php?v=${id}`);
+      }
     } else if (kind === 'r') {
       candidates.add(`https://www.facebook.com/reel/${id}/`);
-      candidates.add(`https://www.facebook.com/watch/?v=${id}`);
+      candidates.add(`https://www.facebook.com/reels/${id}/`);
+      if (numeric) candidates.add(`https://www.facebook.com/watch/?v=${id}`);
     } else if (kind === 'p') {
-      // /posts/<id> often serves the canonical pageId/postId URL via redirect.
-      candidates.add(`https://www.facebook.com/${id}/posts/`);
-      candidates.add(`https://www.facebook.com/permalink.php?story_fbid=${id}`);
+      // /share/p/<token> is a post. /<token>/posts/ and
+      // permalink.php?story_fbid=<token> both require numeric IDs to resolve,
+      // so we only generate them for numeric tokens. For base62 tokens, the
+      // share URL itself + the redirect target + the meta canonical are the
+      // only useful candidates.
+      if (numeric) {
+        candidates.add(`https://www.facebook.com/${id}/posts/`);
+        candidates.add(`https://www.facebook.com/permalink.php?story_fbid=${id}`);
+      }
+    } else if (kind === 's') {
+      // /share/s/ — sometimes used for "stories" or generic shares.
+      // No reliable guess; rely on redirect target + share URL itself.
     }
   }
 
-  // fb.watch redirects to the canonical via a 30x — try resolving by HEAD
-  if (/fb\.watch/i.test(url)) {
-    try {
-      const probe = await axios.get(url, {
-        maxRedirects: 25,
-        timeout: 12000,
-        validateStatus: () => true,
-        headers: fbHeaders({ 'User-Agent': UA_DESKTOP }),
-      });
-      const finalUrl =
-        probe.request?.res?.responseUrl ||
-        probe.request?.responseURL      ||
-        (probe.config?.url !== url ? probe.config?.url : '');
-      if (finalUrl && !/\/login/.test(finalUrl)) {
-        console.log(`🔗 fb.watch redirected → ${finalUrl}`);
-        candidates.add(finalUrl);
-      }
-    } catch (_) { /* ignore */ }
+  // fb.watch redirects to the canonical via a 30x — try resolving with iOS
+  // UA (FB serves more direct redirects to mobile clients than to desktop).
+  if (/fb\.watch/i.test(url) && !redirectedTo) {
+    for (const ua of [UA_MOBILE, UA_FB_BOT, UA_DESKTOP]) {
+      try {
+        const probe = await axios.get(url, {
+          maxRedirects: 25,
+          timeout: 10000,
+          validateStatus: () => true,
+          headers: fbHeaders({ 'User-Agent': ua }),
+        });
+        const finalUrl =
+          probe.request?.res?.responseUrl ||
+          probe.request?.responseURL      ||
+          (probe.config?.url !== url ? probe.config?.url : '');
+        if (finalUrl && !/\/login/.test(finalUrl) && !/\/share\//.test(finalUrl)) {
+          console.log(`🔗 fb.watch redirected (${ua === UA_FB_BOT ? 'bot' : ua === UA_MOBILE ? 'ios' : 'desk'}) → ${finalUrl}`);
+          candidates.add(finalUrl);
+          break;
+        }
+      } catch (_) { /* try next UA */ }
+    }
   }
 
-  // ── STEP 4: fall back to normal redirect chain ───────────────────────────
+  // ── STEP 3.5: explicit redirect-follow for ALL share URLs ────────────────
+  // Even when STEP 1 returned HTML, the final URL of that fetch may have
+  // been a /share/ URL (FB sometimes redirects share/v -> share/r -> canonical
+  // and we missed the last hop). This second probe uses the iOS UA which
+  // consistently produces the cleanest single-hop redirect to the canonical
+  // /<username>/videos/<fbid>/ URL.
+  if (/facebook\.com\/share\//i.test(url) && !redirectedTo) {
+    for (const ua of [UA_MOBILE, UA_FB_BOT]) {
+      try {
+        const probe = await axios.get(url, {
+          maxRedirects: 25,
+          timeout: 10000,
+          validateStatus: () => true,
+          headers: fbHeaders({ 'User-Agent': ua }),
+        });
+        const finalUrl =
+          probe.request?.res?.responseUrl ||
+          probe.request?.responseURL      ||
+          (probe.config?.url !== url ? probe.config?.url : '');
+        if (finalUrl && !/\/login/.test(finalUrl) && !/\/share\//.test(finalUrl)) {
+          console.log(`🔗 share redirected (${ua === UA_FB_BOT ? 'bot' : 'ios'}) → ${finalUrl}`);
+          candidates.add(finalUrl);
+          break;
+        }
+      } catch (_) { /* try next UA */ }
+    }
+  }
+
+  // ── STEP 4: last-ditch fallback redirect chain ───────────────────────────
   if (candidates.size === 0) {
     console.warn('🔗 Fallback: following redirects normally');
     try {
@@ -689,20 +776,15 @@ async function resolveCanonicalFbUrl(rawUrl) {
     }
   }
 
-  // For share/r/<id> and share/v/<id>, also try the *mobile* variant. mbasic
-  // and m.facebook.com use plain HTTP 30x redirects (no JS) for many share
-  // URLs, which lets some downstream strategies (like direct-scrape) get to
-  // the canonical content with fewer redirect hops.
-  if (/facebook\.com\/share\//i.test(url)) {
-    const mobile  = url.replace(/(?:www|web|business)\.facebook\.com/i, 'm.facebook.com');
-    const mbasic  = url.replace(/(?:www|web|business|m)\.facebook\.com/i, 'mbasic.facebook.com');
-    if (mobile !== url) candidates.add(mobile);
-    if (mbasic !== url) candidates.add(mbasic);
-  }
+  // NOTE: we deliberately do NOT add m.facebook.com / mbasic.facebook.com
+  // variants for /share/ URLs anymore. Production logs showed these always
+  // redirect to the mobile login wall and time out direct-scrape (15s each),
+  // adding 30+ seconds of dead time to every share-URL request. mbasic
+  // remains usable for /watch/ and /videos/ URLs via the mbasic-video
+  // strategy (opt-in via FB_USE_MBASIC=1).
 
-  // Always include the original URL as a candidate — many strategies (snapsave,
-  // fdownloader.net) can resolve the /share/ URL directly without needing the
-  // canonical form.
+  // Always include the original URL as a candidate — third-party scrapers
+  // (snapsave-fb, fdownloader-net, savefbs) accept the /share/ URL directly.
   candidates.add(url);
 
   const list = [...candidates];
