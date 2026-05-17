@@ -1033,6 +1033,23 @@ const FB_REGEXES = [
   { key: 'hd', re: /"video_url"\s*:\s*"(https:\/\/[^"]*fbcdn[^"]+)"/ },
   { key: 'sd', re: /"stream_url"\s*:\s*"(https:\/\/[^"]*fbcdn[^"]+)"/ },
   { key: 'hd', re: /"base_url"\s*:\s*"(https:\/\/[^"]*fbcdn[^"]+\.mp4[^"]*)"/ },
+  // 2026 FB RSC payload keys (added 2026-05). FB renamed several keys when
+  // they migrated to the React Server Components Reel player. New patterns:
+  //   - "videoDeliveryLegacyFields": object containing playable_url_quality_hd
+  //   - "video_deliver_legacy_fields"
+  //   - "playable_url_quality" (was playable_url_quality_hd, now under a list)
+  //   - "best_quality" / "muxed_url" (Reel-specific muxed track)
+  //   - "dash_manifest_url" / "dash_manifest" — DASH MPD URLs (last resort)
+  { key: 'hd', re: /"playable_url_quality_hd_v2"\s*:\s*"([^"]+)"/ },
+  { key: 'sd', re: /"playable_url_v2"\s*:\s*"([^"]+)"/ },
+  { key: 'hd', re: /"muxed_url"\s*:\s*"([^"]+)"/ },
+  { key: 'hd', re: /"best_quality"\s*:\s*"([^"]+)"/ },
+  // The Reel player payload key — `representative_id` precedes the URL
+  { key: 'hd', re: /"hd_playable_url"\s*:\s*"([^"]+)"/ },
+  { key: 'sd', re: /"sd_playable_url"\s*:\s*"([^"]+)"/ },
+  // Catch-all: any "url":"<fbcdn .mp4>" pattern. Lower priority because it
+  // can match audio-only URLs, but worth a try when nothing else matched.
+  { key: 'sd', re: /"url"\s*:\s*"(https:\/\/[^"]*fbcdn\.net[^"]*\.mp4[^"]*)"/ },
 ];
 
 async function tryDirectScrape(url) {
@@ -1184,27 +1201,48 @@ async function tryDirectScrape(url) {
 // needed on our side).
 
 async function trySnapsaveFb(url) {
-  const resp = await axios.post(
-    'https://snapsave.app/action_download.php',
-    `url=${encodeURIComponent(url)}`,
-    {
-      timeout: 18000,
-      maxRedirects: 5,
-      validateStatus: () => true,
-      headers: {
-        'Content-Type':              'application/x-www-form-urlencoded',
-        'User-Agent':                UA_DESKTOP,
-        Accept:                      'text/html,application/xhtml+xml,*/*;q=0.9',
-        'Accept-Language':           'en-US,en;q=0.9',
-        Origin:                      'https://snapsave.app',
-        Referer:                     'https://snapsave.app/',
-        'X-Requested-With':          'XMLHttpRequest',
-        'Upgrade-Insecure-Requests': '1',
-      },
-    }
-  );
+  // snapsave moved its endpoint in 2025-2026 — try all known paths/hosts.
+  // The original /action_download.php now 404s; the active endpoints are
+  // /action.php (current) and /api/ajaxSearch (newer mirror layout).
+  const endpoints = [
+    { ep: 'https://snapsave.app/action.php',         host: 'snapsave.app' },
+    { ep: 'https://snapsave.app/action_download.php', host: 'snapsave.app' },
+    { ep: 'https://snapsave.app/api/ajaxSearch',     host: 'snapsave.app' },
+    { ep: 'https://snapsave.io/action.php',          host: 'snapsave.io' },
+    { ep: 'https://en.savefrom.net/savefrom.php',    host: 'en.savefrom.net' },
+  ];
 
-  if (resp.status >= 400) throw new Error(`snapsave-fb: HTTP ${resp.status}`);
+  let resp = null;
+  let lastErr = '';
+  for (const { ep, host } of endpoints) {
+    try {
+      const useAjax = ep.includes('ajaxSearch');
+      const body = useAjax
+        ? new URLSearchParams({ q: url, t: 'media', lang: 'en' }).toString()
+        : `url=${encodeURIComponent(url)}`;
+      const r = await axios.post(ep, body, {
+        timeout: 10000,
+        maxRedirects: 5,
+        validateStatus: () => true,
+        headers: {
+          'Content-Type':              'application/x-www-form-urlencoded',
+          'User-Agent':                UA_DESKTOP,
+          Accept:                      'text/html,application/xhtml+xml,*/*;q=0.9',
+          'Accept-Language':           'en-US,en;q=0.9',
+          Origin:                      `https://${host}`,
+          Referer:                     `https://${host}/`,
+          'X-Requested-With':          'XMLHttpRequest',
+          'Upgrade-Insecure-Requests': '1',
+        },
+      });
+      if (r.status >= 400) { lastErr = `${host}: HTTP ${r.status}`; continue; }
+      resp = r;
+      break;
+    } catch (e) {
+      lastErr = `${host}: ${e.message}`;
+    }
+  }
+  if (!resp) throw new Error(`snapsave-fb: ${lastErr || 'all endpoints failed'}`);
 
   // snapsave returns JSON for FB with an embedded HTML body, OR raw HTML
   let html = '';
@@ -1289,12 +1327,29 @@ async function tryFdownloaderNet(url) {
       let hd = '', sd = '';
 
       $('a[href]').each((_, a) => {
-        const href = $(a).attr('href') || '';
+        const href = ($(a).attr('href') || '').trim();
         const text = $(a).text().toLowerCase();
-        if (!looksLikeFbVideo(href)) return;
-        if (!hd && (text.includes('hd') || text.includes('720') || text.includes('1080'))) { hd = href; return; }
+        if (!href.startsWith('http')) return;
+        // Accept fbcdn, scontent, .mp4, OR proxied download paths
+        const isVid = href.includes('fbcdn.net')
+                   || href.includes('scontent')
+                   || /\.mp4(\?|$)/i.test(href)
+                   || /\/(download|getvideo|stream)/i.test(href);
+        if (!isVid) return;
+        if (!hd && (text.includes('hd') || text.includes('720') || text.includes('1080') || text.includes('high'))) {
+          hd = href; return;
+        }
         if (!sd) sd = href;
       });
+
+      // Raw URL scan in the HTML payload as last resort
+      if (!hd && !sd) {
+        const m = html.match(/https?:\/\/[^"'\s<>]+\.mp4[^"'\s<>]*/gi);
+        if (m && m.length) {
+          const uniq = [...new Set(m.map(s => s.replace(/&amp;/g, '&')))];
+          hd = uniq[0]; sd = uniq[1] || '';
+        }
+      }
 
       if (!hd && !sd) { lastErr = `${host}: no FB video links found`; continue; }
 
@@ -1316,26 +1371,46 @@ async function tryFdownloaderNet(url) {
 // snapsave is rate-limited. Plain form POST to its index, parsed via Cheerio.
 
 async function trySaveFbs(url) {
-  const resp = await axios.post(
-    'https://savefbs.com/api/save',
-    new URLSearchParams({ url }).toString(),
-    {
-      timeout: 18000,
-      maxRedirects: 5,
-      validateStatus: () => true,
-      headers: {
-        'Content-Type':     'application/x-www-form-urlencoded',
-        'User-Agent':       UA_DESKTOP,
-        Accept:             'application/json, text/html,*/*;q=0.9',
-        'Accept-Language':  'en-US,en;q=0.9',
-        Origin:             'https://savefbs.com',
-        Referer:            'https://savefbs.com/',
-        'X-Requested-With': 'XMLHttpRequest',
-      },
-    }
-  );
+  // 2026 update: /api/save now 404s. Try the new endpoints (/api/ajaxSearch
+  // and the homepage POST handler /download) plus the savetube.cc mirror.
+  const endpoints = [
+    { ep: 'https://savefbs.com/api/ajaxSearch', host: 'savefbs.com' },
+    { ep: 'https://savefbs.com/download',       host: 'savefbs.com' },
+    { ep: 'https://savefbs.com/api/save',       host: 'savefbs.com' },
+    { ep: 'https://www.fbvideodownloader.io/api/ajaxSearch', host: 'fbvideodownloader.io' },
+    { ep: 'https://fdownloader.app/api/ajaxSearch', host: 'fdownloader.app' },
+  ];
 
-  if (resp.status >= 400) throw new Error(`savefbs: HTTP ${resp.status}`);
+  let resp = null;
+  let lastErr = '';
+  for (const { ep, host } of endpoints) {
+    try {
+      const useAjax = ep.includes('ajaxSearch');
+      const body = useAjax
+        ? new URLSearchParams({ q: url, t: 'media', lang: 'en' }).toString()
+        : new URLSearchParams({ url }).toString();
+      const r = await axios.post(ep, body, {
+        timeout: 10000,
+        maxRedirects: 5,
+        validateStatus: () => true,
+        headers: {
+          'Content-Type':     'application/x-www-form-urlencoded',
+          'User-Agent':       UA_DESKTOP,
+          Accept:             'application/json, text/html,*/*;q=0.9',
+          'Accept-Language':  'en-US,en;q=0.9',
+          Origin:             `https://${host}`,
+          Referer:            `https://${host}/`,
+          'X-Requested-With': 'XMLHttpRequest',
+        },
+      });
+      if (r.status >= 400) { lastErr = `${host}: HTTP ${r.status}`; continue; }
+      resp = r;
+      break;
+    } catch (e) {
+      lastErr = `${host}: ${e.message}`;
+    }
+  }
+  if (!resp) throw new Error(`savefbs: ${lastErr || 'all endpoints failed'}`);
 
   const body = resp.data;
   let hd = '', sd = '', thumb = '', title = 'Facebook Video';
@@ -1412,23 +1487,58 @@ async function tryX2download(url) {
       if (resp.status >= 400) { lastErr = `${host}: HTTP ${resp.status}`; continue; }
 
       // Response shape: { status: 'ok', data: '<html>...</html>', ... }
-      const html = (resp.data && resp.data.data) || resp.data || '';
+      // OR { status: 'ok', links: { mp4: [{quality, url}, ...] } }
+      const payload = resp.data;
+      const html = (payload && payload.data) || payload || '';
       if (!html || typeof html !== 'string' || html.length < 100) {
+        // Could still be JSON-only response — check that path before failing
+        if (payload && typeof payload === 'object') {
+          const flat = JSON.stringify(payload);
+          const m = flat.match(/https?:\/\/[^"'\s]+\.mp4[^"'\s]*/g);
+          if (m && m.length) {
+            return {
+              hd: m[0],
+              sd: m[1] || '',
+              thumbnail: payload.thumbnail || payload.thumb || '',
+              title:     payload.title || 'Facebook Video',
+            };
+          }
+        }
         lastErr = `${host}: empty payload`;
         continue;
       }
 
       const $ = cheerio.load(html);
       let hd = '', sd = '';
+
+      // Strategy A: anchors that contain anything that looks like a video URL
+      // (mirrors often proxy through their own CDN — `cdn.fdownloader.io/...mp4`
+      // wouldn't match `fbcdn.net` but is still a usable video URL).
       $('a[href]').each((_, a) => {
-        const href = $(a).attr('href') || '';
+        const href = ($(a).attr('href') || '').trim();
         const text = $(a).text().toLowerCase();
-        if (!looksLikeFbVideo(href)) return;
+        if (!href.startsWith('http')) return;
+        // Accept fbcdn, scontent, .mp4, OR any URL with a download attribute
+        const isVid = href.includes('fbcdn.net')
+                   || href.includes('scontent')
+                   || /\.mp4(\?|$)/i.test(href)
+                   || /\/(download|getvideo|stream)/i.test(href);
+        if (!isVid) return;
         if (!hd && (text.includes('hd') || text.includes('720') || text.includes('1080') || text.includes('high'))) {
           hd = href; return;
         }
         if (!sd) sd = href;
       });
+
+      // Strategy B: raw URL scan in the HTML payload
+      if (!hd && !sd) {
+        const m = html.match(/https?:\/\/[^"'\s<>]+\.mp4[^"'\s<>]*/gi);
+        if (m && m.length) {
+          const uniq = [...new Set(m.map(s => s.replace(/&amp;/g, '&')))];
+          hd = uniq[0];
+          sd = uniq[1] || '';
+        }
+      }
 
       if (!hd && !sd) { lastErr = `${host}: no FB video links found`; continue; }
 
@@ -1456,12 +1566,20 @@ async function tryYtDlpFacebook(url) {
   const bin = _resolveYtDlp();
   if (!bin) throw new Error('yt-dlp-fb: binary not installed (skipped)');
 
-  // Aggressive timeouts so this strategy doesn't dominate request latency.
-  // Production logs showed yt-dlp eating the entire 18s budget on dead URLs
-  // while every other strategy had already failed in 2-5s, leaving the user
-  // staring at a spinner. We now cap the subprocess at 9s and yt-dlp's own
-  // socket timeout at 6s (was 12s) with 1 retry (was 2). For URLs that work,
-  // yt-dlp typically resolves in 2-4s anyway, so this doesn't hurt success.
+  // 2026-05 update: previous wrapper killed yt-dlp at 9s while its own
+  // --socket-timeout 6 + --retries 1 needs ≥12s minimum to finish even one
+  // attempt. The result was that every yt-dlp run was killed mid-flight,
+  // dressed up as "Command failed" in the error log. The wrapper now gives
+  // yt-dlp 24s, matching its own internal budget (12s socket × 2 retries
+  // = 24s). Also passes a real browser UA + Accept-Language so FB doesn't
+  // serve the bot-only minimal page that has no extractable formats.
+  //
+  // The strategy is still flagged 'slow:true' upstream so the early-exit
+  // logic can abort it if every fast HTTP scraper permanently failed (e.g.
+  // confirmed 404). For URLs that *might* work, yt-dlp gets its full budget.
+  const cookiePath = String(process.env.YT_DLP_COOKIES_FILE || '').trim();
+  const cookieArgs = cookiePath ? ['--cookies', cookiePath] : [];
+
   const info = await new Promise((resolve, reject) => {
     const args = [
       '-f', 'best[height<=?1080]/best',
@@ -1469,19 +1587,38 @@ async function tryYtDlpFacebook(url) {
       '--no-warnings',
       '--no-check-certificate',
       '--geo-bypass',
-      '--socket-timeout', '6',
-      '--retries', '1',
+      '--ignore-config',
+      '--socket-timeout', '12',
+      '--retries', '2',
+      // Pretend to be a real desktop browser. yt-dlp's default UA triggers
+      // FB's bot path which serves a stripped HTML with no video URLs.
+      '--user-agent', UA_DESKTOP,
+      '--add-header', 'Accept-Language:en-US,en;q=0.9',
+      // Encourage FB's English page (consistent JSON keys)
+      '--extractor-args', 'facebook:locale=en_US',
+      ...cookieArgs,
       '--dump-json',
       url,
     ];
     _execFile(bin, args, {
-      timeout: 9000,
+      timeout: 24000,
       maxBuffer: 20 * 1024 * 1024,
-      killSignal: 'SIGKILL',  // ensure the subprocess actually dies on timeout
+      killSignal: 'SIGKILL',
     }, (err, stdout, stderr) => {
       if (err) {
-        const msg = (stderr || err.message || '').slice(0, 200).trim();
-        return reject(new Error(`yt-dlp-fb: ${msg || 'spawn failed'}`));
+        // Surface MORE of stderr so we can see why yt-dlp actually failed.
+        // The previous 200-char slice cut off the real error message.
+        const raw = (stderr || err.message || '').trim();
+        // Strip the boilerplate command line so the message focuses on cause
+        const cleaned = raw
+          .replace(/^Command failed:[\s\S]*?\n/g, '')
+          .replace(/\bWARNING:\s+/g, '')
+          .split('\n')
+          .filter(l => l.trim())
+          .slice(-3)        // last 3 lines usually contain the actual error
+          .join(' | ')
+          .slice(0, 400);
+        return reject(new Error(`yt-dlp-fb: ${cleaned || 'spawn failed'}`));
       }
       try {
         const firstLine = stdout.split('\n').find(l => l.trim().startsWith('{')) || stdout;
@@ -1973,10 +2110,15 @@ async function downloadFacebook(rawUrl, opts = {}) {
   //     success rate on URLs that just 404'd everywhere else is near-zero,
   //     so the wait is dead weight.
   if (ENABLE_YTDLP_FB && _YTDLP_AVAILABLE) {
+    // 26s wrapper. yt-dlp's own budget is 12s socket × 2 retries = 24s
+    // worst-case. We add a 2s buffer so the wrapper kills only if yt-dlp
+    // itself is hung beyond its retry budget. Keep 'slow:true' so the
+    // early-exit logic still aborts this when every fast strategy has
+    // permanently failed (e.g. confirmed 404 on the share URL).
     strategies.push([
       'yt-dlp-fb',
       () => tryYtDlpFacebook(rawUrl),
-      10000,
+      26000,
       { slow: true },
     ]);
   }
