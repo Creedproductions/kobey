@@ -749,54 +749,32 @@ const normaliseFacebookData = (raw) => {
 const platformDownloaders = {
 
   // ─── INSTAGRAM ───────────────────────────────────────────────────────────
-  // Three parallel scrapers:
-  //   1. facebookInstaService (snapsave → snapinsta)  — best quality when available
-  //   2. igdl (btch-downloader)                        — reliable but duplicates
-  //   3. scrapeInstaEmbed (Instagram embed page)       — always works from any IP
+  // Strategy chain reduced to what consistently works in production:
+  //   1. igdl (btch-downloader)        — primary; works for /p/ AND /reel/
+  //   2. scrapeInstaEmbed              — fallback for /p/ posts only
+  //                                      (always returns thumbnails-only for
+  //                                      /reel/, so we skip it for reels)
   //
-  // Priority: snapsave > igdl > embed
-  // If snapsave/igdl both fail we fall through to embed which is the reliable floor.
+  // RETIRED (default OFF, opt-in via env):
+  //   - facebookInsta(url, {…})  (snapsave + snapinsta race) — 0% success
+  //     rate as of 2026-05; snapinsta.app DNS is dead from EU regions
+  //     (getaddrinfo EAI_AGAIN) and snapsave.app returns 404. Re-enable
+  //     with IG_USE_SNAPSAVE=1.
+  //
+  // Behaviour: igdl + embed race in parallel; first one with usable items
+  // wins. If igdl returns first (the common case), we don't wait for embed.
   async instagram(url, req) {
-    // Pull the per-request IG cookie from the request body, if any.
-    // Forwarded to facebookInsta() so the cookie-authenticated story
-    // path (tryIgStoryWithCookie) is used per-request instead of (or in
-    // addition to) the global env-var fallback.
     const userCookies = req?.body?.cookies || {};
     const igCookie    = userCookies.instagram || null;
 
-    let snapsResult = null, igdlResult  = null, embedResult = null;
-    let snapsErr    = null, igdlErr     = null, embedErr    = null;
+    const ENABLE_SNAPSAVE_IG = process.env.IG_USE_SNAPSAVE === '1';
+    const isReelUrl = /instagram\.com\/reel\//i.test(url);
+    // embed always returns only thumbnails for /reel/ URLs in 2026 — skipping
+    // it for reels saves 5-15s of pointless fetches (the embed scraper hits
+    // 6 URL variants × 3 UAs = 18 requests per call). For /p/ posts it
+    // still works as a useful fallback when igdl is rate-limited.
+    const ENABLE_EMBED = !isReelUrl || process.env.IG_USE_EMBED === '1';
 
-    await Promise.allSettled([
-      downloadWithTimeout(() => facebookInsta(url, { igCookie }), 35000)
-        .then(d  => { snapsResult = d; })
-        .catch(e => {
-          snapsErr = e instanceof Error ? e : new Error(String(e));
-          console.warn('⚠️ snapsave error:', snapsErr.message);
-        }),
-
-      downloadWithTimeout(() => igdl(url), 30000)
-        .then(d  => {
-          if (!d) {
-            igdlErr = new Error('igdl resolved with null/undefined');
-          } else {
-            igdlResult = d;
-          }
-        })
-        .catch(e => {
-          igdlErr = e instanceof Error ? e : new Error(String(e));
-          console.warn('⚠️ igdl error:', igdlErr.message);
-        }),
-
-      downloadWithTimeout(() => scrapeInstaEmbed(url), 20000)
-        .then(d  => { embedResult = d; })
-        .catch(e => {
-          embedErr = e instanceof Error ? e : new Error(String(e));
-          console.warn('⚠️ instaEmbed error:', embedErr.message);
-        }),
-    ]);
-
-    // ── normalise each scraper's raw output to an array of items ──────────
     const extractItems = (res) => {
       if (!res) return null;
       if (Array.isArray(res))           return res.length > 0 ? res        : null;
@@ -809,34 +787,71 @@ const platformDownloaders = {
       return null;
     };
 
+    let snapsResult = null, igdlResult = null, embedResult = null;
+    let snapsErr    = null, igdlErr    = null, embedErr    = null;
+
+    const tasks = [];
+
+    // 1) igdl — primary, always run
+    tasks.push(
+      downloadWithTimeout(() => igdl(url), 15000)
+        .then(d  => {
+          if (!d) { igdlErr = new Error('igdl resolved with null/undefined'); }
+          else { igdlResult = d; }
+        })
+        .catch(e => {
+          igdlErr = e instanceof Error ? e : new Error(String(e));
+          console.warn('⚠️ igdl error:', igdlErr.message);
+        }),
+    );
+
+    // 2) embed — fallback for /p/ posts; skipped for /reel/
+    if (ENABLE_EMBED) {
+      tasks.push(
+        downloadWithTimeout(() => scrapeInstaEmbed(url), 12000)
+          .then(d  => { embedResult = d; })
+          .catch(e => {
+            embedErr = e instanceof Error ? e : new Error(String(e));
+            console.warn('⚠️ instaEmbed error:', embedErr.message);
+          }),
+      );
+    }
+
+    // 3) snapsave / snapinsta — opt-in only (DNS dead for snapinsta, snapsave 404)
+    if (ENABLE_SNAPSAVE_IG) {
+      tasks.push(
+        downloadWithTimeout(() => facebookInsta(url, { igCookie }), 20000)
+          .then(d  => { snapsResult = d; })
+          .catch(e => {
+            snapsErr = e instanceof Error ? e : new Error(String(e));
+            console.warn('⚠️ snapsave error:', snapsErr.message);
+          }),
+      );
+    }
+
+    await Promise.allSettled(tasks);
+
     const snapsItems = extractItems(snapsResult);
     const igdlItems  = extractItems(igdlResult);
-    // embed already returns an array or null
     const embedItems = Array.isArray(embedResult) && embedResult.length > 0 ? embedResult : null;
 
     console.log(
-      `📸 Instagram scrapers: snapsave=${snapsItems?.length ?? 'null'}` +
-      `  igdl=${igdlItems?.length ?? 'null'}` +
-      `  embed=${embedItems?.length ?? 'null'}`
+      `📸 Instagram scrapers:` +
+      (ENABLE_SNAPSAVE_IG ? ` snapsave=${snapsItems?.length ?? 'null'} ` : '') +
+      ` igdl=${igdlItems?.length ?? 'null'}` +
+      (ENABLE_EMBED ? ` embed=${embedItems?.length ?? 'null'}` : '')
     );
 
     if (!snapsItems && !igdlItems && !embedItems) {
       throw new Error(
         'Instagram: all scrapers failed. ' +
-        `snapsave: ${snapsErr?.message ?? 'null'}  ` +
-        `igdl: ${igdlErr?.message ?? 'null'}  ` +
-        `embed: ${embedErr?.message ?? 'null'}`
+        `igdl: ${igdlErr?.message ?? 'n/a'}  ` +
+        `embed: ${embedErr?.message ?? 'n/a'}  ` +
+        (ENABLE_SNAPSAVE_IG ? `snapsave: ${snapsErr?.message ?? 'n/a'}` : '')
       );
     }
 
-    // Prefer snapsave (richest metadata), then igdl, then embed.
-    // Stash the request so the formatter can wrap CDN URLs in
-    // /api/proxy-download. Many Instagram-resolved URLs (notably
-    // d.rapidcdn.app from igdl) are server-only — the device can't
-    // resolve their hostnames over typical mobile DNS, so direct
-    // downloads fail with "Failed host lookup". Routing through the
-    // Koyeb proxy fixes that because the SERVER fetches the file and
-    // streams it to the app.
+    // Prefer snapsave (richest metadata when available), then igdl, then embed.
     if (snapsItems?.length > 0) {
       console.log('📸 Using snapsave');
       return { _items: snapsItems, _source: 'snapsave', _req: req };

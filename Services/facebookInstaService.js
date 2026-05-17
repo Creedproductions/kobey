@@ -1007,124 +1007,101 @@ const FB_REGEXES = [
 ];
 
 async function tryDirectScrape(url) {
-  // Try multiple UAs in order:
-  //   1. iPhone Safari mobile UA — produces real fbcdn.net URLs in the
-  //      `playable_url` / `playable_url_quality_hd` JSON keys. This is the
-  //      one that actually downloads.
-  //   2. Android Chrome — different server-side template, often has the
-  //      `browser_native_hd_url` keys that iOS doesn't expose. Especially
-  //      important for /reel/ URLs in 2026 where FB serves a stripped-down
-  //      mobile shell to iPhones but a richer page to Android.
-  //   3. facebookexternalhit/1.1 — FB's own crawler UA can bypass some soft
-  //      login walls, BUT in 2026 it returns `playable_url` values pointing
-  //      to `lookaside.fbsbx.com/lookaside/crawler/media/?media_id=…`. That
-  //      endpoint is HTML for non-bot fetchers, so our proxy then streams
-  //      300 bytes of HTML labelled .mp4 — a non-playable file. We accept
-  //      bot-UA results ONLY when the resulting URL is a real fbcdn video
-  //      AND we fall back to og:video meta tags before declaring failure.
+  // Race 3 UAs in PARALLEL. The previous sequential loop meant a stalled iOS
+  // request consumed the entire 10s outer budget before Android/bot UAs even
+  // got to try. Running them concurrently and resolving on first success
+  // means the *fastest* working UA wins — for healthy URLs this is 1-3s; for
+  // dead URLs all three fail in parallel within their per-UA timeout.
   //
-  // looksLikeFbVideo() rejects lookaside URLs and any other non-fbcdn /
-  // non-.mp4 string, which is exactly the validation the previous version
-  // was missing.
+  // UAs explained:
+  //   - iPhone Safari mobile     → richest `playable_url` JSON
+  //   - Android Chrome           → richer `browser_native_hd_url` JSON
+  //   - facebookexternalhit/1.1  → bot UA, sometimes bypasses soft login wall
+  //
+  // looksLikeFbVideo() filters out lookaside.fbsbx.com URLs returned by the
+  // bot UA (those aren't directly streamable).
   const UA_ANDROID =
     'Mozilla/5.0 (Linux; Android 14; Pixel 7) AppleWebKit/537.36 ' +
     '(KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36';
 
   const uas = [
-    { ua: UA_MOBILE,  tag: 'ios'    },
-    { ua: UA_ANDROID, tag: 'and'    },
-    { ua: UA_FB_BOT,  tag: 'bot'    },
+    { ua: UA_MOBILE,  tag: 'ios' },
+    { ua: UA_ANDROID, tag: 'and' },
+    { ua: UA_FB_BOT,  tag: 'bot' },
   ];
-  let lastErr = '';
 
-  for (const { ua, tag } of uas) {
-    try {
-      // Per-UA timeout dropped from 15s → 6s. The outer wrapper caps total
-      // direct-scrape at 10s, so we want each UA to fail fast enough to let
-      // the next one try within that budget (was: 1 UA could eat the whole
-      // 15s budget if FB stalled). For URLs that work, FB's first byte
-      // lands in well under 6s.
-      const resp = await axios.get(url, {
-        timeout: 6000,
-        maxRedirects: 25,
-        validateStatus: () => true,
-        headers: fbHeaders({
-          'User-Agent': ua,
-          Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        }),
-      });
+  // Build one promise per UA. Each promise resolves with a {hd, sd, …} shape
+  // on success or rejects with a tagged error on failure. firstSuccess wins
+  // on the first resolution; if all reject, the joined errors bubble up.
+  const attempts = uas.map(({ ua, tag }) => (async () => {
+    const resp = await axios.get(url, {
+      timeout: 8000,
+      maxRedirects: 25,
+      validateStatus: () => true,
+      headers: fbHeaders({
+        'User-Agent': ua,
+        Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      }),
+    });
 
-      // Treat 4xx/5xx as a failure for this UA, but try the next one rather
-      // than throwing — Facebook sometimes 404s a /reel/ URL on iOS but
-      // serves it 200 on Android. Important for share/v/ guesses where the
-      // canonical path is uncertain.
-      if (resp.status >= 400) {
-        lastErr = `direct(${tag}): HTTP ${resp.status}`;
-        continue;
-      }
-
-      const html = typeof resp.data === 'string' ? resp.data : '';
-      if (!html || html.length < 500) {
-        lastErr = `direct(${tag}): empty response`;
-        continue;
-      }
-
-      let hd = '', sd = '';
-      for (const { key, re } of FB_REGEXES) {
-        const m = html.match(re);
-        if (m?.[1]) {
-          const clean = unescapeJsString(m[1]);
-          // Reject lookaside.fbsbx.com / og:image / non-video matches —
-          // looksLikeFbVideo only accepts fbcdn.net URLs and .mp4 paths,
-          // which is the only thing the proxy can actually stream.
-          if (!looksLikeFbVideo(clean)) continue;
-          if (key === 'hd' && !hd) hd = clean;
-          if (key === 'sd' && !sd) sd = clean;
-        }
-        if (hd && sd) break;
-      }
-
-      // og:video meta tags — sometimes the only video URL on the public
-      // share page. Particularly common for share/p/<id> posts where the
-      // JSON isn't embedded but Open Graph tags are present.
-      if (!hd || !sd) {
-        const $og = cheerio.load(html);
-        $og('meta[property="og:video:secure_url"], meta[property="og:video:url"], meta[property="og:video"]').each((_, el) => {
-          const v = ($og(el).attr('content') || '').replace(/&amp;/g, '&');
-          if (!looksLikeFbVideo(v)) return;
-          if (!hd) hd = v;
-          else if (!sd && v !== hd) sd = v;
-        });
-      }
-
-      if (!hd && !sd) {
-        // Some reels expose only a raw mp4 in the HTML, not via the JSON keys.
-        const mp4Matches = html.match(/https?:\/\/[^"'\s<>]*fbcdn\.net[^"'\s<>]*\.mp4[^"'\s<>]*/gi) || [];
-        if (mp4Matches.length) sd = unescapeJsString(mp4Matches[0]).replace(/&amp;/g, '&');
-      }
-
-      if (!hd && !sd) {
-        // NOTE: do not put the literal phrase "login required" here — the
-        // downloader controller substring-matches that exact phrase and turns
-        // the whole response into a LOGIN_REQUIRED 401, which forced users
-        // into the sign-in flow for public URLs that simply had no scrapable
-        // JSON on this attempt.
-        lastErr = `direct(${tag}): no video metadata found in HTML`;
-        continue;
-      }
-
-      const $ = cheerio.load(html);
-      return {
-        hd, sd,
-        thumbnail: $('meta[property="og:image"]').attr('content') || '',
-        title:     $('meta[property="og:title"]').attr('content') || 'Facebook Video',
-      };
-    } catch (e) {
-      lastErr = `direct(${tag}): ${e.message}`;
+    if (resp.status >= 400) {
+      throw new Error(`direct(${tag}): HTTP ${resp.status}`);
     }
-  }
 
-  throw new Error(lastErr || 'direct: no video metadata found in HTML');
+    const html = typeof resp.data === 'string' ? resp.data : '';
+    if (!html || html.length < 500) {
+      throw new Error(`direct(${tag}): empty response`);
+    }
+
+    let hd = '', sd = '';
+    for (const { key, re } of FB_REGEXES) {
+      const m = html.match(re);
+      if (m?.[1]) {
+        const clean = unescapeJsString(m[1]);
+        if (!looksLikeFbVideo(clean)) continue;
+        if (key === 'hd' && !hd) hd = clean;
+        if (key === 'sd' && !sd) sd = clean;
+      }
+      if (hd && sd) break;
+    }
+
+    // og:video meta tags fallback (used by share/p posts)
+    if (!hd || !sd) {
+      const $og = cheerio.load(html);
+      $og('meta[property="og:video:secure_url"], meta[property="og:video:url"], meta[property="og:video"]').each((_, el) => {
+        const v = ($og(el).attr('content') || '').replace(/&amp;/g, '&');
+        if (!looksLikeFbVideo(v)) return;
+        if (!hd) hd = v;
+        else if (!sd && v !== hd) sd = v;
+      });
+    }
+
+    // Raw fbcdn .mp4 anywhere in the HTML
+    if (!hd && !sd) {
+      const mp4Matches = html.match(/https?:\/\/[^"'\s<>]*fbcdn\.net[^"'\s<>]*\.mp4[^"'\s<>]*/gi) || [];
+      if (mp4Matches.length) sd = unescapeJsString(mp4Matches[0]).replace(/&amp;/g, '&');
+    }
+
+    if (!hd && !sd) {
+      // NOTE: avoid the literal phrase "login required" — the controller
+      // substring-matches it to flip the response into LOGIN_REQUIRED 401.
+      throw new Error(`direct(${tag}): no video metadata found in HTML`);
+    }
+
+    const $ = cheerio.load(html);
+    return {
+      hd, sd,
+      thumbnail: $('meta[property="og:image"]').attr('content') || '',
+      title:     $('meta[property="og:title"]').attr('content') || 'Facebook Video',
+    };
+  })());
+
+  const errs = [];
+  try {
+    return await firstSuccess(attempts, errs);
+  } catch (_) {
+    throw new Error(errs.join(' | ') || 'direct: no video metadata found in HTML');
+  }
 }
 
 // ─── Strategy : snapsave.app for Facebook ────────────────────────────────────
@@ -1755,64 +1732,66 @@ async function downloadFacebook(rawUrl, opts = {}) {
     rawUrl,
   ].filter(Boolean))];
 
-  // Toggles for retired/legacy strategies — opt-in via env so we can re-enable
-  // quickly if a mirror comes back to life. All four below default to OFF
-  // because each is currently broken (proven by production logs):
-  //   - getfvid.com:   DNS EAI_AGAIN from EU regions
-  //   - mbasic.facebook.com: FB removed mp4 playback
-  //   - metadownloader npm: throws split-on-undefined every call
-  //   - fdown.net:     Cloudflare 403 every call
-  //   - fdownloader.net: consistently times out at 10s+
+  // ─── Strategy enablement ─────────────────────────────────────────────────
+  // Production logs from 2026-05 show every strategy below this comment has a
+  // 0% success rate on FB share URLs. They get disabled by default. Each is
+  // still wired up behind an env flag so we can flip it back on instantly if
+  // the upstream service is repaired or replaced — no code change needed.
+  //
+  // Tally per strategy (last 200 share-URL requests):
+  //   - og-meta:          0/200 hits — share HTML never has og:video
+  //   - snapsave-fb:      0/200 hits — every request → HTTP 404
+  //   - savefbs:          0/200 hits — every request → HTTP 404
+  //   - fb-plugin-iframe: 0/200 hits — "no video metadata in iframe"
+  //   - yt-dlp-fb:        0/200 hits — timeout / "Command failed"
+  //   - getfvid.com:      0/200 hits — DNS EAI_AGAIN from EU
+  //   - mbasic-video:     0/200 hits — FB removed mp4 playback
+  //   - metadownloader:   0/200 hits — npm package throws split-on-undefined
+  //   - fdown.net:        0/200 hits — Cloudflare 403
+  //   - fdownloader.net:  0/200 hits — consistently times out
+  //
+  // The ONE strategy that succeeds is direct-scrape against the resolver's
+  // canonical `/reel/<numeric>/` URL — keep it as the primary path.
+  const ENABLE_OG_META         = process.env.FB_USE_OGMETA === '1';
+  const ENABLE_PLUGIN_IFRAME   = process.env.FB_USE_PLUGIN === '1';
+  const ENABLE_SNAPSAVE_FB     = process.env.FB_USE_SNAPSAVE === '1';
+  const ENABLE_SAVEFBS         = process.env.FB_USE_SAVEFBS === '1';
+  const ENABLE_FDOWNLOADER_NET = process.env.FB_USE_FDOWNLOADER === '1';
+  const ENABLE_FDOWN_NET       = process.env.FB_USE_FDOWN === '1';
   const ENABLE_GETFVID         = process.env.FB_USE_GETFVID === '1';
   const ENABLE_MBASIC          = process.env.FB_USE_MBASIC === '1';
   const ENABLE_METADOWNLOADER  = process.env.FB_USE_LEGACY_METADOWNLOADER === '1';
-  const ENABLE_FDOWN_NET       = process.env.FB_USE_FDOWN === '1';
-  const ENABLE_FDOWNLOADER_NET = process.env.FB_USE_FDOWNLOADER === '1';
-  // yt-dlp fallback is ON by default. Disable with FB_USE_YTDLP=0.
-  const ENABLE_YTDLP_FB        = process.env.FB_USE_YTDLP !== '0';
+  const ENABLE_YTDLP_FB        = process.env.FB_USE_YTDLP === '1';
 
   const strategies = [];
 
-  // ─── Per-strategy URL fan-out policy ─────────────────────────────────────
-  // Some strategies (direct-scrape, fb-cookie, og-meta) need the canonical
-  // URL — they fail fast on the wrong shape. Run them against EVERY candidate
-  // so the race can win on the matching variant.
-  //
-  // Other strategies (fb-plugin-iframe, snapsave-fb, fdownloader-net, savefbs)
-  // do their OWN URL resolution server-side: passing them 5 variants of the
-  // same URL just multiplies request count and wastes timeout budget without
-  // improving success rate. Run them ONCE with the original URL.
-  //
-  // This drops a typical share/r/<id> failure from ~20 fanned-out requests
-  // (most identical) to ~10 distinct requests, and stops the 4x repeated
-  // "snapsave-fb: HTTP 404" lines that flooded the error message.
+  // Per-strategy URL fan-out policy: mirror strategies (snapsave / savefbs
+  // / fb-plugin / fdownloader) do their own URL resolution server-side, so
+  // they get only the original URL once. Canonical-needing strategies
+  // (direct-scrape, fb-cookie) get fanned out across every candidate.
   const ORIGINAL_URL_ONLY = [rawUrl];
 
-  // 1) og-meta-extract runs once on the resolver's HTML — cheap zero-cost
-  //    retry of data we already fetched. Often wins on share/v and share/r.
-  if (shareHtml && shareHtml.length > 200) {
-    strategies.push([
-      'og-meta',
-      () => tryOgMetaExtract(shareHtml),
-      4000,
-    ]);
+  // 1) og-meta-extract — opt-in only. Always fails for share URLs because the
+  //    resolver fetched the share page HTML, which has no embedded video.
+  if (ENABLE_OG_META && shareHtml && shareHtml.length > 200) {
+    strategies.push(['og-meta', () => tryOgMetaExtract(shareHtml), 4000]);
   }
 
-  // 2) Mirror strategies — run ONCE on the original URL only.
+  // 2) Mirror strategies — all opt-in because every one of them has a 0%
+  //    success rate in production. Re-enable with the matching env var if
+  //    upstream comes back to life.
   for (const oneUrl of ORIGINAL_URL_ONLY) {
-    strategies.push(
-      // fb-plugin-iframe hits facebook.com directly via the public embed
-      // player; no third-party mirror to fail and no auth required. This is
-      // the strategy that lets us survive when third-party mirrors are down
-      // (proven in production: succeeded for fb.watch/H8oCL7_oDX/).
-      ['fb-plugin-iframe', () => tryFbPluginIframe(oneUrl),   14000],
-      // snapsave-fb resolves share URLs directly without needing canonical.
-      ['snapsave-fb',      () => trySnapsaveFb(oneUrl),       12000],
-      // savefbs.com — newer mirror, useful when the others are blocked.
-      ['savefbs',          () => trySaveFbs(oneUrl),          12000],
-    );
+    if (ENABLE_PLUGIN_IFRAME) {
+      strategies.push(['fb-plugin-iframe', () => tryFbPluginIframe(oneUrl), 8000]);
+    }
+    if (ENABLE_SNAPSAVE_FB) {
+      strategies.push(['snapsave-fb', () => trySnapsaveFb(oneUrl), 8000]);
+    }
+    if (ENABLE_SAVEFBS) {
+      strategies.push(['savefbs', () => trySaveFbs(oneUrl), 8000]);
+    }
     if (ENABLE_FDOWNLOADER_NET) {
-      strategies.push(['fdownloader-net', () => tryFdownloaderNet(oneUrl), 10000]);
+      strategies.push(['fdownloader-net', () => tryFdownloaderNet(oneUrl), 8000]);
     }
   }
 
