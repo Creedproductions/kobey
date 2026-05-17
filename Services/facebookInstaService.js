@@ -160,6 +160,67 @@ function firstSuccess(promises, errors = []) {
   });
 }
 
+/**
+ * Like firstSuccess, but each entry is { name, promise, slow } and the race
+ * REJECTS early once every non-slow ("fast") promise has rejected with a
+ * permanent error — without waiting for the slow promises to finish.
+ *
+ * This is the key UX win for failed FB URLs: when og-meta + snapsave + savefbs
+ * + fb-plugin + direct-scrape have all returned permanent failures (404, "no
+ * video metadata", timeouts), yt-dlp's success rate is near-zero, so making
+ * the user wait an extra ~10s for yt-dlp's wrapper timeout is dead weight.
+ *
+ * Slow promises continue running in the background (we don't have a
+ * universal cancel signal) but their results are ignored after early exit.
+ * The wrapper around them — withTimeout — still fires SIGKILL on subprocess
+ * timeouts, so they won't leak forever.
+ */
+function firstSuccessFastFail(entries, errors, isPermanentErrorFn) {
+  return new Promise((resolve, reject) => {
+    let done = false;
+    let totalSettled = 0;
+    let fastTotal = entries.filter(e => !e.slow).length;
+    let fastSettled = 0;
+    let fastAllPermanent = true;
+
+    entries.forEach(entry => {
+      entry.promise.then(
+        v => { if (!done) { done = true; resolve(v); } },
+        e => {
+          const msg = e.message || String(e);
+          errors.push(msg);
+          totalSettled++;
+
+          if (!entry.slow) {
+            fastSettled++;
+            if (!isPermanentErrorFn(msg)) fastAllPermanent = false;
+
+            // Early-exit: every fast strategy has rejected, and every one of
+            // them was a permanent failure. No point waiting for the slow ones.
+            if (!done && fastTotal > 0 && fastSettled === fastTotal && fastAllPermanent) {
+              done = true;
+              console.warn('⚡ Facebook: all fast strategies permanently failed — aborting slow strategies early');
+              reject(new Error(errors.join(' | ')));
+              return;
+            }
+          }
+
+          if (totalSettled === entries.length && !done) {
+            done = true;
+            reject(new Error(errors.join(' | ')));
+          }
+        }
+      );
+    });
+
+    // Defensive: if there are zero entries, reject immediately so we don't hang.
+    if (entries.length === 0) {
+      done = true;
+      reject(new Error('no strategies to run'));
+    }
+  });
+}
+
 function unescapeJsString(s) {
   return s
     .replace(/\\u003C/gi, '<').replace(/\\u003E/gi, '>')
@@ -978,8 +1039,13 @@ async function tryDirectScrape(url) {
 
   for (const { ua, tag } of uas) {
     try {
+      // Per-UA timeout dropped from 15s → 6s. The outer wrapper caps total
+      // direct-scrape at 10s, so we want each UA to fail fast enough to let
+      // the next one try within that budget (was: 1 UA could eat the whole
+      // 15s budget if FB stalled). For URLs that work, FB's first byte
+      // lands in well under 6s.
       const resp = await axios.get(url, {
-        timeout: 15000,
+        timeout: 6000,
         maxRedirects: 25,
         validateStatus: () => true,
         headers: fbHeaders({
@@ -1270,6 +1336,12 @@ async function tryYtDlpFacebook(url) {
   const bin = _resolveYtDlp();
   if (!bin) throw new Error('yt-dlp-fb: binary not installed (skipped)');
 
+  // Aggressive timeouts so this strategy doesn't dominate request latency.
+  // Production logs showed yt-dlp eating the entire 18s budget on dead URLs
+  // while every other strategy had already failed in 2-5s, leaving the user
+  // staring at a spinner. We now cap the subprocess at 9s and yt-dlp's own
+  // socket timeout at 6s (was 12s) with 1 retry (was 2). For URLs that work,
+  // yt-dlp typically resolves in 2-4s anyway, so this doesn't hurt success.
   const info = await new Promise((resolve, reject) => {
     const args = [
       '-f', 'best[height<=?1080]/best',
@@ -1277,14 +1349,15 @@ async function tryYtDlpFacebook(url) {
       '--no-warnings',
       '--no-check-certificate',
       '--geo-bypass',
-      '--socket-timeout', '12',
-      '--retries', '2',
+      '--socket-timeout', '6',
+      '--retries', '1',
       '--dump-json',
       url,
     ];
     _execFile(bin, args, {
-      timeout: 28000,
+      timeout: 9000,
       maxBuffer: 20 * 1024 * 1024,
+      killSignal: 'SIGKILL',  // ensure the subprocess actually dies on timeout
     }, (err, stdout, stderr) => {
       if (err) {
         const msg = (stderr || err.message || '').slice(0, 200).trim();
@@ -1744,9 +1817,9 @@ async function downloadFacebook(rawUrl, opts = {}) {
   }
 
   // 2b) yt-dlp last-resort — runs on the original URL and resolves share
-  //     tokens to canonical via FB's redirect chain. Slow (5-15s typical)
-  //     but works when every HTTP scraper above fails (e.g. share/r/<token>
-  //     URLs where the token differs from the reel ID).
+  //     tokens to canonical via FB's redirect chain. When it works, it
+  //     resolves in 2-4s; when it doesn't, it gets killed at the wrapper
+  //     timeout so the user isn't stuck waiting.
   //
   //     Only register if yt-dlp is actually installed. Without this guard, on
   //     Koyeb buildpack deploys (which don't install yt-dlp) the strategy
@@ -1754,15 +1827,19 @@ async function downloadFacebook(rawUrl, opts = {}) {
   //     polluting the error log with "spawn yt-dlp ENOENT" for users who
   //     can't act on it anyway.
   //
-  //     Timeout capped at 18s (not 28s) so that even with a retry round,
-  //     total wait stays under the controller's 60s outer wrapper. yt-dlp's
-  //     own --socket-timeout is 12s, so 18s gives one extra retry inside
-  //     yt-dlp before we abort.
+  //     Timeout 10s — matches yt-dlp's own --socket-timeout (6s) + 1 retry
+  //     + a 2s buffer. Previously 18s, which dominated total request latency
+  //     on dead URLs (user waited ~18s for a confirmed-deleted post). We
+  //     also flag this strategy as 'slow' so the early-exit logic below can
+  //     abort it once all fast strategies have permanently failed — yt-dlp's
+  //     success rate on URLs that just 404'd everywhere else is near-zero,
+  //     so the wait is dead weight.
   if (ENABLE_YTDLP_FB && _YTDLP_AVAILABLE) {
     strategies.push([
       'yt-dlp-fb',
       () => tryYtDlpFacebook(rawUrl),
-      18000,
+      10000,
+      { slow: true },
     ]);
   }
 
@@ -1777,7 +1854,11 @@ async function downloadFacebook(rawUrl, opts = {}) {
     }
 
     strategies.push(
-      ['direct-scrape', () => tryDirectScrape(candidate), 15000],
+      // 10s outer cap. tryDirectScrape uses 6s per UA × 3 UAs internally,
+      // but we early-return as soon as one UA succeeds, so the actual time
+      // for a healthy URL is 1-3s. 10s is enough for the worst case while
+      // shaving 5s off the dead-URL wait compared to the old 15s.
+      ['direct-scrape', () => tryDirectScrape(candidate), 10000],
     );
 
     if (ENABLE_FDOWN_NET) {
@@ -1797,8 +1878,11 @@ async function downloadFacebook(rawUrl, opts = {}) {
     }
   }
 
-  const buildPromises = (errors) => strategies.map(([name, fn, ms]) =>
-    withTimeout(fn(), ms, name).then(
+  // Build per-strategy promises, preserving the optional 4th tuple element
+  // ({ slow: true }) so the orchestrator can apply the early-exit rule.
+  const buildPromises = (errors) => strategies.map((entry) => {
+    const [name, fn, ms, meta] = entry;
+    const promise = withTimeout(fn(), ms, name).then(
       result => {
         if (name === 'metadownloader') {
           if (result) { console.log(`📘 ✅ ${name} succeeded`); return result; }
@@ -1815,8 +1899,9 @@ async function downloadFacebook(rawUrl, opts = {}) {
         console.warn(`📘 ❌ ${name}: ${msg.slice(0, 120)}`);
         throw new Error(`${name}: ${msg}`);
       }
-    )
-  );
+    );
+    return { name, promise, slow: !!(meta && meta.slow) };
+  });
 
   // Deduplicate strategy errors before emitting. Without this, three retries
   // of getfvid produce three identical "getaddrinfo EAI_AGAIN" lines in the
@@ -1867,7 +1952,7 @@ async function downloadFacebook(rawUrl, opts = {}) {
 
   const errors = [];
   try {
-    return await firstSuccess(buildPromises(errors), errors);
+    return await firstSuccessFastFail(buildPromises(errors), errors, isPermanentError);
   } catch (_) {
     const allPermanent = errors.length > 0 && errors.every(isPermanentError);
     if (allPermanent) {
@@ -1891,7 +1976,7 @@ async function downloadFacebook(rawUrl, opts = {}) {
     console.warn('🔁 Facebook retry once with same candidates');
     const retryErrors = [];
     try {
-      return await firstSuccess(buildPromises(retryErrors), retryErrors);
+      return await firstSuccessFastFail(buildPromises(retryErrors), retryErrors, isPermanentError);
     } catch (_) {
       const allErrors = dedupedErrors([...errors, ...retryErrors]).join(' | ');
       // Public Facebook content (share/v, share/r, fb.watch, /reel/, /watch/)
