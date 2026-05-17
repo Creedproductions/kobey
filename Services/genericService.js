@@ -10,68 +10,16 @@
 // platform-specific services so the existing formatter pipeline can
 // consume it without special-casing.
 
-const fs = require('fs');
-const { execFile } = require('child_process');
+const ytdlp = require('./ytDlpRunner');
 
-const YT_DLP_CANDIDATES = [
-  process.env.YT_DLP_BIN,
-  '/opt/yt/bin/yt-dlp',
-  '/usr/local/bin/yt-dlp',
-  '/usr/bin/yt-dlp',
-].filter(Boolean);
-
-let RESOLVED_BIN = null;
-function resolveBin() {
-  if (RESOLVED_BIN !== null) return RESOLVED_BIN;
-  for (const p of YT_DLP_CANDIDATES) {
-    try {
-      fs.accessSync(p, fs.constants.X_OK);
-      RESOLVED_BIN = p;
-      console.log(`[generic] yt-dlp resolved at ${p}`);
-      return p;
-    } catch (_) { /* try next */ }
-  }
-  RESOLVED_BIN = 'yt-dlp';
-  console.warn('[generic] yt-dlp not found at any absolute path; falling back to PATH lookup');
-  return RESOLVED_BIN;
-}
-
-// ─── Core wrapper ────────────────────────────────────────────────────────────
-
+// Thin shim around the shared yt-dlp runner so legacy callers in this file
+// keep their existing signature. All the heavy lifting (binary resolution,
+// platform-aware flags, stderr surfacing) is centralised in ytDlpRunner.js.
 function runYtDlp(url, extraArgs = []) {
-  return new Promise((resolve, reject) => {
-    const bin = resolveBin();
-    const args = [
-      '-f', 'best[height<=?1080]/best',
-      '--no-playlist',
-      '--no-warnings',
-      '--no-check-certificate',
-      '--geo-bypass',
-      '--socket-timeout', '15',
-      '--dump-json',
-      ...extraArgs,
-      url,
-    ];
-
-    execFile(bin, args, {
-      timeout: 50000,
-      maxBuffer: 25 * 1024 * 1024,
-    }, (err, stdout, stderr) => {
-      if (err) {
-        const msg = (stderr || err.message || '').slice(0, 250).trim();
-        return reject(new Error(`yt-dlp: ${msg || 'spawn failed'}`));
-      }
-      try {
-        // yt-dlp prints one JSON object per video. For playlists/multi-video
-        // pages we'd see multiple — pick the first valid object.
-        const firstLine =
-          stdout.split('\n').find(l => l.trim().startsWith('{')) || stdout;
-        const info = JSON.parse(firstLine);
-        resolve(info);
-      } catch (parseErr) {
-        reject(new Error(`yt-dlp: parse error - ${parseErr.message}`));
-      }
-    });
+  return ytdlp.run(url, {
+    platform: 'generic',
+    timeoutMs: 50000,
+    extraArgs,
   });
 }
 

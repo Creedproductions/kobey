@@ -16,6 +16,7 @@
 // "no tweet ID" error instead of leaking 500s.
 
 const axios = require('axios');
+const ytdlp = require('./ytDlpRunner');
 
 const UA_DESKTOP =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
@@ -153,7 +154,29 @@ async function trySyndication(tweetId) {
   throw new Error('syndication: empty response after retry');
 }
 
-// ─── Strategy 4: btch-downloader (last resort) ──────────────────────────────
+// ─── Strategy 4: yt-dlp ─────────────────────────────────────────────────────
+//
+// yt-dlp's Twitter extractor in 2026 ships a syndication-first path that
+// works for most public tweets without cookies (login is required only for
+// NSFW / protected accounts, which the syndication API also blocks). Used
+// as a 4th-position fallback because fxTwitter/vxTwitter are still faster
+// (200-500ms) when they work — yt-dlp typically takes 4-8s.
+
+async function tryYtDlpTwitter(rawUrl) {
+  if (!ytdlp.isAvailable) throw new Error('yt-dlp: binary not installed');
+  // Normalise twitter.com → x.com so yt-dlp picks the right extractor.
+  // Both work, but x.com is the active canonical and gets fewer redirects.
+  const normalised = String(rawUrl).replace(/(?:www\.|mobile\.|m\.)?twitter\.com/i, 'x.com');
+  const info = await ytdlp.run(normalised, {
+    platform: 'twitter',
+    timeoutMs: 22000,
+  });
+  const variants = ytdlp.formatTwitterVariants(info);
+  if (!variants.length) throw new Error('yt-dlp: no mp4 variants returned');
+  return variants;
+}
+
+// ─── Strategy 5: btch-downloader (last resort) ──────────────────────────────
 
 async function tryBtchDownloader(rawUrl) {
   let twitter;
@@ -187,6 +210,10 @@ async function downloadTwmateData(rawUrl) {
     ['fxtwitter',    () => tryFxTwitter(tweetId)],
     ['vxtwitter',    () => tryVxTwitter(tweetId)],
     ['syndication',  () => trySyndication(tweetId)],
+    // yt-dlp runs before btch because btch wraps the same mirrors we
+    // already tried and offers no additional reach; yt-dlp opens up a
+    // fresh extraction path (its own syndication-shaped request).
+    ['yt-dlp',       () => tryYtDlpTwitter(rawUrl)],
     ['btch',         () => tryBtchDownloader(rawUrl)],
   ];
 

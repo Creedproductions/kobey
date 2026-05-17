@@ -53,6 +53,7 @@
 
 const axios   = require('axios');
 const cheerio = require('cheerio');
+const ytdlp   = require('./ytDlpRunner');
 
 let metadownloader;
 try { metadownloader = require('metadownloader'); }
@@ -1563,93 +1564,31 @@ async function tryX2download(url) {
 // HTTP scrapers have failed.
 
 async function tryYtDlpFacebook(url) {
-  const bin = _resolveYtDlp();
-  if (!bin) throw new Error('yt-dlp-fb: binary not installed (skipped)');
+  // Thin wrapper around the shared yt-dlp runner. All the FB-specific
+  // tuning (UA, locale, retries, cookie support) lives in ytDlpRunner.js
+  // under the 'facebook' platform profile — see Services/ytDlpRunner.js
+  // for the full flag list and rationale.
+  if (!ytdlp.isAvailable) throw new Error('yt-dlp-fb: binary not installed (skipped)');
 
-  // 2026-05 update: previous wrapper killed yt-dlp at 9s while its own
-  // --socket-timeout 6 + --retries 1 needs ≥12s minimum to finish even one
-  // attempt. The result was that every yt-dlp run was killed mid-flight,
-  // dressed up as "Command failed" in the error log. The wrapper now gives
-  // yt-dlp 24s, matching its own internal budget (12s socket × 2 retries
-  // = 24s). Also passes a real browser UA + Accept-Language so FB doesn't
-  // serve the bot-only minimal page that has no extractable formats.
-  //
-  // The strategy is still flagged 'slow:true' upstream so the early-exit
-  // logic can abort it if every fast HTTP scraper permanently failed (e.g.
-  // confirmed 404). For URLs that *might* work, yt-dlp gets its full budget.
-  const cookiePath = String(process.env.YT_DLP_COOKIES_FILE || '').trim();
-  const cookieArgs = cookiePath ? ['--cookies', cookiePath] : [];
-
-  const info = await new Promise((resolve, reject) => {
-    const args = [
-      '-f', 'best[height<=?1080]/best',
-      '--no-playlist',
-      '--no-warnings',
-      '--no-check-certificate',
-      '--geo-bypass',
-      '--ignore-config',
-      '--socket-timeout', '12',
-      '--retries', '2',
-      // Pretend to be a real desktop browser. yt-dlp's default UA triggers
-      // FB's bot path which serves a stripped HTML with no video URLs.
-      '--user-agent', UA_DESKTOP,
-      '--add-header', 'Accept-Language:en-US,en;q=0.9',
-      // Encourage FB's English page (consistent JSON keys)
-      '--extractor-args', 'facebook:locale=en_US',
-      ...cookieArgs,
-      '--dump-json',
-      url,
-    ];
-    _execFile(bin, args, {
-      timeout: 24000,
-      maxBuffer: 20 * 1024 * 1024,
-      killSignal: 'SIGKILL',
-    }, (err, stdout, stderr) => {
-      if (err) {
-        // Surface MORE of stderr so we can see why yt-dlp actually failed.
-        // The previous 200-char slice cut off the real error message.
-        const raw = (stderr || err.message || '').trim();
-        // Strip the boilerplate command line so the message focuses on cause
-        const cleaned = raw
-          .replace(/^Command failed:[\s\S]*?\n/g, '')
-          .replace(/\bWARNING:\s+/g, '')
-          .split('\n')
-          .filter(l => l.trim())
-          .slice(-3)        // last 3 lines usually contain the actual error
-          .join(' | ')
-          .slice(0, 400);
-        return reject(new Error(`yt-dlp-fb: ${cleaned || 'spawn failed'}`));
-      }
-      try {
-        const firstLine = stdout.split('\n').find(l => l.trim().startsWith('{')) || stdout;
-        resolve(JSON.parse(firstLine));
-      } catch (e) {
-        reject(new Error(`yt-dlp-fb: parse error: ${e.message}`));
-      }
-    });
+  const info = await ytdlp.run(url, {
+    platform: 'facebook',
+    timeoutMs: 26000,
   });
 
-  // yt-dlp's info object has either info.url (best muxed) or info.formats[].
-  // For FB the formats array is the more reliable source — picks an explicit
-  // hd + sd pair when available.
+  // Filter to FB CDN URLs (sometimes yt-dlp's FB extractor returns DASH MPD
+  // URLs that aren't directly streamable; looksLikeFbVideo filters those).
   let hd = '', sd = '';
   const formats = Array.isArray(info.formats) ? info.formats : [];
-
-  // Filter to video formats with usable URLs
-  const videoFormats = formats.filter(f =>
-    f.url && typeof f.url === 'string' &&
-    (f.vcodec ? f.vcodec !== 'none' : true) &&
-    looksLikeFbVideo(f.url)
-  );
-
-  // Sort by resolution descending
-  videoFormats.sort((a, b) => (b.height || 0) - (a.height || 0));
+  const videoFormats = formats
+    .filter(f => f.url && typeof f.url === 'string'
+              && (f.vcodec ? f.vcodec !== 'none' : true)
+              && looksLikeFbVideo(f.url))
+    .sort((a, b) => (b.height || 0) - (a.height || 0));
 
   if (videoFormats.length > 0) {
     hd = videoFormats[0].url;
     if (videoFormats.length > 1) sd = videoFormats[videoFormats.length - 1].url;
   } else if (info.url && looksLikeFbVideo(info.url)) {
-    // Single muxed URL fallback
     sd = info.url;
   }
 
@@ -2618,7 +2557,28 @@ async function facebookInsta(url, opts = {}) {
       }
     }
 
-    // Step 3: clean error — message is now friendlier since per-request
+    // Step 3: yt-dlp fallback. yt-dlp's IG extractor has its own story
+    // resolution path that sometimes succeeds for public-profile stories
+    // even when our mirror scrapers return empty. If YT_DLP_COOKIES_FILE
+    // is set, this is also the most reliable cookie-authenticated path.
+    if (ytdlp.isAvailable) {
+      try {
+        const info = await withTimeout(
+          ytdlp.run(url, { platform: 'instagram', timeoutMs: 24000 }),
+          26000,
+          'yt-dlp-ig-story',
+        );
+        const items = ytdlp.formatInstagramItems(info);
+        if (items.length > 0) {
+          console.log('📸 ✅ IG Story via yt-dlp succeeded');
+          return { status: true, data: items, _source: 'yt-dlp-story' };
+        }
+      } catch (e) {
+        console.warn(`📸 IG Story yt-dlp path failed: ${e.message}`);
+      }
+    }
+
+    // Step 4: clean error — message is now friendlier since per-request
     // cookies are available via the in-app browser sign-in flow.
     throw new Error(
       'Instagram Stories require login or come from a private account. ' +
@@ -2630,7 +2590,10 @@ async function facebookInsta(url, opts = {}) {
 
   const errors = [];
 
-  // Try snapsave + snapinsta (each with its own timeout) in parallel.
+  // Race snapsave + snapinsta + yt-dlp. yt-dlp is included even though it's
+  // slower (typically 3-6s for a public reel) because it's the most reliable
+  // when both HTTP scrapers are rate-limited or down. The race resolves on
+  // first success, so slow strategies don't penalise the happy path.
   const promises = [
     withTimeout(scrapeSnapsave(url),  18000, 'snapsave').then(
       items => items.length ? { source: 'snapsave', items } : Promise.reject(new Error('snapsave: 0 items'))
@@ -2640,11 +2603,26 @@ async function facebookInsta(url, opts = {}) {
     ),
   ];
 
+  if (ytdlp.isAvailable) {
+    promises.push(
+      withTimeout(
+        (async () => {
+          const info = await ytdlp.run(url, { platform: 'instagram', timeoutMs: 22000 });
+          const items = ytdlp.formatInstagramItems(info);
+          if (!items.length) throw new Error('yt-dlp-ig: no items in info');
+          return { source: 'yt-dlp', items };
+        })(),
+        24000,
+        'yt-dlp-ig',
+      )
+    );
+  }
+
   try {
     const winner = await firstSuccess(promises, errors);
     return { status: true, data: winner.items, _source: winner.source };
   } catch (_) {
-    // Both failed — fall through to igdl, which lives in the controller's
+    // All failed — fall through to igdl, which lives in the controller's
     // existing pipeline. We re-throw with the collected errors so the
     // caller can decide whether to try other sources.
     throw new Error(`Instagram: all scrapers failed. ${errors.join(' | ')}`);

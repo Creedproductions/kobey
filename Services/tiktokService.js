@@ -26,6 +26,7 @@
 const axios   = require('axios');
 const cheerio = require('cheerio');
 const { ttdl } = require('btch-downloader');
+const ytdlp   = require('./ytDlpRunner');
 
 // ─── Shared headers ──────────────────────────────────────────────────────────
 
@@ -273,6 +274,34 @@ async function tryTtdl(url) {
   };
 }
 
+// ─── Strategy 5: yt-dlp (handles edge cases tikwm/ssstik miss) ──────────────
+//
+// yt-dlp is our most reliable fallback in 2026 because TikTok pushes
+// frequent API changes that break the HTTP scrapers (signed-URL rotation,
+// new aweme schemas). yt-dlp ships extractor updates within days of each
+// TikTok change. It also gracefully handles:
+//   - story posts (which our HTTP scrapers can't reach without cookies)
+//   - private profile reposts (where ssstik returns 404)
+//   - photo slideshows (returned as image_url[])
+// We DON'T put it first because it's slower (5–10s) than tikwm (1–2s) on
+// the happy path. Used as the third-line fallback after tikwm and ssstik.
+
+async function tryYtDlpTikTok(url) {
+  if (!ytdlp.isAvailable) {
+    throw new Error('yt-dlp: binary not installed');
+  }
+  const info = await ytdlp.run(url, {
+    platform: 'tiktok',
+    timeoutMs: 20000,
+  });
+  const out = ytdlp.formatTikTokInfo(info);
+  if ((!out.video || out.video.length === 0) &&
+      (!out.images || out.images.length === 0)) {
+    throw new Error('yt-dlp: returned no usable video/images');
+  }
+  return out;
+}
+
 // ─── URL resolution for short URLs ───────────────────────────────────────────
 //
 // vm.tiktok.com / vt.tiktok.com / tiktok.com/t/<id> URLs are short redirects.
@@ -402,11 +431,17 @@ async function downloadTikTok(rawUrl) {
   // Stage 2 — resolve short URLs to canonical form
   const url = await resolveShortUrl(rawUrl);
 
+  // Strategy order: cheap+fast first, robust fallbacks after. yt-dlp goes
+  // between musicaldown and ttdl because it's slower than the HTTP scrapers
+  // when they work, but more reliable than ttdl (which wraps the same
+  // scrapers we already tried). When TikTok pushes a breaking API change,
+  // yt-dlp is usually the only thing still working.
   const strategies = [
-    { name: 'tikwm',       fn: tryTikwm       },
-    { name: 'ssstik',      fn: trySSStik      },
-    { name: 'musicaldown', fn: tryMusicaldown },
-    { name: 'ttdl',        fn: tryTtdl        },
+    { name: 'tikwm',       fn: tryTikwm        },
+    { name: 'ssstik',      fn: trySSStik       },
+    { name: 'musicaldown', fn: tryMusicaldown  },
+    { name: 'yt-dlp',      fn: tryYtDlpTikTok  },
+    { name: 'ttdl',        fn: tryTtdl         },
   ];
 
   const errors = [];
