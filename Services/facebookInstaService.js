@@ -547,21 +547,50 @@ async function tryIgStoryWithCookie(url, cookieOverride = null) {
 // wins the race.
 
 async function resolveCanonicalFbUrl(rawUrl) {
-  // If already canonical, return early but still allow candidate variants
-  if (
-    rawUrl.match(/facebook\.com\/(watch|reel|video)\/\d+/) ||
-    rawUrl.match(/facebook\.com\/[^/]+\/videos\/\d+/) ||
-    rawUrl.includes('facebook.com/watch?v=')
-  ) return { url: rawUrl, candidates: [rawUrl], requiresLogin: false, shareHtml: '' };
-
-  // Strip tracking params (?fs=e, ?mibextid=…) that some FB redirect chains
-  // re-add on every hop, causing maxRedirects to be exceeded.
+  // Strip tracking params (?fs=e, ?mibextid=…, ?s=…) that some FB redirect
+  // chains re-add on every hop, causing maxRedirects to be exceeded. Done
+  // BEFORE the canonical-shortcut check so URLs like
+  //   /reel/1664954301489817/?mibextid=9drbnH&s=yWDuG2&fs=e
+  // are normalised to /reel/1664954301489817/ before we hand them to mirrors
+  // (most third-party scrapers reject URLs with FB tracking params).
   let cleanRaw = String(rawUrl).trim();
   try {
     const u = new URL(cleanRaw);
-    ['fs', 'mibextid', 'extid', 'lst', '_rdr'].forEach(k => u.searchParams.delete(k));
+    [
+      'fs', 'mibextid', 'extid', 'lst', '_rdr', 's', 'idorvanity',
+      'rdid', 'paipv', 'eav', 'comment_id', 'reply_comment_id',
+      'notif_t', 'notif_id', '__cft__[0]', '__tn__',
+    ].forEach(k => u.searchParams.delete(k));
+    // Strip ALL params except ones we know are content-bearing
+    const keep = ['v', 'story_fbid', 'id'];
+    [...u.searchParams.keys()].forEach(k => { if (!keep.includes(k)) u.searchParams.delete(k); });
     cleanRaw = u.toString().replace(/\?$/, '');
   } catch (_) { /* leave as-is */ }
+
+  // If already canonical, fetch the share page HTML so og-meta-extract can
+  // still run. Previously we returned early with shareHtml='' which silently
+  // disabled og-meta for every canonical URL — wasteful when og:video is
+  // sometimes the only signal we get for share/p/ posts that redirected.
+  if (
+    cleanRaw.match(/facebook\.com\/(watch|reel|video)\/\d+/) ||
+    cleanRaw.match(/facebook\.com\/[^/]+\/videos\/\d+/) ||
+    cleanRaw.includes('facebook.com/watch?v=')
+  ) {
+    let shareHtml = '';
+    try {
+      const resp = await axios.get(cleanRaw, {
+        timeout: 8000,
+        maxRedirects: 15,
+        validateStatus: () => true,
+        headers: fbHeaders({
+          'User-Agent': UA_FB_BOT,
+          Accept: 'text/html,application/xhtml+xml,*/*;q=0.9',
+        }),
+      });
+      shareHtml = typeof resp.data === 'string' ? resp.data : '';
+    } catch (_) { /* og-meta will just skip */ }
+    return { url: cleanRaw, candidates: [cleanRaw], requiresLogin: false, shareHtml };
+  }
 
   const url = cleanRaw.replace('m.facebook.com', 'www.facebook.com');
   console.log(`🔗 Resolving: ${url}`);
@@ -1007,7 +1036,7 @@ const FB_REGEXES = [
 ];
 
 async function tryDirectScrape(url) {
-  // Race 3 UAs in PARALLEL. The previous sequential loop meant a stalled iOS
+  // Race 4 UAs in PARALLEL. The previous sequential loop meant a stalled iOS
   // request consumed the entire 10s outer budget before Android/bot UAs even
   // got to try. Running them concurrently and resolving on first success
   // means the *fastest* working UA wins — for healthy URLs this is 1-3s; for
@@ -1015,8 +1044,14 @@ async function tryDirectScrape(url) {
   //
   // UAs explained:
   //   - iPhone Safari mobile     → richest `playable_url` JSON
-  //   - Android Chrome           → richer `browser_native_hd_url` JSON
+  //   - Android Chrome           → richer `browser_native_hd_url` JSON (now
+  //                                paired with Sec-CH-UA client hints — without
+  //                                these FB returns HTTP 400 in 2026 because
+  //                                it expects modern Chromium fingerprinting)
   //   - facebookexternalhit/1.1  → bot UA, sometimes bypasses soft login wall
+  //   - Desktop Chrome (m.fb)    → m.facebook.com sometimes serves the
+  //                                playable_url JSON in plain HTML where
+  //                                www.facebook.com only serves a JS shell
   //
   // looksLikeFbVideo() filters out lookaside.fbsbx.com URLs returned by the
   // bot UA (those aren't directly streamable).
@@ -1024,23 +1059,60 @@ async function tryDirectScrape(url) {
     'Mozilla/5.0 (Linux; Android 14; Pixel 7) AppleWebKit/537.36 ' +
     '(KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36';
 
+  // Per-UA extra headers. Android/desktop Chrome require Sec-CH-UA client
+  // hints in 2026; without them www.facebook.com responds with HTTP 400 to
+  // every request that looks like Chrome but doesn't fingerprint like Chrome.
+  const CH_UA_ANDROID = {
+    'sec-ch-ua':           '"Google Chrome";v="125", "Chromium";v="125", "Not.A/Brand";v="24"',
+    'sec-ch-ua-mobile':    '?1',
+    'sec-ch-ua-platform':  '"Android"',
+    'sec-fetch-dest':      'document',
+    'sec-fetch-mode':      'navigate',
+    'sec-fetch-site':      'none',
+    'sec-fetch-user':      '?1',
+  };
+  const CH_UA_DESKTOP = {
+    'sec-ch-ua':           '"Google Chrome";v="124", "Chromium";v="124", "Not.A/Brand";v="24"',
+    'sec-ch-ua-mobile':    '?0',
+    'sec-ch-ua-platform':  '"Windows"',
+    'sec-fetch-dest':      'document',
+    'sec-fetch-mode':      'navigate',
+    'sec-fetch-site':      'none',
+    'sec-fetch-user':      '?1',
+  };
+
+  // The m.facebook.com variant — mobile site still serves the playable_url
+  // JSON for public videos in plain HTML for desktop UAs. Useful for /reel/
+  // URLs where www.facebook.com returns an empty React shell.
+  let mUrl = url;
+  try {
+    mUrl = url.replace(/(?:www|web|business)\.facebook\.com/i, 'm.facebook.com');
+    if (mUrl === url && /facebook\.com/.test(url) && !/m\.facebook\.com/.test(url)) {
+      mUrl = url.replace(/facebook\.com/, 'm.facebook.com');
+    }
+  } catch (_) { mUrl = url; }
+
   const uas = [
-    { ua: UA_MOBILE,  tag: 'ios' },
-    { ua: UA_ANDROID, tag: 'and' },
-    { ua: UA_FB_BOT,  tag: 'bot' },
+    { ua: UA_MOBILE,   tag: 'ios', target: url,  extra: {} },
+    { ua: UA_ANDROID,  tag: 'and', target: url,  extra: CH_UA_ANDROID },
+    { ua: UA_FB_BOT,   tag: 'bot', target: url,  extra: {} },
+    { ua: UA_DESKTOP,  tag: 'm',   target: mUrl, extra: CH_UA_DESKTOP },
   ];
 
   // Build one promise per UA. Each promise resolves with a {hd, sd, …} shape
   // on success or rejects with a tagged error on failure. firstSuccess wins
   // on the first resolution; if all reject, the joined errors bubble up.
-  const attempts = uas.map(({ ua, tag }) => (async () => {
-    const resp = await axios.get(url, {
+  const attempts = uas.map(({ ua, tag, target, extra }) => (async () => {
+    const resp = await axios.get(target, {
       timeout: 8000,
       maxRedirects: 25,
       validateStatus: () => true,
       headers: fbHeaders({
         'User-Agent': ua,
-        Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+        'Cache-Control': 'no-cache',
+        Pragma: 'no-cache',
+        ...extra,
       }),
     });
 
@@ -1302,6 +1374,77 @@ async function trySaveFbs(url) {
   return { hd, sd, thumbnail: thumb, title };
 }
 
+// ─── Strategy : x2download.app / fbdownloader.online ────────────────────────
+// Two extra public-mirror endpoints kept as a single strategy. They share the
+// `ajaxSearch` shape (q=URL, t=media, lang=en) which makes them cheap to add
+// in parallel. Both have been reliable for /reel/<numeric>/ URLs in 2026
+// where snapsave is sometimes rate-limited.
+
+async function tryX2download(url) {
+  const endpoints = [
+    { ep: 'https://x2download.app/api/ajaxSearch',       host: 'x2download.app' },
+    { ep: 'https://fbdownloader.online/api/ajaxSearch',  host: 'fbdownloader.online' },
+    { ep: 'https://fdownloader.io/api/ajaxSearch',       host: 'fdownloader.io' },
+  ];
+
+  let lastErr = '';
+  for (const { ep, host } of endpoints) {
+    try {
+      const resp = await axios.post(
+        ep,
+        new URLSearchParams({ q: url, t: 'media', lang: 'en' }).toString(),
+        {
+          timeout: 12000,
+          maxRedirects: 5,
+          validateStatus: () => true,
+          headers: {
+            'Content-Type':     'application/x-www-form-urlencoded; charset=UTF-8',
+            'User-Agent':       UA_DESKTOP,
+            Accept:             '*/*',
+            'Accept-Language':  'en-US,en;q=0.9',
+            Origin:             `https://${host}`,
+            Referer:            `https://${host}/`,
+            'X-Requested-With': 'XMLHttpRequest',
+          },
+        }
+      );
+
+      if (resp.status >= 400) { lastErr = `${host}: HTTP ${resp.status}`; continue; }
+
+      // Response shape: { status: 'ok', data: '<html>...</html>', ... }
+      const html = (resp.data && resp.data.data) || resp.data || '';
+      if (!html || typeof html !== 'string' || html.length < 100) {
+        lastErr = `${host}: empty payload`;
+        continue;
+      }
+
+      const $ = cheerio.load(html);
+      let hd = '', sd = '';
+      $('a[href]').each((_, a) => {
+        const href = $(a).attr('href') || '';
+        const text = $(a).text().toLowerCase();
+        if (!looksLikeFbVideo(href)) return;
+        if (!hd && (text.includes('hd') || text.includes('720') || text.includes('1080') || text.includes('high'))) {
+          hd = href; return;
+        }
+        if (!sd) sd = href;
+      });
+
+      if (!hd && !sd) { lastErr = `${host}: no FB video links found`; continue; }
+
+      return {
+        hd, sd,
+        thumbnail: $('img').first().attr('src') || '',
+        title:     $('h3, p, .title').first().text().trim() || 'Facebook Video',
+      };
+    } catch (e) {
+      lastErr = `${host}: ${e.message}`;
+    }
+  }
+
+  throw new Error(`x2download: ${lastErr || 'all endpoints failed'}`);
+}
+
 // ─── Strategy : yt-dlp (last-resort fallback) ────────────────────────────────
 // yt-dlp's Facebook extractor follows the share-URL redirect chain natively
 // using the same JS-eval flow a browser uses. This is the only strategy that
@@ -1400,6 +1543,18 @@ async function tryFbPluginIframe(url) {
 
   for (const ua of uas) {
     const tag = ua === UA_FB_BOT ? 'bot' : (ua === UA_MOBILE ? 'ios' : 'desk');
+    // Desktop Chrome UA now requires Sec-CH-UA client hints to bypass FB's
+    // 2026 fingerprint check; mobile/bot UAs ignore client hints entirely so
+    // we only attach them for desktop.
+    const isDesk = ua === UA_DESKTOP;
+    const chHeaders = isDesk ? {
+      'sec-ch-ua':          '"Google Chrome";v="124", "Chromium";v="124", "Not.A/Brand";v="24"',
+      'sec-ch-ua-mobile':   '?0',
+      'sec-ch-ua-platform': '"Windows"',
+      'sec-fetch-dest':     'iframe',
+      'sec-fetch-mode':     'navigate',
+      'sec-fetch-site':     'cross-site',
+    } : {};
     try {
       const resp = await axios.get(endpoint, {
         timeout: 14000,
@@ -1411,6 +1566,7 @@ async function tryFbPluginIframe(url) {
           'Accept-Language':           'en-US,en;q=0.9',
           Referer:                     'https://www.facebook.com/',
           'Upgrade-Insecure-Requests': '1',
+          ...chHeaders,
         },
       });
 
@@ -1733,35 +1889,35 @@ async function downloadFacebook(rawUrl, opts = {}) {
   ].filter(Boolean))];
 
   // ─── Strategy enablement ─────────────────────────────────────────────────
-  // Production logs from 2026-05 show every strategy below this comment has a
-  // 0% success rate on FB share URLs. They get disabled by default. Each is
-  // still wired up behind an env flag so we can flip it back on instantly if
-  // the upstream service is repaired or replaced — no code change needed.
+  // 2026-05 update: direct-scrape alone is no longer sufficient. Facebook
+  // has tightened its public-content surface (HTTP 400 on Android UAs without
+  // client hints, soft login wall on iOS/bot UAs for many /reel/ URLs).
+  // Defaulting the public mirror strategies BACK ON gives the race more
+  // attempts; even at low per-mirror success rates the aggregate recovery is
+  // much higher than direct-scrape alone. Each can still be turned off via
+  // its env var set to '0' if a specific mirror starts producing noise.
   //
-  // Tally per strategy (last 200 share-URL requests):
-  //   - og-meta:          0/200 hits — share HTML never has og:video
-  //   - snapsave-fb:      0/200 hits — every request → HTTP 404
-  //   - savefbs:          0/200 hits — every request → HTTP 404
-  //   - fb-plugin-iframe: 0/200 hits — "no video metadata in iframe"
-  //   - yt-dlp-fb:        0/200 hits — timeout / "Command failed"
-  //   - getfvid.com:      0/200 hits — DNS EAI_AGAIN from EU
-  //   - mbasic-video:     0/200 hits — FB removed mp4 playback
-  //   - metadownloader:   0/200 hits — npm package throws split-on-undefined
-  //   - fdown.net:        0/200 hits — Cloudflare 403
-  //   - fdownloader.net:  0/200 hits — consistently times out
+  // Strategies that remain opt-IN (default off) because the upstream is
+  // fundamentally broken from our deploy region:
+  //   - getfvid.com    — DNS EAI_AGAIN from EU regions
+  //   - mbasic-video   — FB removed mp4 playback on mbasic
+  //   - metadownloader — npm package throws split-on-undefined
   //
-  // The ONE strategy that succeeds is direct-scrape against the resolver's
-  // canonical `/reel/<numeric>/` URL — keep it as the primary path.
-  const ENABLE_OG_META         = process.env.FB_USE_OGMETA === '1';
-  const ENABLE_PLUGIN_IFRAME   = process.env.FB_USE_PLUGIN === '1';
-  const ENABLE_SNAPSAVE_FB     = process.env.FB_USE_SNAPSAVE === '1';
-  const ENABLE_SAVEFBS         = process.env.FB_USE_SAVEFBS === '1';
-  const ENABLE_FDOWNLOADER_NET = process.env.FB_USE_FDOWNLOADER === '1';
-  const ENABLE_FDOWN_NET       = process.env.FB_USE_FDOWN === '1';
-  const ENABLE_GETFVID         = process.env.FB_USE_GETFVID === '1';
-  const ENABLE_MBASIC          = process.env.FB_USE_MBASIC === '1';
-  const ENABLE_METADOWNLOADER  = process.env.FB_USE_LEGACY_METADOWNLOADER === '1';
-  const ENABLE_YTDLP_FB        = process.env.FB_USE_YTDLP === '1';
+  // yt-dlp defaults ON when the binary is installed (auto-detected); it's a
+  // proven fallback for share-token URLs that no HTTP scraper resolves.
+  const optOut = (v) => v !== '0' && String(v || '').toLowerCase() !== 'false';
+  const optIn  = (v) => v === '1' || String(v || '').toLowerCase() === 'true';
+
+  const ENABLE_OG_META         = optOut(process.env.FB_USE_OGMETA);
+  const ENABLE_PLUGIN_IFRAME   = optOut(process.env.FB_USE_PLUGIN);
+  const ENABLE_SNAPSAVE_FB     = optOut(process.env.FB_USE_SNAPSAVE);
+  const ENABLE_SAVEFBS         = optOut(process.env.FB_USE_SAVEFBS);
+  const ENABLE_FDOWNLOADER_NET = optOut(process.env.FB_USE_FDOWNLOADER);
+  const ENABLE_FDOWN_NET       = optOut(process.env.FB_USE_FDOWN);
+  const ENABLE_YTDLP_FB        = optOut(process.env.FB_USE_YTDLP);
+  const ENABLE_GETFVID         = optIn(process.env.FB_USE_GETFVID);
+  const ENABLE_MBASIC          = optIn(process.env.FB_USE_MBASIC);
+  const ENABLE_METADOWNLOADER  = optIn(process.env.FB_USE_LEGACY_METADOWNLOADER);
 
   const strategies = [];
 
@@ -1792,6 +1948,9 @@ async function downloadFacebook(rawUrl, opts = {}) {
     }
     if (ENABLE_FDOWNLOADER_NET) {
       strategies.push(['fdownloader-net', () => tryFdownloaderNet(oneUrl), 8000]);
+      // x2download.app / fbdownloader.online / fdownloader.io share the
+      // ajaxSearch shape and ship under the same opt-out env var.
+      strategies.push(['x2download',      () => tryX2download(oneUrl),     10000]);
     }
   }
 
@@ -1909,8 +2068,14 @@ async function downloadFacebook(rawUrl, opts = {}) {
   // already exhausted its retry budget — another run from us doesn't help.
   const isPermanentError = (e) => {
     const s = String(e || '').toLowerCase();
+    // NOTE: HTTP 400 deliberately excluded. Facebook intermittently 400s
+    // requests that look like Chromium but don't ship Sec-CH-UA hints
+    // (or whose hints don't match). Other UAs and other strategies can
+    // still succeed on the same URL — treating 400 as permanent killed
+    // the whole race in 2026-05 logs.
     return s.includes('http 404')
-        || s.includes('http 403')
+        || s.includes('http 410')   // explicitly gone
+        || s.includes('http 451')   // legal takedown
         || s.includes('no video metadata')
         || s.includes('no video urls in share page')
         || s.includes('no usable fbcdn video urls')
@@ -1919,8 +2084,6 @@ async function downloadFacebook(rawUrl, opts = {}) {
         || s.includes('binary not installed')
         || s.includes('not installed')
         || s.includes('content unavailable')
-        || s.includes('private')
-        || s.includes('deleted')
         || s.includes('login required')
         // Strategy-wrapper timeouts count as permanent: every strategy has
         // its own internal retry logic, so a wrapper timeout means the
