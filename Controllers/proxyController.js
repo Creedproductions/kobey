@@ -243,7 +243,34 @@ const proxyDownload = async (req, res) => {
   let attempt = 'primary';
   try {
     const httpMethod = reqMethod === 'HEAD' ? 'HEAD' : 'GET';
-    upstream = await fetchUpstream(targetUrl, upstreamHeaders, httpMethod);
+
+    // Transient-5xx retry: CDNs (TikTok's especially) intermittently return
+    // 502/503/504 on URLs that succeed a second later — production logs
+    // showed the SAME tikwm URL alternating 504 and 200 within seconds. One
+    // short-backoff retry absorbs these blips so the client never sees them
+    // and the logs stay clean of false-alarm ❌ lines.
+    // NOTE: fetchUpstream's validateStatus rejects on ≥500, so 5xx arrives
+    // as a THROWN error (err.response.status), not a returned status.
+    const fetchWithTransientRetry = async (u, h, m) => {
+      for (let i = 0; ; i++) {
+        try {
+          return await fetchUpstream(u, h, m);
+        } catch (err) {
+          const st = err.response?.status;
+          if (i < 2 && [502, 503, 504].includes(st)) {
+            console.warn(`🔁 upstream ${st} [${platform}] — transient, retry ${i + 1}/2`);
+            if (err.response?.data && typeof err.response.data.destroy === 'function') {
+              err.response.data.destroy();
+            }
+            await new Promise(s => setTimeout(s, 400 * (i + 1)));
+            continue;
+          }
+          throw err;
+        }
+      }
+    };
+
+    upstream = await fetchWithTransientRetry(targetUrl, upstreamHeaders, httpMethod);
 
     // TikTok-specific recovery: if the desktop UA gets blocked (403/451/etc),
     // retry once with the TikTok app UA. Many tikwm-derived URLs are signed

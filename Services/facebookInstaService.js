@@ -2135,6 +2135,11 @@ async function downloadFacebook(rawUrl, opts = {}) {
 
   // Build per-strategy promises, preserving the optional 4th tuple element
   // ({ slow: true }) so the orchestrator can apply the early-exit rule.
+  // Once any strategy has won, later failures from the still-running losers
+  // are expected and harmless — log them as quiet ⏹ lines instead of ❌ so
+  // the logs only show ❌ when something actually affected the user.
+  let raceSettled = false;
+
   const buildPromises = (errors, { excludeSlow = false } = {}) => strategies
     .filter((entry) => !(excludeSlow && entry[3] && entry[3].slow))
     .map((entry) => {
@@ -2147,13 +2152,18 @@ async function downloadFacebook(rawUrl, opts = {}) {
         }
         if (result && (result.hd || result.sd)) {
           console.log(`📘 ✅ ${name} succeeded`);
+          raceSettled = true;
           return result;
         }
         throw new Error(`${name}: no usable URL`);
       },
       err => {
         const msg = err.message || String(err);
-        console.warn(`📘 ❌ ${name}: ${msg.slice(0, 120)}`);
+        if (raceSettled) {
+          console.log(`📘 ⏹ ${name} (late, race already won — ignored): ${msg.slice(0, 80)}`);
+        } else {
+          console.warn(`📘 ❌ ${name}: ${msg.slice(0, 120)}`);
+        }
         throw new Error(`${name}: ${msg}`);
       }
     );
