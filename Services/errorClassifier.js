@@ -78,6 +78,23 @@ const CLASSES = [
     retryable: false,
   },
   {
+    code: 'BOT_DETECTION',
+    status: 429,
+    patterns: [
+      /confirm you.?re not a bot/i,
+      /sign in to confirm/i, // note: the age variant is caught by AGE_RESTRICTED above
+      /bot.?(check|detection|verification)/i,
+      /suspicious (activity|traffic)/i,
+      /unusual traffic/i,
+      /captcha/i,
+    ],
+    userMessage:
+      'The platform is temporarily blocking automated access from our server. ' +
+      'This usually clears within minutes.',
+    suggestions: ['Try again in a few minutes — the platform rotates these blocks frequently'],
+    retryable: true,
+  },
+  {
     code: 'LOGIN_REQUIRED',
     status: 401,
     patterns: [

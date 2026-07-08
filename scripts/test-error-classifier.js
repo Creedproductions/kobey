@@ -69,5 +69,13 @@ expect('Sign in to confirm your age. This video may be inappropriate for some us
 // Contains "unavailable" (NOT_FOUND) and country wording — must be GEO_BLOCKED
 expect('Video unavailable in your country', 'GEO_BLOCKED');
 
+
+console.log('\n\u2500\u2500 Bot detection \u2500\u2500');
+expect("yt-dlp: ERROR: [youtube] z0NsVTJvJLo: Sign in to confirm you\u2019re not a bot. Use --cookies-from-browser", 'BOT_DETECTION');
+expect("Sign in to confirm you're not a bot", 'BOT_DETECTION');
+expect('unusual traffic from your computer network', 'BOT_DETECTION');
+// Age variant must STILL classify as AGE_RESTRICTED (checked first)
+expect('Sign in to confirm your age. This video may be inappropriate', 'AGE_RESTRICTED');
+
 console.log(`\n\u2550\u2550\u2550 RESULT: ${pass} passed, ${fail} failed \u2550\u2550\u2550`);
 process.exit(fail ? 1 : 0);

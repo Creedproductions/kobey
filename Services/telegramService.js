@@ -205,6 +205,7 @@ const PLATFORM_EMOJI = {
 
 const CODE_EMOJI = {
   AGE_RESTRICTED:  '🔞', GEO_BLOCKED:     '🌍', PRIVATE_CONTENT: '🔒',
+  BOT_DETECTION:   '🤖',
   LOGIN_REQUIRED:  '🔑', DRM_PROTECTED:   '🛡️', NOT_FOUND:       '🗑️',
   RATE_LIMITED:    '🐢', LIVE_ONLY:       '📡', UNSUPPORTED_SITE:'❓',
   TIMEOUT:         '⏳', DOWNLOAD_FAILED: '🚨',

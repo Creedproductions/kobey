@@ -353,11 +353,32 @@ async function tryCobalt(url) {
 async function tryYtDlp(url) {
   return new Promise((resolve, reject) => {
     const bin = resolveYtDlpPath();
+
+    // ── Cookies: the ONLY reliable fix for YouTube's datacenter-IP bot
+    // detection ("Sign in to confirm you're not a bot"). When
+    // YT_DLP_COOKIES_FILE points at a Netscape-format cookies.txt exported
+    // from a logged-in (throwaway!) Google account, yt-dlp authenticates
+    // and the bot wall disappears. Without it, this strategy — and every
+    // other one — fails on blocked IPs. Set the env var on Koyeb and mount
+    // or bake the file into the image. Cookies expire (~weeks-months);
+    // refresh when bot errors return.
+    const cookieArgs = [];
+    const cookieFile = process.env.YT_DLP_COOKIES_FILE;
+    if (cookieFile) {
+      try {
+        fs.accessSync(cookieFile, fs.constants.R_OK);
+        cookieArgs.push('--cookies', cookieFile);
+      } catch (_) {
+        console.warn(`[yt] YT_DLP_COOKIES_FILE set but unreadable: ${cookieFile}`);
+      }
+    }
+
     // 2026 client priority: android_vr → ios → web → web_safari. tv_embedded
     // and web_embedded_player were removed for being broken upstream. Bot
     // detection on YouTube has tightened; android_vr is currently the most
     // forgiving mainstream client.
     execFile(bin, [
+      ...cookieArgs,
       '-f', 'best[height<=?1080][vcodec!=?vp9]+bestaudio[ext=m4a]/best/best',
       '--no-playlist',
       '--no-warnings',

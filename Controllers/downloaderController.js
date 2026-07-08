@@ -1017,8 +1017,12 @@ const platformDownloaders = {
         throw new Error('YouTube video access forbidden (age-restricted or region-locked)');
       if (error.message.includes('Status code: 404'))
         throw new Error('YouTube video not found (invalid URL or removed)');
-      if (error.message.includes('timeout'))
-        throw new Error('YouTube download timed out - video processing may be slow, please try again');
+      // Keep the real error text in the message — the old generic
+      // "timed out" replacement hid bot-detection and other classifiable
+      // causes from the error classifier and the Telegram alerts, so
+      // every failure looked like a slowness problem.
+      if (error.message.includes('timeout') && !/bot|sign in/i.test(error.message))
+        throw new Error(`YouTube download timed out — ${error.message}`);
       throw new Error(`YouTube download failed: ${error.message}`);
     }
   },
