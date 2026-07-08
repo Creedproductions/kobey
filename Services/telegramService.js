@@ -50,7 +50,7 @@ const RATE_WINDOW_MS     = 60 * 1000;
 
 // ─── State (in-memory) ───────────────────────────────────────────────────────
 
-// key -> last sent timestamp
+// key -> { ts: last sent timestamp, suppressed: count dropped since then }
 const dedupCache = new Map();
 // timestamps of recent sends, oldest first
 let recentSends = [];
@@ -84,18 +84,31 @@ const isRateLimited = () => {
   return recentSends.length >= RATE_LIMIT_PER_MIN;
 };
 
-const isDuplicate = (key) => {
+/**
+ * Duplicate check with repeat counting. Returns:
+ *   { dup: true }                      — suppress this alert, count it
+ *   { dup: false, suppressed: N }      — send it; N = how many identical
+ *                                        alerts were swallowed since the
+ *                                        last one actually sent
+ * The suppressed count lets the alert say "×4 in last 5 min" instead of
+ * silently hiding that the error kept happening.
+ */
+const checkDuplicate = (key) => {
   const now = Date.now();
-  const last = dedupCache.get(key);
-  if (last && now - last < DEDUP_TTL_MS) return true;
-  dedupCache.set(key, now);
+  const entry = dedupCache.get(key);
+  if (entry && now - entry.ts < DEDUP_TTL_MS) {
+    entry.suppressed++;
+    return { dup: true };
+  }
+  const suppressed = entry ? entry.suppressed : 0;
+  dedupCache.set(key, { ts: now, suppressed: 0 });
   // Best-effort cleanup so the map doesn't grow unbounded
   if (dedupCache.size > 500) {
-    for (const [k, ts] of dedupCache) {
-      if (now - ts > DEDUP_TTL_MS) dedupCache.delete(k);
+    for (const [k, v] of dedupCache) {
+      if (now - v.ts > DEDUP_TTL_MS) dedupCache.delete(k);
     }
   }
-  return false;
+  return { dup: false, suppressed };
 };
 
 // ─── Low-level send ──────────────────────────────────────────────────────────
@@ -144,9 +157,14 @@ async function sendRaw(text, { silent = false } = {}) {
 async function notifyAdmin(message, opts = {}) {
   const { tags = [], dedupKey = null, silent = false } = opts;
 
-  if (dedupKey && isDuplicate(dedupKey)) {
-    console.log(`[telegram] dedup: skipped (key=${dedupKey})`);
-    return false;
+  let suppressed = 0;
+  if (dedupKey) {
+    const check = checkDuplicate(dedupKey);
+    if (check.dup) {
+      console.log(`[telegram] dedup: skipped (key=${dedupKey})`);
+      return false;
+    }
+    suppressed = check.suppressed;
   }
   if (isRateLimited()) {
     console.warn('[telegram] rate limited, dropping message');
@@ -156,29 +174,85 @@ async function notifyAdmin(message, opts = {}) {
   const tagLine = [APP_TAG, ...tags.map(t => `#${t.replace(/[^a-zA-Z0-9_]/g, '')}`)]
     .join(' ');
 
-  const text = `${tagLine}\n\n${message}`;
+  const repeatLine = suppressed > 0
+    ? `\n🔁 <i>×${suppressed + 1} occurrences in the last 5 min (${suppressed} suppressed)</i>`
+    : '';
+
+  const text = `${tagLine}\n\n${message}${repeatLine}`;
   recentSends.push(Date.now());
   return sendRaw(text, { silent });
 }
 
+// ─── Failure formatting ──────────────────────────────────────────────────────
+
+// Lazy require to avoid a load-order cycle (controller requires both).
+let _classify = null;
+function classifySafe(err) {
+  try {
+    if (!_classify) ({ classify: _classify } = require('./errorClassifier'));
+    return _classify(err);
+  } catch (_) {
+    return { code: 'DOWNLOAD_FAILED', userMessage: '' };
+  }
+}
+
+const PLATFORM_EMOJI = {
+  instagram: '📸', tiktok: '🎵', facebook: '📘', twitter: '🐦',
+  youtube: '▶️', pinterest: '📌', threads: '🧵', linkedin: '💼',
+  reddit: '👽', vimeo: '🎬', twitch: '🎮', soundcloud: '🎧',
+  generic: '🌐',
+};
+
+const CODE_EMOJI = {
+  AGE_RESTRICTED:  '🔞', GEO_BLOCKED:     '🌍', PRIVATE_CONTENT: '🔒',
+  LOGIN_REQUIRED:  '🔑', DRM_PROTECTED:   '🛡️', NOT_FOUND:       '🗑️',
+  RATE_LIMITED:    '🐢', LIVE_ONLY:       '📡', UNSUPPORTED_SITE:'❓',
+  TIMEOUT:         '⏳', DOWNLOAD_FAILED: '🚨',
+};
+
+const shortUrl = (u) => {
+  try {
+    const p = new URL(u);
+    return truncate(p.hostname.replace(/^www\./, '') + p.pathname, 70);
+  } catch (_) { return truncate(u, 70); }
+};
+
+const utcStamp = () => {
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())} UTC · ${d.getUTCDate()}/${d.getUTCMonth() + 1}`;
+};
+
 /**
  * Convenience helper — alert when a platform downloader fails.
+ *
+ * Organised layout: one glanceable header (platform + failure class),
+ * then short URL, then the raw diagnostic in a collapsed <code> block.
+ * The error class comes from errorClassifier so "age restricted" and
+ * "deleted post" stop looking like the same generic wall of stderr.
  */
 async function notifyDownloadFailure(platform, url, error) {
-  const sig    = errorSignature(error);
-  const stamp  = new Date().toISOString();
-  const lines  = [
-    `🚨 <b>Downloader failed</b>`,
-    `<b>Platform:</b> ${escapeHtml(platform || 'unknown')}`,
-    `<b>URL:</b> <code>${escapeHtml(truncate(url, 200))}</code>`,
-    `<b>Error:</b> <code>${escapeHtml(truncate(sig, 500))}</code>`,
-    `<b>Time:</b> ${escapeHtml(stamp)}`,
+  const sig  = errorSignature(error);
+  const cls  = classifySafe(error);
+  const pEmo = PLATFORM_EMOJI[platform] || '🚨';
+  const cEmo = CODE_EMOJI[cls.code] || '🚨';
+  const title = cls.code.replace(/_/g, ' ')
+    .toLowerCase().replace(/\b\w/g, c => c.toUpperCase()); // "Age Restricted"
+
+  const lines = [
+    `${pEmo} <b>${escapeHtml((platform || 'unknown').toUpperCase())}</b> — ${cEmo} <b>${escapeHtml(title)}</b>`,
+    `🔗 <code>${escapeHtml(shortUrl(url))}</code>`,
   ];
+  if (cls.userMessage) lines.push(`💬 ${escapeHtml(truncate(cls.userMessage, 150))}`);
+  lines.push(`🧾 <code>${escapeHtml(truncate(sig, 350))}</code>`);
+  lines.push(`⏱ ${escapeHtml(utcStamp())}`);
 
   return notifyAdmin(lines.join('\n'), {
-    tags:     ['failure', platform || 'unknown'],
+    tags:     ['failure', platform || 'unknown', cls.code],
     dedupKey: `fail:${platform}:${sig}`,
-    silent:   false,
+    // Expected/permanent failures (user pasted a deleted or private link)
+    // don't need to buzz the phone — only genuinely broken things do.
+    silent:   ['NOT_FOUND', 'PRIVATE_CONTENT', 'AGE_RESTRICTED', 'GEO_BLOCKED', 'DRM_PROTECTED', 'LIVE_ONLY'].includes(cls.code),
   });
 }
 
