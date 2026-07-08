@@ -84,11 +84,53 @@ function normaliseFormats(info) {
 
 // ─── Public entry ────────────────────────────────────────────────────────────
 
+const { isAgeRestricted } = require('./errorClassifier');
+
 async function downloadGeneric(url) {
   console.log(`🌐 Generic: extracting ${url}`);
 
-  const info = await runYtDlp(url);
-  const formats = normaliseFormats(info);
+  let info;
+  try {
+    info = await runYtDlp(url);
+  } catch (e) {
+    // ── Age-gate recovery ────────────────────────────────────────────────
+    // YouTube (and some embeds) age-gate videos behind "Sign in to confirm
+    // your age". The embedded/TV player clients historically skip the gate
+    // for videos that allow embedding, so one retry with those clients is
+    // cheap and recovers a real slice of age-restricted links. If a
+    // cookies file is configured (YT_DLP_COOKIES_FILE) the runner already
+    // sends it on every call — this retry is for the no-cookie case.
+    if (isAgeRestricted(e)) {
+      console.log('🌐 Generic: age-gate detected → retrying with embedded player clients');
+      try {
+        info = await runYtDlp(url, [
+          '--extractor-args', 'youtube:player_client=web_embedded,tv_embedded,mediaconnect',
+        ]);
+        console.log('🌐 Generic: ✅ age-gate bypassed via embedded client');
+      } catch (e2) {
+        console.warn(`🌐 Generic: embedded-client retry also failed: ${String(e2.message).slice(0, 120)}`);
+        throw e; // surface the ORIGINAL age-restriction error for clean classification
+      }
+    } else {
+      throw e;
+    }
+  }
+
+  let formats = normaliseFormats(info);
+
+  // ── Format-selection fallback ──────────────────────────────────────────
+  // Some extractors return an info object where the pre-selected `-f` pick
+  // failed but a re-run with the permissive selector succeeds (sites that
+  // only expose HLS/DASH manifests, or whose "best" is video-only). One
+  // retry with `-f b*/b` before giving up.
+  if (!formats.length) {
+    console.log('🌐 Generic: 0 formats from default selector → retrying with permissive -f');
+    try {
+      info = await runYtDlp(url, ['-f', 'b*/bv*+ba/b']);
+      formats = normaliseFormats(info);
+    } catch (_) { /* fall through to the clean error below */ }
+  }
+
   if (!formats.length) {
     throw new Error('Generic: no usable formats extracted');
   }

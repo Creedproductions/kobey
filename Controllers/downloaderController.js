@@ -15,6 +15,7 @@ const { fetchYouTubeData } = require('../Services/youtubeService');
 const { downloadTikTok } = require('../Services/tiktokService');
 const { downloadGeneric } = require('../Services/genericService');
 const telegram = require('../Services/telegramService');
+const { classify: classifyError } = require('../Services/errorClassifier');
 
 const bitly = new BitlyClient(config.BITLY_ACCESS_TOKEN);
 
@@ -1832,18 +1833,36 @@ const downloadMedia = async (req, res) => {
       });
     }
 
-    let statusCode = 500;
-    if (error.message.includes('not available') || error.message.includes('not found')) statusCode = 404;
-    else if (error.message.includes('forbidden') || error.message.includes('access'))   statusCode = 403;
-    else if (error.message.includes('timeout'))                                           statusCode = 408;
+    // ── Structured error classification ─────────────────────────────────
+    // Map the raw failure (yt-dlp stderr, scraper messages) to a stable
+    // error code + clean user message + actionable suggestions. The client
+    // switches on `code`: AGE_RESTRICTED / GEO_BLOCKED / PRIVATE_CONTENT /
+    // LOGIN_REQUIRED / DRM_PROTECTED / NOT_FOUND / RATE_LIMITED /
+    // LIVE_ONLY / UNSUPPORTED_SITE / TIMEOUT / DOWNLOAD_FAILED.
+    const classified = classifyError(error);
 
-    res.status(statusCode).json({
-      error:       'Failed to download media',
+    // LOGIN_REQUIRED on a PUBLIC url is our failure, not the user's —
+    // downgrade so the app doesn't push an unnecessary sign-in flow
+    // (same reasoning as the login-wall guard above).
+    if (classified.code === 'LOGIN_REQUIRED' && urlIsPublic) {
+      classified.code        = 'DOWNLOAD_FAILED';
+      classified.status      = 500;
+      classified.userMessage = 'Failed to download media from this link.';
+      classified.suggestions = ['Try again — this public link failed on our side, not yours'];
+    }
+
+    res.status(classified.status).json({
+      error:       classified.userMessage,
       success:     false,
+      code:        classified.code,
+      retryable:   classified.retryable,
       details:     error.message,
       platform:    failedPlatform,
       timestamp:   new Date().toISOString(),
-      suggestions: getErrorSuggestions(error.message, failedPlatform)
+      suggestions: [
+        ...classified.suggestions,
+        ...getErrorSuggestions(error.message, failedPlatform),
+      ],
     });
   }
 };
