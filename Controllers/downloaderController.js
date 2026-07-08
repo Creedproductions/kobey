@@ -35,6 +35,12 @@ const PLACEHOLDER_THUMBNAIL = 'https://via.placeholder.com/300x150';
 const DOWNLOAD_TIMEOUT = 45000;
 const MAX_CAROUSEL_ITEMS = 20; // safety cap after dedup
 
+// In-flight request coalescing (see downloadMedia). Key: `platform:url`.
+// TTL is short — just long enough to absorb double-taps and the app's
+// preview→download sequence, without serving stale CDN URLs.
+const inflightFetches = new Map();
+const COALESCE_TTL_MS = 60 * 1000;
+
 /**
  * Sanitize a string into a filesystem-safe filename. Mirrors the proxy
  * controller's safeFilename() but exposed here so the API response can
@@ -1652,13 +1658,46 @@ const downloadMedia = async (req, res) => {
     const downloader = platformDownloaders[platform];
     if (!downloader) throw new Error(`No downloader available for platform: ${platform}`);
 
-    // Platforms whose downloader signature is (url, req) — they need
-    // access to req.body.cookies (FB/IG sign-in) or to req for proxy
-    // URL building (YouTube/TikTok).
+    // ── In-flight coalescing ─────────────────────────────────────────────
+    // The app frequently fires the same URL 2-3× within seconds (double-tap,
+    // widget rebuild, preview + download). Production logs showed every
+    // share/r URL running the FULL strategy race twice concurrently — double
+    // the mirror load, double the yt-dlp spawns, for byte-identical results.
+    // Concurrent duplicates now share one fetch: the first request does the
+    // work, the rest await the same promise. Successful results linger for
+    // COALESCE_TTL_MS to also absorb quick sequential retries; failures are
+    // evicted immediately so a real retry gets a fresh attempt.
     const needsReq = ['youtube', 'facebook', 'tiktok', 'instagram'];
-    const data = needsReq.includes(platform)
-      ? await downloader(processedUrl, req)
-      : await downloader(processedUrl);
+    const coalesceKey = `${platform}:${processedUrl}`;
+    let entry = inflightFetches.get(coalesceKey);
+    if (entry && Date.now() - entry.ts < COALESCE_TTL_MS) {
+      console.log(`♻️ Coalescing duplicate request [${platform}]: ${processedUrl.slice(0, 80)}`);
+    } else {
+      entry = {
+        ts: Date.now(),
+        promise: (needsReq.includes(platform)
+          ? downloader(processedUrl, req)
+          : downloader(processedUrl)
+        ).catch(err => {
+          // Failures must not poison retries — evict immediately.
+          inflightFetches.delete(coalesceKey);
+          throw err;
+        }),
+      };
+      inflightFetches.set(coalesceKey, entry);
+      // Bound the map
+      if (inflightFetches.size > 300) {
+        const oldest = inflightFetches.keys().next().value;
+        inflightFetches.delete(oldest);
+      }
+      // Evict successful entries after TTL
+      entry.promise.then(() => {
+        setTimeout(() => {
+          if (inflightFetches.get(coalesceKey) === entry) inflightFetches.delete(coalesceKey);
+        }, COALESCE_TTL_MS).unref?.();
+      }, () => {});
+    }
+    const data = await entry.promise;
 
     if (!data) {
       return res.status(404).json({ error: 'No data found for this URL', success: false, platform });
