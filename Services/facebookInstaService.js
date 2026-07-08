@@ -2166,11 +2166,22 @@ async function downloadFacebook(rawUrl, opts = {}) {
         || s.includes('not installed')
         || s.includes('content unavailable')
         || s.includes('login required')
-        // Strategy-wrapper timeouts count as permanent: every strategy has
-        // its own internal retry logic, so a wrapper timeout means the
-        // strategy already burned its budget. Re-running it from scratch
-        // produces the same timeout 95% of the time.
-        || /timeout after \d+ms/.test(s);
+        // ONLY yt-dlp timeouts count as permanent: yt-dlp has its own
+        // internal --retries 2 + --socket-timeout 12, so its wrapper
+        // timeout means the retry budget is already exhausted.
+        //
+        // Generic strategy timeouts (direct-scrape, og-meta, snapsave,
+        // fdownloader…) are TRANSIENT — they're single-shot HTTP calls
+        // with no internal retry, and a timeout usually just means one
+        // slow network moment. Treating them as permanent (as this code
+        // did before 2026-07) had two bad effects:
+        //   1. firstSuccessFastFail's early-exit killed yt-dlp mid-flight
+        //      whenever the fast strategies all momentarily timed out.
+        //   2. The whole-race retry pass was skipped ("all permanent"),
+        //      so one slow moment = user-facing failure — even though a
+        //      retry seconds later would have succeeded. This was the
+        //      root cause of the intermittent Facebook failures.
+        || (s.includes('yt-dlp') && /timeout after \d+ms/.test(s));
   };
 
   const errors = [];

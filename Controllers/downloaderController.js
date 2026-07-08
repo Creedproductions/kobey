@@ -749,11 +749,21 @@ const normaliseFacebookData = (raw) => {
 const platformDownloaders = {
 
   // ─── INSTAGRAM ───────────────────────────────────────────────────────────
-  // Strategy chain reduced to what consistently works in production:
-  //   1. igdl (btch-downloader)        — primary; works for /p/ AND /reel/
-  //   2. scrapeInstaEmbed              — fallback for /p/ posts only
-  //                                      (always returns thumbnails-only for
-  //                                      /reel/, so we skip it for reels)
+  // Strategy lineup (2026-07 rework — fixes the "fails, works on retry"
+  // pattern users were hitting):
+  //
+  //   1. igdl (btch-downloader) — primary; works for /p/ AND /reel/.
+  //      NOW WITH INTERNAL AUTO-RETRY: igdl is flaky (rapidcdn upstream),
+  //      but a fresh attempt usually succeeds — which is exactly why users'
+  //      manual retries worked. We do that retry server-side: 2 attempts ×
+  //      12s each instead of one 15s attempt.
+  //   2. scrapeInstaEmbed — fallback for ALL post types now, including
+  //      /reel/. Previously skipped for reels ("thumbnails-only"), which
+  //      left igdl as the ONLY strategy for reels — a single igdl timeout
+  //      meant total failure (the "embed: n/a" lines in prod logs). The
+  //      embed scraper's og:video / video_url / playable_url paths DO
+  //      recover many reels; for reels we simply require at least one
+  //      VIDEO item so a thumbnails-only result can't masquerade as a win.
   //
   // RETIRED (default OFF, opt-in via env):
   //   - facebookInsta(url, {…})  (snapsave + snapinsta race) — 0% success
@@ -761,19 +771,16 @@ const platformDownloaders = {
   //     (getaddrinfo EAI_AGAIN) and snapsave.app returns 404. Re-enable
   //     with IG_USE_SNAPSAVE=1.
   //
-  // Behaviour: igdl + embed race in parallel; first one with usable items
-  // wins. If igdl returns first (the common case), we don't wait for embed.
+  // Behaviour: FIRST-SUCCESS race (not allSettled). The first strategy to
+  // produce usable items resolves the request immediately — we no longer
+  // wait for slow losers. If igdl attempt-1 succeeds in 2s, the user gets
+  // their media in 2s even while embed is still mid-flight.
   async instagram(url, req) {
     const userCookies = req?.body?.cookies || {};
     const igCookie    = userCookies.instagram || null;
 
     const ENABLE_SNAPSAVE_IG = process.env.IG_USE_SNAPSAVE === '1';
     const isReelUrl = /instagram\.com\/reel\//i.test(url);
-    // embed always returns only thumbnails for /reel/ URLs in 2026 — skipping
-    // it for reels saves 5-15s of pointless fetches (the embed scraper hits
-    // 6 URL variants × 3 UAs = 18 requests per call). For /p/ posts it
-    // still works as a useful fallback when igdl is rate-limited.
-    const ENABLE_EMBED = !isReelUrl || process.env.IG_USE_EMBED === '1';
 
     const extractItems = (res) => {
       if (!res) return null;
@@ -787,81 +794,86 @@ const platformDownloaders = {
       return null;
     };
 
-    let snapsResult = null, igdlResult = null, embedResult = null;
-    let snapsErr    = null, igdlErr    = null, embedErr    = null;
+    // ── Strategy 1: igdl with internal auto-retry ────────────────────────
+    // 2 attempts, 12s hard cap each. Attempt 2 only runs when attempt 1
+    // failed, so the happy path is identical to before. Worst case is 24s,
+    // still well inside the 45s global budget.
+    const runIgdl = async () => {
+      let lastErr = null;
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        try {
+          const d = await downloadWithTimeout(() => igdl(url), 12000);
+          const items = extractItems(d);
+          if (items) {
+            if (attempt > 1) console.log(`📸 igdl succeeded on retry #${attempt}`);
+            return { items, source: 'igdl' };
+          }
+          lastErr = new Error('igdl: empty/unusable response');
+        } catch (e) {
+          lastErr = e instanceof Error ? e : new Error(String(e));
+          console.warn(`⚠️ igdl attempt ${attempt} failed:`, lastErr.message);
+        }
+      }
+      throw new Error(`igdl: ${lastErr?.message || 'failed'}`);
+    };
 
-    const tasks = [];
+    // ── Strategy 2: embed scrape — now for reels too ─────────────────────
+    // For reels, only a result containing at least one VIDEO item counts;
+    // thumbnails-only responses are rejected so the user never gets a JPG
+    // when they asked for a reel.
+    const runEmbed = async () => {
+      const d = await downloadWithTimeout(() => scrapeInstaEmbed(url), 15000);
+      const items = Array.isArray(d) && d.length > 0 ? d : null;
+      if (!items) throw new Error('embed: no items');
+      if (isReelUrl && !items.some(it => it && it.type === 'video')) {
+        throw new Error('embed: reel URL but only non-video items found');
+      }
+      return { items, source: 'embed' };
+    };
 
-    // 1) igdl — primary, always run
-    tasks.push(
-      downloadWithTimeout(() => igdl(url), 15000)
-        .then(d  => {
-          if (!d) { igdlErr = new Error('igdl resolved with null/undefined'); }
-          else { igdlResult = d; }
-        })
-        .catch(e => {
-          igdlErr = e instanceof Error ? e : new Error(String(e));
-          console.warn('⚠️ igdl error:', igdlErr.message);
-        }),
-    );
+    // ── Strategy 3: snapsave / snapinsta — opt-in only ───────────────────
+    const runSnapsave = async () => {
+      const d = await downloadWithTimeout(() => facebookInsta(url, { igCookie }), 20000);
+      const items = extractItems(d);
+      if (!items) throw new Error('snapsave: empty/unusable response');
+      return { items, source: 'snapsave' };
+    };
 
-    // 2) embed — fallback for /p/ posts; skipped for /reel/
-    if (ENABLE_EMBED) {
-      tasks.push(
-        downloadWithTimeout(() => scrapeInstaEmbed(url), 12000)
-          .then(d  => { embedResult = d; })
-          .catch(e => {
-            embedErr = e instanceof Error ? e : new Error(String(e));
-            console.warn('⚠️ instaEmbed error:', embedErr.message);
-          }),
-      );
-    }
+    const strategies = [runIgdl()];
+    strategies.push(runEmbed());
+    if (ENABLE_SNAPSAVE_IG) strategies.push(runSnapsave());
 
-    // 3) snapsave / snapinsta — opt-in only (DNS dead for snapinsta, snapsave 404)
-    if (ENABLE_SNAPSAVE_IG) {
-      tasks.push(
-        downloadWithTimeout(() => facebookInsta(url, { igCookie }), 20000)
-          .then(d  => { snapsResult = d; })
-          .catch(e => {
-            snapsErr = e instanceof Error ? e : new Error(String(e));
-            console.warn('⚠️ snapsave error:', snapsErr.message);
-          }),
-      );
-    }
+    // ── First-success race ───────────────────────────────────────────────
+    // Resolve on the first strategy that yields usable items; reject only
+    // when every strategy has failed. Losing strategies keep running in the
+    // background but their results are ignored (their own timeouts stop
+    // them from leaking).
+    const startedAt = Date.now();
+    const winner = await new Promise((resolve, reject) => {
+      let done = false, settled = 0;
+      const errors = [];
+      strategies.forEach(p => p.then(
+        v => {
+          if (done) return;
+          done = true;
+          console.log(`📸 Instagram won by [${v.source}] in ${Date.now() - startedAt}ms (items=${v.items.length})`);
+          resolve(v);
+        },
+        e => {
+          errors.push(e?.message || String(e));
+          settled++;
+          if (settled === strategies.length && !done) {
+            done = true;
+            console.log(`📸 Instagram: ALL ${strategies.length} scrapers failed in ${Date.now() - startedAt}ms`);
+            reject(new Error(`Instagram: all scrapers failed. ${errors.join('  |  ')}`));
+          }
+        }
+      ));
+    });
 
-    await Promise.allSettled(tasks);
-
-    const snapsItems = extractItems(snapsResult);
-    const igdlItems  = extractItems(igdlResult);
-    const embedItems = Array.isArray(embedResult) && embedResult.length > 0 ? embedResult : null;
-
-    console.log(
-      `📸 Instagram scrapers:` +
-      (ENABLE_SNAPSAVE_IG ? ` snapsave=${snapsItems?.length ?? 'null'} ` : '') +
-      ` igdl=${igdlItems?.length ?? 'null'}` +
-      (ENABLE_EMBED ? ` embed=${embedItems?.length ?? 'null'}` : '')
-    );
-
-    if (!snapsItems && !igdlItems && !embedItems) {
-      throw new Error(
-        'Instagram: all scrapers failed. ' +
-        `igdl: ${igdlErr?.message ?? 'n/a'}  ` +
-        `embed: ${embedErr?.message ?? 'n/a'}  ` +
-        (ENABLE_SNAPSAVE_IG ? `snapsave: ${snapsErr?.message ?? 'n/a'}` : '')
-      );
-    }
-
-    // Prefer snapsave (richest metadata when available), then igdl, then embed.
-    if (snapsItems?.length > 0) {
-      console.log('📸 Using snapsave');
-      return { _items: snapsItems, _source: 'snapsave', _req: req };
-    }
-    if (igdlItems?.length > 0) {
-      console.log('📸 Using igdl');
-      return { _items: igdlItems, _source: 'igdl', _req: req };
-    }
-    console.log('📸 Using instaEmbed fallback');
-    return { _items: embedItems, _source: 'embed', _req: req };
+    console.log(`📸 Instagram scrapers: ${winner.source}=${winner.items.length}`);
+    console.log(`📸 Using ${winner.source}`);
+    return { _items: winner.items, _source: winner.source, _req: req };
   },
 
   // ─── TIKTOK ───────────────────────────────────────────────────────────────

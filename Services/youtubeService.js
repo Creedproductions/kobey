@@ -460,9 +460,40 @@ function isYtDlpAvailable() {
 }
 isYtDlpAvailable();
 
+// ─── Result cache ────────────────────────────────────────────────────────────
+// The app's flow is fetch → (user picks quality) → download, and the proxy
+// issues extra HEAD/GET probes — several fetchYouTubeData calls for the same
+// video within minutes. Caching the raced result for 10 min (safely under
+// YouTube's ~6h URL expiry) means only the FIRST call pays the full race;
+// the rest return instantly. finalise() still runs per-call so per-request
+// URL/params handling stays correct. Bounded LRU-ish at 200 entries.
+const _ytCache = new Map();
+const YT_CACHE_TTL = 10 * 60 * 1000; // 10 minutes
+
+function ytCacheGet(videoId) {
+  const hit = _ytCache.get(videoId);
+  if (!hit) return null;
+  if (Date.now() - hit.at > YT_CACHE_TTL) { _ytCache.delete(videoId); return null; }
+  return hit.data;
+}
+
+function ytCacheSet(videoId, data) {
+  if (_ytCache.size >= 200) {
+    const oldest = _ytCache.keys().next().value;
+    _ytCache.delete(oldest);
+  }
+  _ytCache.set(videoId, { at: Date.now(), data });
+}
+
 async function fetchYouTubeData(url) {
   const videoId = extractVideoId(url);
   if (!videoId) throw new Error('Could not extract YouTube video ID');
+
+  const cached = ytCacheGet(videoId);
+  if (cached) {
+    console.log(`YouTube: cache hit for ${videoId}`);
+    return finalise(cached, url, videoId);
+  }
 
   const normUrl = normalizeUrl(url);
   console.log(`YouTube: racing for ${videoId}`);
@@ -502,6 +533,7 @@ async function fetchYouTubeData(url) {
   }
 
   const data = await firstSuccess(strategies);
+  ytCacheSet(videoId, data);
   return finalise(data, url, videoId);
 }
 
