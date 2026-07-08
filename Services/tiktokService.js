@@ -407,29 +407,53 @@ async function resolveShortUrl(url) {
 
 // ─── Story / live detection ──────────────────────────────────────────────────
 //
-// TikTok Stories (tiktok.com/@user/story) and Live streams (tiktok.com/@user/live)
-// aren't downloadable via any public scraper. Detect them early and return a
-// clear error so users aren't left wondering why a "TikTok" link failed.
+// TikTok Live streams (tiktok.com/@user/live) are real-time-only — hard reject.
+//
+// TikTok Stories (tiktok.com/@user/story/<id>) are served through
+// authenticated API calls, so public scrapers can't fetch them directly —
+// per Apr-2026 testing, tikwm only returns story THUMBNAILS, not playback.
+// BUT: the numeric story ID shares TikTok's video-ID space, and some
+// "story" URLs are actually normal videos shared via the story sheet.
+// So instead of hard-rejecting, we rewrite /story/<id> → /video/<id> and
+// let the normal strategy chain take ONE cheap shot. Genuine ephemeral
+// stories still fail cleanly with the explanatory error below.
 
 function detectUnsupported(url) {
-  if (/tiktok\.com\/@[^/]+\/(story|live)/i.test(url)) {
-    if (url.includes('/story')) {
-      return 'TikTok Stories are not downloadable — they require login and use ephemeral signed URLs that expire too fast for scrapers.';
-    }
+  if (/tiktok\.com\/@[^/]+\/live/i.test(url)) {
     return 'TikTok Live streams cannot be downloaded — they\'re real-time-only and not stored.';
   }
   return null;
 }
 
+const STORY_ERROR =
+  'TikTok Stories are not downloadable — they require login and use ' +
+  'ephemeral signed URLs that expire too fast for scrapers.';
+
+/** /story/<id> → /video/<id> rewrite; returns null if not a story URL. */
+function storyToVideoUrl(url) {
+  const m = url.match(/tiktok\.com\/(@[^/]+)\/story\/(\d+)/i);
+  if (!m) return null;
+  return `https://www.tiktok.com/${m[1]}/video/${m[2]}`;
+}
+
 // ─── Orchestrator ────────────────────────────────────────────────────────────
 
 async function downloadTikTok(rawUrl) {
-  // Stage 1 — bail early on stories/live with a useful message
+  // Stage 1 — bail early on live streams with a useful message
   const unsupported = detectUnsupported(rawUrl);
   if (unsupported) throw new Error(unsupported);
 
+  // Stage 1b — story URLs: rewrite to /video/<id> and try the normal chain.
+  // If every strategy fails on the rewritten URL, surface the story-specific
+  // error (not the generic "all strategies failed") so the user understands.
+  const storyRewrite = storyToVideoUrl(rawUrl);
+  const isStory = !!storyRewrite;
+  if (isStory) {
+    console.log(`🎵 TikTok: story URL → trying as video: ${storyRewrite}`);
+  }
+
   // Stage 2 — resolve short URLs to canonical form
-  const url = await resolveShortUrl(rawUrl);
+  const url = await resolveShortUrl(isStory ? storyRewrite : rawUrl);
 
   // Strategy order: cheap+fast first, robust fallbacks after. yt-dlp goes
   // between musicaldown and ttdl because it's slower than the HTTP scrapers
@@ -462,6 +486,12 @@ async function downloadTikTok(rawUrl) {
     }
   }
 
+  if (isStory) {
+    // The video-ID gamble didn't pay off — this is a genuine ephemeral
+    // story. Give the story-specific explanation, not the generic one.
+    console.warn(`🎵 TikTok: story rewrite failed all strategies — genuine ephemeral story`);
+    throw new Error(STORY_ERROR);
+  }
   throw new Error(`TikTok: all strategies failed — ${errors.join(' | ')}`);
 }
 

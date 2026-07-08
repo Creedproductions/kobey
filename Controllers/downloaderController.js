@@ -779,6 +779,26 @@ const platformDownloaders = {
     const userCookies = req?.body?.cookies || {};
     const igCookie    = userCookies.instagram || null;
 
+    // ── STORIES: route straight to the story pipeline ────────────────────
+    // instagram.com/stories/<user>/<pk> URLs can't be handled by igdl or
+    // the embed scraper (no /p|reel|tv/ shortcode → both fail instantly).
+    // facebookInstaService has the full story machinery — public mirrors
+    // (storiesig.info, anonyig.com, imginn.com) → cookie GraphQL → yt-dlp —
+    // but before 2026-07 it was only reachable behind IG_USE_SNAPSAVE=1,
+    // which is OFF by default. That meant story URLs NEVER worked. Route
+    // them explicitly here, unconditionally.
+    if (/instagram\.com\/stories\//i.test(url)) {
+      console.log('📸 Instagram story URL → story pipeline');
+      const res = await downloadWithTimeout(
+        () => facebookInsta(url, { igCookie }),
+        40000,
+      );
+      const items = Array.isArray(res?.data) && res.data.length ? res.data : null;
+      if (!items) throw new Error('Instagram story: no items returned');
+      console.log(`📸 Instagram story ✓ ${items.length} item(s) via ${res._source || 'stories'}`);
+      return { _items: items, _source: res._source || 'stories', _req: req };
+    }
+
     const ENABLE_SNAPSAVE_IG = process.env.IG_USE_SNAPSAVE === '1';
     const isReelUrl = /instagram\.com\/reel\//i.test(url);
 
