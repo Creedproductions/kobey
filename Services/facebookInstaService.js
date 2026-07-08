@@ -177,16 +177,37 @@ function firstSuccess(promises, errors = []) {
  * timeouts, so they won't leak forever.
  */
 function firstSuccessFastFail(entries, errors, isPermanentErrorFn) {
+  // Grace window: when every fast strategy has permanently failed, we no
+  // longer reject INSTANTLY — production logs showed x2download landing a
+  // success 1-2s after the early-exit had already rejected, so the win was
+  // discarded and the user saw a failure that "works on retry". Instead we
+  // arm a short grace timer; any pending strategy that succeeds within it
+  // still wins. Only after the grace expires do we reject.
+  const EARLY_EXIT_GRACE_MS = 4000;
+
   return new Promise((resolve, reject) => {
     let done = false;
     let totalSettled = 0;
     let fastTotal = entries.filter(e => !e.slow).length;
     let fastSettled = 0;
     let fastAllPermanent = true;
+    let graceTimer = null;
+
+    const finishReject = () => {
+      if (done) return;
+      done = true;
+      reject(new Error(errors.join(' | ')));
+    };
 
     entries.forEach(entry => {
       entry.promise.then(
-        v => { if (!done) { done = true; resolve(v); } },
+        v => {
+          if (!done) {
+            done = true;
+            if (graceTimer) clearTimeout(graceTimer);
+            resolve(v);
+          }
+        },
         e => {
           const msg = e.message || String(e);
           errors.push(msg);
@@ -196,19 +217,21 @@ function firstSuccessFastFail(entries, errors, isPermanentErrorFn) {
             fastSettled++;
             if (!isPermanentErrorFn(msg)) fastAllPermanent = false;
 
-            // Early-exit: every fast strategy has rejected, and every one of
-            // them was a permanent failure. No point waiting for the slow ones.
-            if (!done && fastTotal > 0 && fastSettled === fastTotal && fastAllPermanent) {
-              done = true;
-              console.warn('⚡ Facebook: all fast strategies permanently failed — aborting slow strategies early');
-              reject(new Error(errors.join(' | ')));
+            // Early-exit (soft): every fast strategy has rejected
+            // permanently. Arm the grace timer instead of rejecting now —
+            // slow/pending strategies get a few more seconds to land.
+            if (!done && !graceTimer && fastTotal > 0 &&
+                fastSettled === fastTotal && fastAllPermanent &&
+                totalSettled < entries.length) {
+              console.warn(`⚡ Facebook: all fast strategies permanently failed — ${EARLY_EXIT_GRACE_MS}ms grace for pending strategies`);
+              graceTimer = setTimeout(finishReject, EARLY_EXIT_GRACE_MS);
               return;
             }
           }
 
           if (totalSettled === entries.length && !done) {
-            done = true;
-            reject(new Error(errors.join(' | ')));
+            if (graceTimer) clearTimeout(graceTimer);
+            finishReject();
           }
         }
       );
@@ -755,8 +778,20 @@ async function resolveCanonicalFbUrl(rawUrl) {
 
   const isNumericId = (s) => /^\d{6,}$/.test(s);
 
+  // When the resolver already found the REAL canonical (a numeric
+  // /reel/<fbid>/ from the redirect chain or og:url), the base62
+  // token-guess candidates below are guaranteed 404s — the share token is
+  // not the reel ID. Each bogus candidate costs a full direct-scrape
+  // fan-out (4 UAs), and their "permanent 404" votes feed the early-exit
+  // signal, making genuinely-working slow strategies get aborted. Skip the
+  // guesses entirely when a numeric canonical is already in hand.
+  const haveNumericCanonical = [...candidates].some(c =>
+    /facebook\.com\/reel\/(\d{6,})/i.test(c) ||
+    /[?&]v=(\d{6,})/.test(c)
+  );
+
   const shareMatch = url.match(/facebook\.com\/share\/(v|r|p|s)\/([A-Za-z0-9_-]+)/i);
-  if (shareMatch) {
+  if (shareMatch && !haveNumericCanonical) {
     const kind = shareMatch[1].toLowerCase();
     const id   = shareMatch[2];
     const numeric = isNumericId(id);
@@ -1989,7 +2024,7 @@ async function downloadFacebook(rawUrl, opts = {}) {
   const ENABLE_SNAPSAVE_FB     = optOut(process.env.FB_USE_SNAPSAVE);
   const ENABLE_SAVEFBS         = optOut(process.env.FB_USE_SAVEFBS);
   const ENABLE_FDOWNLOADER_NET = optOut(process.env.FB_USE_FDOWNLOADER);
-  const ENABLE_FDOWN_NET       = optOut(process.env.FB_USE_FDOWN);
+  const ENABLE_FDOWN_NET       = optIn(process.env.FB_USE_FDOWN);   // Cloudflare 403s every call from Koyeb — re-enable with FB_USE_FDOWN=1 if upstream unblocks
   const ENABLE_YTDLP_FB        = optOut(process.env.FB_USE_YTDLP);
   const ENABLE_GETFVID         = optIn(process.env.FB_USE_GETFVID);
   const ENABLE_MBASIC          = optIn(process.env.FB_USE_MBASIC);
@@ -2014,19 +2049,19 @@ async function downloadFacebook(rawUrl, opts = {}) {
   //    upstream comes back to life.
   for (const oneUrl of ORIGINAL_URL_ONLY) {
     if (ENABLE_PLUGIN_IFRAME) {
-      strategies.push(['fb-plugin-iframe', () => tryFbPluginIframe(oneUrl), 8000]);
+      strategies.push(['fb-plugin-iframe', () => tryFbPluginIframe(oneUrl), 14000]);
     }
     if (ENABLE_SNAPSAVE_FB) {
-      strategies.push(['snapsave-fb', () => trySnapsaveFb(oneUrl), 8000]);
+      strategies.push(['snapsave-fb', () => trySnapsaveFb(oneUrl), 14000]);
     }
     if (ENABLE_SAVEFBS) {
-      strategies.push(['savefbs', () => trySaveFbs(oneUrl), 8000]);
+      strategies.push(['savefbs', () => trySaveFbs(oneUrl), 14000]);
     }
     if (ENABLE_FDOWNLOADER_NET) {
-      strategies.push(['fdownloader-net', () => tryFdownloaderNet(oneUrl), 8000]);
+      strategies.push(['fdownloader-net', () => tryFdownloaderNet(oneUrl), 14000]);
       // x2download.app / fbdownloader.online / fdownloader.io share the
       // ajaxSearch shape and ship under the same opt-out env var.
-      strategies.push(['x2download',      () => tryX2download(oneUrl),     10000]);
+      strategies.push(['x2download',      () => tryX2download(oneUrl),     14000]);
     }
   }
 
