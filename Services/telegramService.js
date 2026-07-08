@@ -115,7 +115,7 @@ const checkDuplicate = (key) => {
 
 async function sendRaw(text, { silent = false } = {}) {
   if (!ENABLED) {
-    console.log('[telegram] alerts disabled, would have sent:', text.slice(0, 100));
+    console.log('[telegram] alerts disabled, would have sent:\n' + text.slice(0, 600));
     return false;
   }
   if (!TOKEN || !CHAT_ID) {
@@ -210,12 +210,9 @@ const CODE_EMOJI = {
   TIMEOUT:         '⏳', DOWNLOAD_FAILED: '🚨',
 };
 
-const shortUrl = (u) => {
-  try {
-    const p = new URL(u);
-    return truncate(p.hostname.replace(/^www\./, '') + p.pathname, 70);
-  } catch (_) { return truncate(u, 70); }
-};
+// Full URL including scheme — admin needs to copy-paste it to reproduce.
+// Only strip tracking query params beyond a sane length cap.
+const fullUrl = (u) => truncate(String(u || ''), 250);
 
 const utcStamp = () => {
   const d = new Date();
@@ -241,7 +238,7 @@ async function notifyDownloadFailure(platform, url, error) {
 
   const lines = [
     `${pEmo} <b>${escapeHtml((platform || 'unknown').toUpperCase())}</b> — ${cEmo} <b>${escapeHtml(title)}</b>`,
-    `🔗 <code>${escapeHtml(shortUrl(url))}</code>`,
+    `🔗 <code>${escapeHtml(fullUrl(url))}</code>`,
   ];
   if (cls.userMessage) lines.push(`💬 ${escapeHtml(truncate(cls.userMessage, 150))}`);
   lines.push(`🧾 <code>${escapeHtml(truncate(sig, 350))}</code>`);

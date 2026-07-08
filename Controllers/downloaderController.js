@@ -289,7 +289,13 @@ const unescape = (s) =>
    .replace(/\\\//g, '/')
    .replace(/\\"/g, '"');
 
-async function scrapeInstaEmbed(igUrl) {
+async function scrapeInstaEmbed(igUrl, shouldStop = null) {
+  // shouldStop: optional callback checked before each of the up-to-18
+  // (6 URLs x 3 UAs) fetches. When the parallel race has already been won
+  // by another strategy (usually igdl in ~2s), continuing to hammer
+  // Instagram with 15+ pointless requests wastes upstream quota and risks
+  // IP rate-limiting. The winner sets the flag; we bail at the next
+  // iteration boundary.
   const match = igUrl.match(/instagram\.com\/(?:p|reel|tv)\/([A-Za-z0-9_-]+)/);
   if (!match) throw new Error('instaEmbed: cannot extract shortcode');
   const shortcode = match[1];
@@ -334,6 +340,10 @@ async function scrapeInstaEmbed(igUrl) {
   outerLoop:
   for (const embedUrl of embedUrls) {
     for (const ua of userAgents) {
+      if (shouldStop && shouldStop()) {
+        console.log('📸 instaEmbed: race already won — aborting remaining fetches');
+        throw new Error('embed: aborted (race already won)');
+      }
       try {
         const resp = await axios.get(embedUrl, {
           timeout: 15000,
@@ -815,6 +825,10 @@ const platformDownloaders = {
       return null;
     };
 
+    // Set to true the moment any strategy wins — checked by runEmbed's
+    // scraper between fetches so losers stop hammering Instagram.
+    let raceWon = false;
+
     // ── Strategy 1: igdl with internal auto-retry ────────────────────────
     // 2 attempts, 12s hard cap each. Attempt 2 only runs when attempt 1
     // failed, so the happy path is identical to before. Worst case is 24s,
@@ -843,7 +857,7 @@ const platformDownloaders = {
     // thumbnails-only responses are rejected so the user never gets a JPG
     // when they asked for a reel.
     const runEmbed = async () => {
-      const d = await downloadWithTimeout(() => scrapeInstaEmbed(url), 15000);
+      const d = await downloadWithTimeout(() => scrapeInstaEmbed(url, () => raceWon), 15000);
       const items = Array.isArray(d) && d.length > 0 ? d : null;
       if (!items) throw new Error('embed: no items');
       if (isReelUrl && !items.some(it => it && it.type === 'video')) {
@@ -877,6 +891,7 @@ const platformDownloaders = {
         v => {
           if (done) return;
           done = true;
+          raceWon = true;
           console.log(`📸 Instagram won by [${v.source}] in ${Date.now() - startedAt}ms (items=${v.items.length})`);
           resolve(v);
         },

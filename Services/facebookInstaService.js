@@ -1937,6 +1937,7 @@ async function tryFacebookCookieScrape(url, cookieOverride = null) {
 
 async function downloadFacebook(rawUrl, opts = {}) {
   const { fbCookie = null } = opts;
+  const startedAt = Date.now();
   console.log(`📘 Facebook: starting for ${rawUrl}`);
 
   const normalized = normalizeFacebookUrl(rawUrl);
@@ -2134,7 +2135,9 @@ async function downloadFacebook(rawUrl, opts = {}) {
 
   // Build per-strategy promises, preserving the optional 4th tuple element
   // ({ slow: true }) so the orchestrator can apply the early-exit rule.
-  const buildPromises = (errors) => strategies.map((entry) => {
+  const buildPromises = (errors, { excludeSlow = false } = {}) => strategies
+    .filter((entry) => !(excludeSlow && entry[3] && entry[3].slow))
+    .map((entry) => {
     const [name, fn, ms, meta] = entry;
     const promise = withTimeout(fn(), ms, name).then(
       result => {
@@ -2242,10 +2245,30 @@ async function downloadFacebook(rawUrl, opts = {}) {
       );
     }
 
-    console.warn('🔁 Facebook retry once with same candidates');
+    // ── Budget-aware retry ───────────────────────────────────────────────
+    // The controller kills the whole request at DOWNLOAD_TIMEOUT (45s). A
+    // full retry pass can take up to ~26s (yt-dlp wrapper), so blindly
+    // retrying after a slow first pass meant the controller timeout fired
+    // MID-RETRY and the user saw a generic "Download timeout" instead of
+    // the real classified error (production logs: pass1 ~26s + retry ~26s
+    // = 52s > 45s). Only retry when enough budget remains for the retry
+    // to actually finish; otherwise fail now with the real errors.
+    const FB_GLOBAL_BUDGET_MS = 45000; // keep in sync with controller DOWNLOAD_TIMEOUT
+    const RETRY_WORST_CASE_MS = 15000; // slowest mirror 14s + 1s slack (retry excludes slow yt-dlp)
+    const elapsed = Date.now() - startedAt;
+    if (elapsed + RETRY_WORST_CASE_MS > FB_GLOBAL_BUDGET_MS - 2000) {
+      console.warn(`⏱ Facebook: skipping retry — ${elapsed}ms elapsed, retry wouldn't fit in the ${FB_GLOBAL_BUDGET_MS}ms budget`);
+      const allErrors = dedupedErrors(errors).join(' | ');
+      throw new Error(`Facebook: all strategies failed — ${allErrors}`);
+    }
+
+    console.warn(`🔁 Facebook retry once with same candidates (${elapsed}ms elapsed, fits budget)`);
     const retryErrors = [];
     try {
-      return await firstSuccessFastFail(buildPromises(retryErrors), retryErrors, isPermanentError);
+      // Mirrors-only retry: yt-dlp already burned its own internal retries
+      // in pass 1, and at 26s it's what blew the budget. Excluding it caps
+      // the retry at ~14s (slowest mirror timeout).
+      return await firstSuccessFastFail(buildPromises(retryErrors, { excludeSlow: true }), retryErrors, isPermanentError);
     } catch (_) {
       const allErrors = dedupedErrors([...errors, ...retryErrors]).join(' | ');
       // Public Facebook content (share/v, share/r, fb.watch, /reel/, /watch/)
