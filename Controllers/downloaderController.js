@@ -399,6 +399,16 @@ async function scrapeInstaEmbed(igUrl, shouldStop = null) {
     throw new Error(`instaEmbed: all fetch attempts returned empty HTML for ${shortcode}`);
   }
 
+  // ── Age-gate detection ─────────────────────────────────────────────────
+  // 18+ restricted reels serve a gate page ("People under 18 can't see
+  // this content" / "account has set limits on who can see"). Every
+  // unauthenticated strategy fails on these — throwing the specific error
+  // here lets the classifier report AGE_RESTRICTED instead of a misleading
+  // TIMEOUT, and tells the user a sign-in is required rather than "retry".
+  if (/under 18 can['\u2019]?t see this content|has set limits on who can see|age[- ]?restricted/i.test(html)) {
+    throw new Error(`instaEmbed: content is age-restricted (18+) — Instagram requires a signed-in adult account for ${shortcode}`);
+  }
+
   // ── Method 1: full carousel (edge_sidecar_to_children JSON blob) ──────────
   const sidecarRe = /"edge_sidecar_to_children"\s*:\s*\{"edges"\s*:\s*(\[[\s\S]*?\])\}/;
   const sidecarM  = html.match(sidecarRe);
@@ -956,9 +966,69 @@ const platformDownloaders = {
       return { items, source: 'graphql' };
     };
 
+    // ── Strategy 4: cookie-authenticated media API ───────────────────────
+    // The ONLY path that works for 18+ age-gated reels (see the "People
+    // under 18 can't see this content" gate). Runs only when a session
+    // cookie exists — per-request from the app's sign-in flow, or the
+    // IG_SESSION_COOKIE env var (use a throwaway ADULT account; cookies
+    // expire in ~30-90 days). Uses IG's private media-info endpoint with
+    // the shortcode→pk conversion (IG's base64url alphabet).
+    const activeIgCookie = igCookie || process.env.IG_SESSION_COOKIE || '';
+    const runCookieApi = async () => {
+      if (!activeIgCookie) throw new Error('cookie-api: no IG session cookie configured');
+      const m = url.match(/instagram\.com\/(?:p|reel|reels|tv)\/([A-Za-z0-9_-]+)/);
+      if (!m) throw new Error('cookie-api: cannot extract shortcode');
+
+      const ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+      let pk = 0n;
+      for (const c of m[1]) {
+        const idx = ALPHABET.indexOf(c);
+        if (idx === -1) throw new Error('cookie-api: invalid shortcode character');
+        pk = pk * 64n + BigInt(idx);
+      }
+
+      const resp = await downloadWithTimeout(() => axios.get(
+        `https://i.instagram.com/api/v1/media/${pk.toString()}/info/`,
+        {
+          timeout: 12000,
+          validateStatus: () => true,
+          headers: {
+            'User-Agent':  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+            'X-IG-App-ID': '936619743392459',
+            Accept:        'application/json',
+            Cookie:        activeIgCookie,
+            Referer:       'https://www.instagram.com/',
+          },
+        }
+      ), 13000);
+
+      if (resp.status === 401 || resp.status === 403) {
+        throw new Error('cookie-api: IG cookie appears stale (auth rejected)');
+      }
+      const item = resp.data?.items?.[0];
+      if (!item) throw new Error(`cookie-api: no media item (status ${resp.status})`);
+
+      const items = [];
+      const push = (node) => {
+        const vid = node.video_versions?.[0]?.url;
+        const img = node.image_versions2?.candidates?.[0]?.url;
+        if (vid)      items.push({ url: vid, type: 'video', thumbnail: img || '' });
+        else if (img) items.push({ url: img, type: 'image', thumbnail: img });
+      };
+      if (Array.isArray(item.carousel_media) && item.carousel_media.length) {
+        item.carousel_media.forEach(push);
+      } else {
+        push(item);
+      }
+
+      if (!items.length) throw new Error('cookie-api: media item had no usable URLs');
+      return { items, source: 'cookie-api' };
+    };
+
     const strategies = [runIgdl()];
     strategies.push(runEmbed());
     strategies.push(runGraphql());
+    if (activeIgCookie) strategies.push(runCookieApi());
     if (ENABLE_SNAPSAVE_IG) strategies.push(runSnapsave());
 
     // ── First-success race ───────────────────────────────────────────────
