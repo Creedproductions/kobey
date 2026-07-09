@@ -1406,6 +1406,33 @@ const dataFormatters = {
   },
 
   twitter(data) {
+    // ── Photo tweets ─────────────────────────────────────────────────────
+    // Variants with image/* types come from the /photo/N support in
+    // twitterService (fxtwitter media.photos / vxtwitter image mediaURLs).
+    // Multi-photo tweets become mediaItems so the app renders them like an
+    // Instagram carousel. pbs.twimg.com serves images without referer
+    // checks, so no proxy wrap is needed.
+    if (Array.isArray(data) && data.length > 0) {
+      const isImage = (it) => String(it?.type || '').startsWith('image');
+      const photos = data.filter(isImage);
+      if (photos.length > 0 && photos.length === data.length) {
+        return {
+          title:      'Twitter Photo',
+          url:        photos[0].url,
+          thumbnail:  photos[0].url,
+          sizes:      ['Original'],
+          source:     'twitter',
+          type:       'image',
+          mediaItems: photos.map((p, i) => ({
+            url:       p.url,
+            type:      'image',
+            thumbnail: p.url,
+            index:     i,
+          })),
+        };
+      }
+    }
+
     if (data.data && (data.data.HD || data.data.SD)) {
       return {
         title:     'Twitter Video',

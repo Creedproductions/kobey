@@ -68,7 +68,24 @@ async function tryFxTwitter(tweetId) {
 
   const tweet = r.data.tweet || r.data;
   const videos = tweet?.media?.videos || [];
-  if (!videos.length) throw new Error('fxtwitter: no video media in tweet');
+
+  // Photo tweets: users paste /photo/N links constantly (production
+  // Telegram alerts showed these misclassified as NOT_FOUND). fxtwitter
+  // exposes them under media.photos — return them as image variants when
+  // the tweet has no video. `name=orig` requests the full-resolution
+  // original instead of the default sized-down variant.
+  if (!videos.length) {
+    const photos = tweet?.media?.photos || [];
+    if (photos.length) {
+      return photos.map((p, i) => ({
+        quality: p.width && p.height ? `${p.width}x${p.height}` : 'original',
+        type:    'image/jpeg',
+        url:     p.url + (p.url.includes('?') ? '&' : '?') + 'name=orig',
+        index:   i,
+      }));
+    }
+    throw new Error('fxtwitter: no video or photo media in tweet');
+  }
 
   // Sort by resolution desc — first one is highest quality.
   const sorted = [...videos].sort((a, b) =>
@@ -99,7 +116,23 @@ async function tryVxTwitter(tweetId) {
   const videos = list.filter(u =>
     typeof u === 'string' && /\.(mp4|m3u8)(\?|$)/i.test(u)
   );
-  if (!videos.length) throw new Error('vxtwitter: no mp4 mediaURLs');
+  if (!videos.length) {
+    // Photo-tweet fallback: mediaURLs carries pbs.twimg.com image links
+    // for photo tweets. Return them as image variants instead of failing.
+    const photos = list.filter(u =>
+      typeof u === 'string' &&
+      (/\.(jpg|jpeg|png|webp)(\?|$)/i.test(u) || u.includes('pbs.twimg.com/media/'))
+    );
+    if (photos.length) {
+      return photos.map((u, i) => ({
+        quality: 'original',
+        type:    'image/jpeg',
+        url:     u + (u.includes('?') ? '&' : '?') + 'name=orig',
+        index:   i,
+      }));
+    }
+    throw new Error('vxtwitter: no mp4 or image mediaURLs');
+  }
 
   return videos.map((u, i) => ({
     quality: i === 0 ? 'HD' : 'SD',
@@ -235,7 +268,7 @@ async function downloadTwmateData(rawUrl) {
   }
 
   throw new Error(
-    'Twitter download failed - All download methods failed - video may be ' +
+    'Twitter download failed - no video or photo media found - tweet may be ' +
     `private, deleted, or region-locked. Tried: ${errors.join(' | ')}`
   );
 }
