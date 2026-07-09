@@ -975,6 +975,59 @@ const platformDownloaders = {
       return { items, source: 'graphql' };
     };
 
+    // ── Strategy 3b: reel page JSON scrape (no rapidcdn, no graphql) ──────
+    // igdl (rapidcdn) is flaky and graphql often soft-blocks datacenter IPs
+    // (200 with null xdt_shortcode_media). This hits the reel page directly
+    // with a real browser fingerprint and mines the embedded media JSON —
+    // a different endpoint/fingerprint than graphql, so it frequently
+    // succeeds when graphql returns null. Looks for video_versions (modern)
+    // then video_url (legacy) in the page's inline JSON.
+    const runPageScrape = async () => {
+      const m = url.match(/instagram\.com\/(?:p|reel|reels|tv)\/([A-Za-z0-9_-]+)/);
+      if (!m) throw new Error('page-scrape: cannot extract shortcode');
+      const shortcode = m[1];
+
+      const resp = await downloadWithTimeout(() => axios.get(
+        `https://www.instagram.com/reel/${shortcode}/`,
+        {
+          timeout: 10000,
+          validateStatus: () => true,
+          headers: {
+            'User-Agent':      'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
+            'Accept':          'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Sec-Fetch-Dest':  'document',
+            'Sec-Fetch-Mode':  'navigate',
+            'Sec-Fetch-Site':  'none',
+            'Cache-Control':   'no-cache',
+          },
+        }
+      ), 11000);
+
+      const html = typeof resp.data === 'string' ? resp.data : '';
+      if (!html || html.length < 500) throw new Error(`page-scrape: empty HTML (status ${resp.status})`);
+
+      // Age gate check (same as embed)
+      if (/under 18 can['\u2019]?t see this content|has set limits on who can see/i.test(html)) {
+        throw new Error('page-scrape: content is age-restricted (18+)');
+      }
+
+      const unesc = (s) => s.replace(/\\u0026/gi, '&').replace(/\\\//g, '/').replace(/\\"/g, '"');
+      const items = [];
+      // Modern: video_versions array
+      const vv = html.match(/"video_versions":\s*\[\s*\{[^\]]*?"url":"([^"]+)"/);
+      if (vv) {
+        items.push({ url: unesc(vv[1]).replace(/&amp;/g, '&'), type: 'video', thumbnail: '' });
+      } else {
+        // Legacy: video_url key
+        const vu = html.match(/"video_url":"([^"]+)"/);
+        if (vu) items.push({ url: unesc(vu[1]).replace(/&amp;/g, '&'), type: 'video', thumbnail: '' });
+      }
+
+      if (!items.length) throw new Error('page-scrape: no video URL in page JSON');
+      return { items, source: 'page-scrape' };
+    };
+
     // ── Strategy 4: cookie-authenticated media API ───────────────────────
     // The ONLY path that works for 18+ age-gated reels (see the "People
     // under 18 can't see this content" gate). Runs only when a session
@@ -1037,6 +1090,7 @@ const platformDownloaders = {
     const strategies = [runIgdl()];
     strategies.push(runEmbed());
     strategies.push(runGraphql());
+    strategies.push(runPageScrape());
     if (activeIgCookie) strategies.push(runCookieApi());
     if (ENABLE_SNAPSAVE_IG) strategies.push(runSnapsave());
 
