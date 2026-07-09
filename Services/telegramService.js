@@ -221,6 +221,38 @@ const utcStamp = () => {
   return `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())} UTC · ${d.getUTCDate()}/${d.getUTCMonth() + 1}`;
 };
 
+// ── Deferred alerting for retryable failures ─────────────────────────────────
+//
+// A retryable failure (TIMEOUT, RATE_LIMITED, BOT_DETECTION) often resolves on
+// the very next request — igdl times out once, then succeeds. Firing an alert
+// on that first transient failure is noise: the user's download works. So for
+// retryable classes we HOLD the alert briefly; if the same platform+url
+// succeeds within the window, we cancel it. Only failures that DON'T recover
+// actually reach the phone. Non-retryable failures (NOT_FOUND, AGE_RESTRICTED…)
+// still alert immediately — those won't fix themselves.
+
+const RETRYABLE_HOLD_MS = 90 * 1000; // must exceed a typical user/app retry gap
+const pendingAlerts = new Map();     // key: `platform:url` → timeout handle
+
+function alertKey(platform, url) {
+  return `${platform}:${String(url || '').split('?')[0]}`; // ignore query noise
+}
+
+/**
+ * Call when a download SUCCEEDS. Cancels any pending (held) failure alert for
+ * the same platform+url so a transient first-attempt failure never reaches
+ * Telegram once the content actually downloads.
+ */
+function recordSuccess(platform, url) {
+  const key = alertKey(platform, url);
+  const handle = pendingAlerts.get(key);
+  if (handle) {
+    clearTimeout(handle.timer);
+    pendingAlerts.delete(key);
+    console.log(`🤫 Telegram: cancelled held alert for ${key} (download succeeded on retry)`);
+  }
+}
+
 /**
  * Convenience helper — alert when a platform downloader fails.
  *
@@ -245,13 +277,38 @@ async function notifyDownloadFailure(platform, url, error) {
   lines.push(`🧾 <code>${escapeHtml(truncate(sig, 350))}</code>`);
   lines.push(`⏱ ${escapeHtml(utcStamp())}`);
 
-  return notifyAdmin(lines.join('\n'), {
+  const send = () => notifyAdmin(lines.join('\n'), {
     tags:     ['failure', platform || 'unknown', cls.code],
     dedupKey: `fail:${platform}:${sig}`,
     // Expected/permanent failures (user pasted a deleted or private link)
     // don't need to buzz the phone — only genuinely broken things do.
     silent:   ['NOT_FOUND', 'PRIVATE_CONTENT', 'AGE_RESTRICTED', 'GEO_BLOCKED', 'DRM_PROTECTED', 'LIVE_ONLY'].includes(cls.code),
   });
+
+  // Retryable failures: hold the alert. If the same url succeeds within the
+  // window (recordSuccess cancels it), the user never sees a false alarm.
+  if (cls.retryable) {
+    const key = alertKey(platform, url);
+    const existing = pendingAlerts.get(key);
+    if (existing) clearTimeout(existing.timer); // collapse repeats into one held alert
+    const timer = setTimeout(() => {
+      pendingAlerts.delete(key);
+      send();
+    }, RETRYABLE_HOLD_MS);
+    timer.unref?.();
+    pendingAlerts.set(key, { timer });
+    console.log(`⏳ Telegram: holding ${cls.code} alert ${RETRYABLE_HOLD_MS / 1000}s for ${key} (will cancel if it succeeds)`);
+    if (pendingAlerts.size > 500) {
+      const oldest = pendingAlerts.keys().next().value;
+      const h = pendingAlerts.get(oldest);
+      if (h) clearTimeout(h.timer);
+      pendingAlerts.delete(oldest);
+    }
+    return false;
+  }
+
+  // Non-retryable: alert now.
+  return send();
 }
 
 /**
@@ -285,6 +342,7 @@ async function notifyInfo(message, extraTags = []) {
 module.exports = {
   notifyAdmin,
   notifyDownloadFailure,
+  recordSuccess,
   notifyStartup,
   notifyInfo,
 };

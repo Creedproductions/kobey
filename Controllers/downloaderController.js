@@ -2024,6 +2024,11 @@ const downloadMedia = async (req, res) => {
 
     console.log(`Download Media: Media successfully downloaded and formatted.`);
 
+    // Cancel any held (retryable) Telegram failure alert for this URL — a
+    // previous attempt may have timed out and scheduled an alert; the
+    // download working now means that was a false alarm.
+    try { telegram.recordSuccess(platform, url); } catch (_) {}
+
     // ── Filename sanitization ──────────────────────────────────────────────
     // Add a clean `filename` field derived from the title, so clients can use
     // it directly without re-implementing the same emoji/hashtag stripping.
