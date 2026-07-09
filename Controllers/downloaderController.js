@@ -419,6 +419,23 @@ async function scrapeInstaEmbed(igUrl, shouldStop = null) {
     }
   }
 
+  // ── Method 2a: video_versions JSON array (modern IG page JSON) ────────────
+  // Sponsored/ad reels and newer post pages embed media under
+  // "video_versions":[{"url":"...","width":...}] (the xdt API shape) rather
+  // than the legacy "video_url" key. This is the key that unlocks sponsored
+  // reels — their embed pages are stripped, but the full post page (the
+  // 400-900KB responses) still carries video_versions. First entry is the
+  // highest quality.
+  if (items.length === 0) {
+    const vvRe = /"video_versions"\s*:\s*\[\s*\{[^\]]*?"url"\s*:\s*"([^"]+)"/g;
+    const thumbM = html.match(/"display_url"\s*:\s*"([^"]+)"/) ||
+                   html.match(/"thumbnail_src"\s*:\s*"([^"]+)"/);
+    const thumb  = thumbM ? thumbM[1] : '';
+    let vv;
+    while ((vv = vvRe.exec(html)) !== null) addItem(vv[1], 'video', thumb);
+    if (items.length) console.log(`📸 instaEmbed: ${items.length} item(s) via video_versions`);
+  }
+
   // ── Method 2: video_url JSON key (single video / reel) ────────────────────
   if (items.length === 0) {
     const vidRe   = /"video_url"\s*:\s*"([^"]+)"/g;
@@ -880,8 +897,68 @@ const platformDownloaders = {
       return { items, source: 'snapsave' };
     };
 
+    // ── Strategy 3: Instagram GraphQL (IG's own API) ─────────────────────
+    // POST /api/graphql with the public doc_id resolves public posts and
+    // reels — INCLUDING sponsored/ad reels, whose embed pages are stripped
+    // to thumbnails and where igdl's upstream is flakiest. No cookie needed
+    // for public content; the X-IG-App-ID header is Instagram's own web
+    // app id. Independent of any third-party mirror.
+    const runGraphql = async () => {
+      const m = url.match(/instagram\.com\/(?:p|reel|reels|tv)\/([A-Za-z0-9_-]+)/);
+      if (!m) throw new Error('graphql: cannot extract shortcode');
+      const shortcode = m[1];
+
+      const resp = await downloadWithTimeout(() => axios.post(
+        'https://www.instagram.com/api/graphql',
+        new URLSearchParams({
+          variables: JSON.stringify({
+            shortcode,
+            fetch_tagged_user_count: null,
+            hoisted_comment_id: null,
+            hoisted_reply_id: null,
+          }),
+          doc_id: '8845758582119845',
+        }).toString(),
+        {
+          timeout: 12000,
+          validateStatus: () => true,
+          headers: {
+            'Content-Type':     'application/x-www-form-urlencoded',
+            'User-Agent':       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+            'X-IG-App-ID':      '936619743392459',
+            'X-FB-LSD':         'AVqbxe3J_YA',
+            'X-ASBD-ID':        '129477',
+            Origin:             'https://www.instagram.com',
+            Referer:            `https://www.instagram.com/reel/${shortcode}/`,
+          },
+        }
+      ), 13000);
+
+      const media = resp.data?.data?.xdt_shortcode_media;
+      if (!media) throw new Error(`graphql: no xdt_shortcode_media (status ${resp.status})`);
+
+      const items = [];
+      const push = (node) => {
+        if (node.is_video && node.video_url) {
+          items.push({ url: node.video_url, type: 'video', thumbnail: node.display_url || '' });
+        } else if (node.display_url) {
+          items.push({ url: node.display_url, type: 'image', thumbnail: node.display_url });
+        }
+      };
+      const edges = media.edge_sidecar_to_children?.edges;
+      if (Array.isArray(edges) && edges.length) edges.forEach(e => push(e.node || {}));
+      else push(media);
+
+      if (!items.length) throw new Error('graphql: media object had no usable URLs');
+      if (isReelUrl && !items.some(it => it.type === 'video')) {
+        throw new Error('graphql: reel URL but no video in media object');
+      }
+      return { items, source: 'graphql' };
+    };
+
     const strategies = [runIgdl()];
     strategies.push(runEmbed());
+    strategies.push(runGraphql());
     if (ENABLE_SNAPSAVE_IG) strategies.push(runSnapsave());
 
     // ── First-success race ───────────────────────────────────────────────

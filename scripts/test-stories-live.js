@@ -126,6 +126,34 @@ async function pipelineRuns(urls) {
   await mirrorHealth();
   await storiesigApi();
   await pipelineRuns(process.argv.slice(2));
+  await igGraphqlCheck();
   console.log(`\n═══ RESULT: ${pass} passed, ${fail} failed, ${warn} warnings ═══`);
   process.exit(fail ? 1 : 0);
 })();
+
+// ── IG GraphQL strategy check (run: TEST_IG_SHORTCODE=<code> node ...) ──────
+// Appended 2026-07: validates the /api/graphql doc_id path against a real
+// public reel. Pass a shortcode of a known-public reel (ideally a sponsored
+// one) via TEST_IG_SHORTCODE.
+async function igGraphqlCheck() {
+  const shortcode = process.env.TEST_IG_SHORTCODE;
+  if (!shortcode) { console.log('\n── IG GraphQL check skipped (set TEST_IG_SHORTCODE) ──'); return; }
+  console.log(`\n── IG GraphQL check for ${shortcode} ──`);
+  try {
+    const r = await axios.post(
+      'https://www.instagram.com/api/graphql',
+      new URLSearchParams({
+        variables: JSON.stringify({ shortcode, fetch_tagged_user_count: null, hoisted_comment_id: null, hoisted_reply_id: null }),
+        doc_id: '8845758582119845',
+      }).toString(),
+      { timeout: 12000, validateStatus: () => true, headers: {
+        'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': UA,
+        'X-IG-App-ID': '936619743392459', 'X-FB-LSD': 'AVqbxe3J_YA', 'X-ASBD-ID': '129477',
+        Origin: 'https://www.instagram.com', Referer: `https://www.instagram.com/reel/${shortcode}/`,
+      }},
+    );
+    const media = r.data?.data?.xdt_shortcode_media;
+    if (media?.video_url || media?.edge_sidecar_to_children) ok(`graphql returned media (video_url=${!!media.video_url})`);
+    else bad(`graphql shape unexpected (status ${r.status}, keys: ${JSON.stringify(Object.keys(r.data || {}))})`);
+  } catch (e) { bad(`graphql check failed: ${e.message}`); }
+}
