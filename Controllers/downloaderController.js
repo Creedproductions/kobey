@@ -863,14 +863,23 @@ const platformDownloaders = {
     let raceWon = false;
 
     // ── Strategy 1: igdl with internal auto-retry ────────────────────────
-    // 2 attempts, 12s hard cap each. Attempt 2 only runs when attempt 1
-    // failed, so the happy path is identical to before. Worst case is 24s,
-    // still well inside the 45s global budget.
+    // Up to 3 attempts, 8s hard cap each (24s worst case, inside the 45s
+    // budget). igdl's upstream (rapidcdn) frequently times out on the FIRST
+    // call but succeeds within 1-2s on a retry — production logs showed a
+    // reel fail the whole race at 12s, then succeed via igdl in 1.5s on the
+    // user's manual retry. Tighter per-attempt caps + a third attempt turn
+    // that manual retry into an automatic one: 8s → fail fast → retry →
+    // usually wins in ~1-2s, so the user gets the video on the first try.
     const runIgdl = async () => {
       let lastErr = null;
-      for (let attempt = 1; attempt <= 2; attempt++) {
+      // rapidcdn (igdl's upstream) answers in ~1-2s when alive or hangs
+      // otherwise, so a real success is never near the cap. Staggered caps
+      // (6/7/8s) fail a dead attempt fast and move to the retry that
+      // usually wins — total worst case 21s, inside the 45s budget.
+      const caps = [6000, 7000, 8000];
+      for (let attempt = 1; attempt <= 3; attempt++) {
         try {
-          const d = await downloadWithTimeout(() => igdl(url), 12000);
+          const d = await downloadWithTimeout(() => igdl(url), caps[attempt - 1]);
           const items = extractItems(d);
           if (items) {
             if (attempt > 1) console.log(`📸 igdl succeeded on retry #${attempt}`);
@@ -882,7 +891,7 @@ const platformDownloaders = {
           console.warn(`⚠️ igdl attempt ${attempt} failed:`, lastErr.message);
         }
       }
-      throw new Error(`igdl: ${lastErr?.message || 'failed'}`);
+      throw new Error(`igdl: ${lastErr?.message || 'failed'} (after 3 attempts)`);
     };
 
     // ── Strategy 2: embed scrape — now for reels too ─────────────────────
