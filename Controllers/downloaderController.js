@@ -1359,6 +1359,14 @@ const dataFormatters = {
       thumbnail: first.thumbnail,
       sizes:     ['Best Quality'],
       source:    'instagram',
+      // Explicit count + flag so the client never double-saves. The app's
+      // download logic should treat a result as a carousel ONLY when
+      // mediaItems is present AND has >1 entry; for a single video it must
+      // save the top-level `url` exactly once and ignore mediaItems. We
+      // therefore only attach mediaItems for true multi-item carousels,
+      // and always send mediaCount so the client has an unambiguous signal.
+      mediaCount: mediaItems.length,
+      isSingle:   mediaItems.length === 1,
       ...(mediaItems.length > 1 && { mediaItems }),
     };
   },
