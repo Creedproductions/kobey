@@ -1,5 +1,10 @@
 require('dotenv').config();
 
+// Decode base64 cookie env vars (IG_SESSION_COOKIE_B64 / FB_SESSION_COOKIE_B64)
+// into the raw IG_SESSION_COOKIE / FB_SESSION_COOKIE the scrapers read. Safe
+// to call before any service loads — it only touches process.env.
+require('./Services/cookieLoader').loadCookies();
+
 const express = require('express');
 const cors = require('cors');
 const downloaderRoutes = require('./Routes/downloaderRoutes');
