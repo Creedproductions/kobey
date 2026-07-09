@@ -40,6 +40,10 @@ const MAX_CAROUSEL_ITEMS = 20; // safety cap after dedup
 // preview→download sequence, without serving stale CDN URLs.
 const inflightFetches = new Map();
 const COALESCE_TTL_MS = 60 * 1000;
+// Successful results stay cached this long so repeat downloads of the same
+// URL skip the race (avoids re-hitting rate-limited scraper upstreams like
+// rapidcdn). 5 min is safely under the CDN signature lifetime (~hours).
+const RESULT_CACHE_TTL = 5 * 60 * 1000;
 
 /**
  * Sanitize a string into a filesystem-safe filename. Mirrors the proxy
@@ -890,6 +894,10 @@ const platformDownloaders = {
           lastErr = e instanceof Error ? e : new Error(String(e));
           console.warn(`⚠️ igdl attempt ${attempt} failed:`, lastErr.message);
         }
+        // Brief backoff before retry: rapidcdn rate-limits by burst, so an
+        // immediate retry often hits the same throttle. A short pause lets
+        // it clear. Skip after the last attempt.
+        if (attempt < 3) await new Promise(r => setTimeout(r, 500));
       }
       throw new Error(`igdl: ${lastErr?.message || 'failed'} (after 3 attempts)`);
     };
@@ -1912,18 +1920,23 @@ const downloadMedia = async (req, res) => {
     // widget rebuild, preview + download). Production logs showed every
     // share/r URL running the FULL strategy race twice concurrently — double
     // the mirror load, double the yt-dlp spawns, for byte-identical results.
-    // Concurrent duplicates now share one fetch: the first request does the
-    // work, the rest await the same promise. Successful results linger for
-    // COALESCE_TTL_MS to also absorb quick sequential retries; failures are
-    // evicted immediately so a real retry gets a fresh attempt.
+    // Concurrent duplicates share one fetch; SUCCESSFUL results are then
+    // cached as resolved data for RESULT_CACHE_TTL so repeat downloads of
+    // the same reel within that window skip the race entirely — critical
+    // because igdl's upstream (rapidcdn) rate-limits by IP, so re-racing
+    // the same URL repeatedly is what causes the intermittent timeouts.
+    // Failures are NOT cached and are evicted immediately so a retry gets
+    // a fresh attempt.
     const needsReq = ['youtube', 'facebook', 'tiktok', 'instagram'];
     const coalesceKey = `${platform}:${processedUrl}`;
     let entry = inflightFetches.get(coalesceKey);
-    if (entry && Date.now() - entry.ts < COALESCE_TTL_MS) {
-      console.log(`♻️ Coalescing duplicate request [${platform}]: ${processedUrl.slice(0, 80)}`);
+    if (entry && (entry.resolved || Date.now() - entry.ts < COALESCE_TTL_MS)) {
+      const kind = entry.resolved ? 'cached result' : 'in-flight';
+      console.log(`♻️ Coalescing duplicate request [${platform}] (${kind}): ${processedUrl.slice(0, 80)}`);
     } else {
       entry = {
         ts: Date.now(),
+        resolved: false,
         promise: (needsReq.includes(platform)
           ? downloader(processedUrl, req)
           : downloader(processedUrl)
@@ -1934,16 +1947,18 @@ const downloadMedia = async (req, res) => {
         }),
       };
       inflightFetches.set(coalesceKey, entry);
-      // Bound the map
       if (inflightFetches.size > 300) {
         const oldest = inflightFetches.keys().next().value;
         inflightFetches.delete(oldest);
       }
-      // Evict successful entries after TTL
+      // On success, mark resolved so later duplicates reuse the data, and
+      // schedule eviction after the result-cache TTL (CDN signatures in the
+      // proxy URLs stay valid well beyond this window).
       entry.promise.then(() => {
+        entry.resolved = true;
         setTimeout(() => {
           if (inflightFetches.get(coalesceKey) === entry) inflightFetches.delete(coalesceKey);
-        }, COALESCE_TTL_MS).unref?.();
+        }, RESULT_CACHE_TTL).unref?.();
       }, () => {});
     }
     const data = await entry.promise;
