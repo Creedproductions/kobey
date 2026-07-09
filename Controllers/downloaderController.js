@@ -1525,6 +1525,34 @@ const dataFormatters = {
     const serverBase = req ? getServerBaseUrl(req) : '';
     const title      = data.title || 'Facebook Video';
 
+    // ── Photo posts (from tryFbPhotoPost) ────────────────────────────────
+    // Shape: { photos: [url,...], thumbnail, title }. Multi-photo posts
+    // become mediaItems so the app renders a carousel; single photo is a
+    // plain image response. Proxy-wrap each so fbcdn referer checks pass.
+    if (Array.isArray(data.photos) && data.photos.length > 0) {
+      const wrap = (u) => serverBase
+        ? wrapForProxy(u, 'facebook', title, serverBase)
+        : u;
+      const photos = data.photos.map((u, i) => ({
+        url:       wrap(u),
+        type:      'image',
+        thumbnail: wrap(u),
+        index:     i,
+      }));
+      console.log(`📘 FB formatter: photo post — ${photos.length} image(s)`);
+      return {
+        title,
+        url:        photos[0].url,
+        thumbnail:  photos[0].thumbnail,
+        sizes:      ['Original'],
+        source:     'facebook',
+        type:       'image',
+        mediaCount: photos.length,
+        isSingle:   photos.length === 1,
+        ...(photos.length > 1 && { mediaItems: photos }),
+      };
+    }
+
     // lookaside.fbsbx.com/lookaside/crawler/media/?media_id=… is FB's open-
     // graph crawler endpoint — it returns HTML to non-bot UAs, not video
     // bytes. If a strategy upstream returned one (the bot-UA path can leak

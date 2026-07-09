@@ -1935,6 +1935,79 @@ async function tryFacebookCookieScrape(url, cookieOverride = null) {
 
 // ─── Facebook entry ──────────────────────────────────────────────────────────
 
+/**
+ * Facebook photo-post scraper for /share/p/ URLs (single photo and
+ * multi-photo carousels). These posts have NO video, so the video
+ * strategies all fail with "no video metadata" — the exact signature in
+ * the timeout alerts. We mine the page HTML for image URLs instead.
+ *
+ * Returns { photos: [url,...], thumbnail, title } or throws.
+ */
+async function tryFbPhotoPost(rawUrl, shareHtml = '') {
+  const errors = [];
+
+  const extractPhotos = (html) => {
+    if (!html || html.length < 200) return [];
+    const urls = new Set();
+
+    // 1. High-res images in the page's inline JSON. FB uses several keys.
+    //    image / uri / photo_image, and the scontent image CDN pattern.
+    const jsonPatterns = [
+      /"image"\s*:\s*\{\s*"uri"\s*:\s*"([^"]+)"/g,
+      /"photo_image"\s*:\s*\{\s*"uri"\s*:\s*"([^"]+)"/g,
+      /"uri"\s*:\s*"(https:\\\/\\\/scontent[^"]+?\.(?:jpg|jpeg|png|webp)[^"]*)"/g,
+    ];
+    for (const re of jsonPatterns) {
+      let m;
+      while ((m = re.exec(html)) !== null) {
+        const u = unescapeJsString(m[1]).replace(/&amp;/g, '&');
+        // Skip tiny/profile/emoji images; keep real photo CDN URLs.
+        if (u.startsWith('http') &&
+            (u.includes('fbcdn.net') || u.includes('scontent')) &&
+            !u.includes('s32x32') && !u.includes('s60x60') &&
+            !u.includes('/emoji.php') && !/\/(p|s)\d{2,3}x\d{2,3}\//.test(u)) {
+          urls.add(u);
+        }
+      }
+    }
+
+    // 2. og:image fallback (single photo — always present in <head>)
+    if (urls.size === 0) {
+      const $ = cheerio.load(html);
+      const og = $('meta[property="og:image"]').attr('content');
+      if (og && og.startsWith('http')) urls.add(og.replace(/&amp;/g, '&'));
+    }
+
+    return [...urls];
+  };
+
+  // Prefer the already-fetched share page HTML; fall back to a fresh fetch.
+  let html = shareHtml || '';
+  if (!html || html.length < 500) {
+    try {
+      const resp = await axios.get(rawUrl, {
+        timeout: 12000,
+        maxRedirects: 5,
+        validateStatus: () => true,
+        headers: { ...fbHeaders(), 'User-Agent': UA_MOBILE },
+      });
+      html = typeof resp.data === 'string' ? resp.data : '';
+    } catch (e) {
+      errors.push(`fetch: ${e.message}`);
+    }
+  }
+
+  const photos = extractPhotos(html);
+  if (!photos.length) {
+    throw new Error(`fb-photo: no image URLs found${errors.length ? ' — ' + errors.join(' | ') : ''}`);
+  }
+
+  const $ = cheerio.load(html || '');
+  const title = $('meta[property="og:title"]').attr('content') || 'Facebook Photo';
+  console.log(`📘 FB photo post: ${photos.length} image(s)`);
+  return { photos, thumbnail: photos[0], title };
+}
+
 async function downloadFacebook(rawUrl, opts = {}) {
   const { fbCookie = null } = opts;
   const startedAt = Date.now();
@@ -1984,6 +2057,29 @@ async function downloadFacebook(rawUrl, opts = {}) {
       'or no valid session cookie was supplied. Sign in to Facebook in the ' +
       'app to enable Story downloads.'
     );
+  }
+
+  // ── Photo posts (/share/p/) ──────────────────────────────────────────
+  // share/p/ is Facebook's photo-post format. These have no video, so the
+  // video strategies below all fail with "no video metadata" and the
+  // request times out hunting for a video that doesn't exist (the exact
+  // signature in the timeout alerts). Try photo extraction first; only
+  // fall through to video strategies if it's actually a video mis-shared
+  // as /p/ (rare, but possible).
+  if (/\/share\/p\//i.test(rawUrl) || /facebook\.com\/photo/i.test(rawUrl)) {
+    try {
+      const photoResult = await withTimeout(
+        tryFbPhotoPost(rawUrl, shareHtml),
+        14000,
+        'fb-photo',
+      );
+      if (photoResult && photoResult.photos?.length) {
+        console.log(`📘 ✅ FB photo post — ${photoResult.photos.length} image(s)`);
+        return photoResult; // { photos, thumbnail, title }
+      }
+    } catch (e) {
+      console.warn(`📘 FB photo path failed, trying video strategies: ${e.message}`);
+    }
   }
 
   // If a non-story resolved to login, do NOT stop immediately. Public-mirror
