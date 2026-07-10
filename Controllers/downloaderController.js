@@ -1133,7 +1133,11 @@ const platformDownloaders = {
 
     console.log(`📸 Instagram scrapers: ${winner.source}=${winner.items.length}`);
     console.log(`📸 Using ${winner.source}`);
-    return { _items: winner.items, _source: winner.source, _req: req };
+    // Stash the source URL so the formatter can recognise single-video
+    // (/reel/, /reels/, /tv/) posts and collapse any video+cover or
+    // multi-rendition duplicates down to one item (prevents the client
+    // saving a reel twice).
+    return { _items: winner.items, _source: winner.source, _req: req, _sourceUrl: url };
   },
 
   // ─── TIKTOK ───────────────────────────────────────────────────────────────
@@ -1423,7 +1427,25 @@ const dataFormatters = {
 
     if (mediaItems.length === 0) throw new Error('Instagram returned no usable media items');
 
-    const first = mediaItems[0];
+    // ── Single-video collapse (fixes reels saving twice) ───────────────────
+    // A /reel/, /reels/ or /tv/ URL is, by definition, ONE video. Some
+    // scraper paths return that video PLUS its cover image, or two video
+    // renditions whose CDN hashes differ enough to survive dedup — either
+    // way the client sees mediaItems.length === 2, enters carousel mode and
+    // saves the reel twice. For these single-video URLs, keep only the best
+    // video item so mediaCount is always 1 and the client saves it once.
+    const srcUrl = String(data._sourceUrl || '');
+    const isSingleVideoUrl = /instagram\.com\/(?:reel|reels|tv)\//i.test(srcUrl);
+    let finalItems = mediaItems;
+    if (isSingleVideoUrl && mediaItems.length > 1) {
+      const videos = mediaItems.filter((it) => it.type === 'video');
+      if (videos.length >= 1) {
+        finalItems = [{ ...videos[0], index: 0 }];
+        console.log(`📸 Reel/TV single-video collapse: ${mediaItems.length} → 1`);
+      }
+    }
+
+    const first = finalItems[0];
     return {
       title:     postTitle,
       url:       first.url,
@@ -1436,9 +1458,9 @@ const dataFormatters = {
       // save the top-level `url` exactly once and ignore mediaItems. We
       // therefore only attach mediaItems for true multi-item carousels,
       // and always send mediaCount so the client has an unambiguous signal.
-      mediaCount: mediaItems.length,
-      isSingle:   mediaItems.length === 1,
-      ...(mediaItems.length > 1 && { mediaItems }),
+      mediaCount: finalItems.length,
+      isSingle:   finalItems.length === 1,
+      ...(finalItems.length > 1 && { mediaItems: finalItems }),
     };
   },
 
