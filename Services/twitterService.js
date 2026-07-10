@@ -195,7 +195,7 @@ async function trySyndication(tweetId) {
 // as a 4th-position fallback because fxTwitter/vxTwitter are still faster
 // (200-500ms) when they work — yt-dlp typically takes 4-8s.
 
-async function tryYtDlpTwitter(rawUrl) {
+async function tryYtDlpTwitter(rawUrl, cookieFile = null) {
   if (!ytdlp.isAvailable) throw new Error('yt-dlp: binary not installed');
   // Normalise twitter.com → x.com so yt-dlp picks the right extractor.
   // Both work, but x.com is the active canonical and gets fewer redirects.
@@ -203,6 +203,9 @@ async function tryYtDlpTwitter(rawUrl) {
   const info = await ytdlp.run(normalised, {
     platform: 'twitter',
     timeoutMs: 22000,
+    // 2026-Q3 — user's own session cookies unlock NSFW / protected /
+    // age-restricted tweets that the public syndication API blocks.
+    cookieFile: cookieFile || undefined,
   });
   const variants = ytdlp.formatTwitterVariants(info);
   if (!variants.length) throw new Error('yt-dlp: no mp4 variants returned');
@@ -230,8 +233,10 @@ async function tryBtchDownloader(rawUrl) {
 
 // ─── Public entry ───────────────────────────────────────────────────────────
 
-async function downloadTwmateData(rawUrl) {
+async function downloadTwmateData(rawUrl, opts = {}) {
   console.log(`🐦 Twitter: starting for ${rawUrl}`);
+  // 2026-Q3 — per-request user cookies file (NSFW/protected tweets).
+  const cookieFile = opts.cookieFile || null;
 
   const tweetId = extractTweetId(rawUrl);
   if (!tweetId) {
@@ -245,8 +250,10 @@ async function downloadTwmateData(rawUrl) {
     ['syndication',  () => trySyndication(tweetId)],
     // yt-dlp runs before btch because btch wraps the same mirrors we
     // already tried and offers no additional reach; yt-dlp opens up a
-    // fresh extraction path (its own syndication-shaped request).
-    ['yt-dlp',       () => tryYtDlpTwitter(rawUrl)],
+    // fresh extraction path (its own syndication-shaped request) — and
+    // with the user's cookies it reaches NSFW / protected tweets the
+    // public mirrors 404 on.
+    ['yt-dlp',       () => tryYtDlpTwitter(rawUrl, cookieFile)],
     ['btch',         () => tryBtchDownloader(rawUrl)],
   ];
 

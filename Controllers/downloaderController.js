@@ -16,6 +16,44 @@ const { downloadTikTok } = require('../Services/tiktokService');
 const { downloadGeneric } = require('../Services/genericService');
 const telegram = require('../Services/telegramService');
 const { classify: classifyError } = require('../Services/errorClassifier');
+const requestCookies = require('../Services/requestCookies');
+
+/**
+ * 2026-Q3 — Run [fn] with a per-request yt-dlp cookies file built from the
+ * user's own session cookies (req.body.cookies), cleaning it up afterwards.
+ *
+ * [platformOrUrl] selects which cookie header to use and which domain to
+ * stamp into the Netscape file — pass a platform key ('youtube') for the
+ * dedicated services, or the raw URL for the generic path so the cookie
+ * domain is inferred from the host. [fn] receives the temp-file path (or
+ * null when no usable cookie was supplied) and should thread it into the
+ * yt-dlp call.
+ */
+async function withCookieFile(req, platformOrUrl, fn) {
+  const cookies = req?.body?.cookies;
+  // For platform keys, look the header up directly; for a URL, fall back to
+  // matching by inferred domain against every supplied cookie entry.
+  let header = requestCookies.headerFor(cookies, platformOrUrl);
+  if (!header && cookies && typeof cookies === 'object' &&
+      /^https?:\/\//i.test(String(platformOrUrl))) {
+    const wantDomain = requestCookies.inferDomain(platformOrUrl);
+    for (const [k, v] of Object.entries(cookies)) {
+      if (typeof v === 'string' && v.trim() &&
+          requestCookies.inferDomain(k) === wantDomain) {
+        header = v.trim();
+        break;
+      }
+    }
+  }
+  const cookieFile = header
+    ? requestCookies.writeCookieFile(header, platformOrUrl)
+    : null;
+  try {
+    return await fn(cookieFile);
+  } finally {
+    requestCookies.cleanup(cookieFile);
+  }
+}
 
 const bitly = new BitlyClient(config.BITLY_ACCESS_TOKEN);
 
@@ -1178,13 +1216,13 @@ const platformDownloaders = {
     return data;
   },
 
-  async twitter(url) {
-    // The Twitter service now wraps a 4-strategy chain (fxTwitter →
-    // vxTwitter → syndication → btch). It already throws a clean
-    // "Invalid Twitter URL" or "All download methods failed" error when
-    // every strategy fails — no need for a separate primary/fallback split
-    // at this layer.
-    const data = await downloadWithTimeout(() => downloadTwmateData(url));
+  async twitter(url, req) {
+    // The Twitter service wraps a 5-strategy chain (fxTwitter → vxTwitter
+    // → syndication → yt-dlp → btch). 2026-Q3: pass the user's own X
+    // session cookies to the yt-dlp strategy so NSFW / protected /
+    // age-restricted tweets (which the public mirrors 404 on) resolve.
+    const data = await withCookieFile(req, 'twitter', (cf) =>
+      downloadWithTimeout(() => downloadTwmateData(url, { cookieFile: cf })));
     if (!data || (!Array.isArray(data) && !data.data && !data.url)) {
       throw new Error('Twitter download failed - no usable data returned');
     }
@@ -1201,7 +1239,10 @@ const platformDownloaders = {
       // (75-90s) made users wait 1-2 minutes for a known failure to bubble
       // up; many users gave up before seeing the error.
       const timeout = 22000;
-      const data    = await downloadWithTimeout(() => fetchYouTubeData(url), timeout);
+      // 2026-Q3 — thread the user's own YouTube cookies (age-restricted /
+      // members-only / bot-wall) into the yt-dlp strategy.
+      const data    = await withCookieFile(req, 'youtube', (cf) =>
+        downloadWithTimeout(() => fetchYouTubeData(url, { cookieFile: cf }), timeout));
       if (!data || !data.title) throw new Error('YouTube service returned invalid data');
       console.log('YouTube: Successfully fetched data, formats count:', data.formats?.length || 0);
       if (data.formats) {
@@ -1297,8 +1338,12 @@ const platformDownloaders = {
   // plus ~1700 others yt-dlp supports out of the box. Slower than the
   // dedicated services (yt-dlp spawn + extraction) but covers the long
   // tail of "abrupt" platforms users share.
-  async generic(url) {
-    return downloadWithTimeout(() => downloadGeneric(url), 55000);
+  async generic(url, req) {
+    // 2026-Q3 — pass any matching user session cookie (keyed by the URL's
+    // domain) so age-restricted / private links on the ~1700 generic
+    // sites resolve when the user is signed in.
+    return withCookieFile(req, url, (cf) =>
+      downloadWithTimeout(() => downloadGeneric(url, { cookieFile: cf }), 55000));
   },
 
   // ─── NAMED yt-dlp HANDLERS ───────────────────────────────────────────────
@@ -1977,12 +2022,28 @@ const downloadMedia = async (req, res) => {
     // the same URL repeatedly is what causes the intermittent timeouts.
     // Failures are NOT cached and are evicted immediately so a retry gets
     // a fresh attempt.
-    const needsReq = ['youtube', 'facebook', 'tiktok', 'instagram'];
+    const needsReq = ['youtube', 'facebook', 'tiktok', 'instagram', 'twitter', 'generic'];
     const coalesceKey = `${platform}:${processedUrl}`;
-    let entry = inflightFetches.get(coalesceKey);
+    // 2026-Q3 — Authenticated requests (user supplied session cookies)
+    // MUST bypass the shared in-flight/result cache: the response can
+    // contain members-only / age-gated / private formats specific to
+    // that user, and conversely an anonymous cache hit would hand a
+    // signed-in user the public (blocked) result. Only anonymous
+    // requests are eligible for coalescing.
+    const hasUserCookies =
+      req?.body?.cookies && typeof req.body.cookies === 'object' &&
+      Object.keys(req.body.cookies).length > 0;
+    let entry = hasUserCookies ? null : inflightFetches.get(coalesceKey);
     if (entry && (entry.resolved || Date.now() - entry.ts < COALESCE_TTL_MS)) {
       const kind = entry.resolved ? 'cached result' : 'in-flight';
       console.log(`♻️ Coalescing duplicate request [${platform}] (${kind}): ${processedUrl.slice(0, 80)}`);
+    } else if (hasUserCookies) {
+      // Direct, un-cached path for authenticated requests.
+      console.log(`🔑 Authenticated request [${platform}] — bypassing cache`);
+      const data = await (needsReq.includes(platform)
+        ? downloader(processedUrl, req)
+        : downloader(processedUrl));
+      entry = { promise: Promise.resolve(data), resolved: true, ts: Date.now() };
     } else {
       entry = {
         ts: Date.now(),
@@ -2244,8 +2305,17 @@ const getErrorSuggestions = (errorMessage, platform) => {
   const suggestions = [];
   if (platform === 'instagram') {
     suggestions.push('Ensure the post is public and not from a private account');
-    suggestions.push('Stories and highlights are not supported — only posts and reels');
+    // 2026-Q3 — Stories ARE supported now (public profiles via the story
+    // pipeline; private ones when signed in). The old "not supported"
+    // line was stale and steered users away from a working feature.
+    suggestions.push('For private posts, stories, or age-restricted (18+) content, sign in first so your session is used');
     suggestions.push('Some sponsored/ad posts cannot be downloaded');
+  }
+  if (platform === 'youtube') {
+    suggestions.push('For age-restricted or members-only videos, sign in to YouTube first so your session is used');
+  }
+  if (platform === 'twitter') {
+    suggestions.push('For NSFW / protected / age-restricted tweets, sign in to X first so your session is used');
   }
   if (platform === 'threads') {
     suggestions.push('Ensure the Threads post contains video content (not just images or text)');

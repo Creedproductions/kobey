@@ -350,26 +350,30 @@ async function tryCobalt(url) {
   };
 }
 
-async function tryYtDlp(url) {
+async function tryYtDlp(url, reqCookieFile = null) {
   return new Promise((resolve, reject) => {
     const bin = resolveYtDlpPath();
 
     // ── Cookies: the ONLY reliable fix for YouTube's datacenter-IP bot
-    // detection ("Sign in to confirm you're not a bot"). When
-    // YT_DLP_COOKIES_FILE points at a Netscape-format cookies.txt exported
-    // from a logged-in (throwaway!) Google account, yt-dlp authenticates
-    // and the bot wall disappears. Without it, this strategy — and every
-    // other one — fails on blocked IPs. Set the env var on Koyeb and mount
-    // or bake the file into the image. Cookies expire (~weeks-months);
-    // refresh when bot errors return.
+    // detection ("Sign in to confirm you're not a bot") AND for
+    // age-restricted videos. yt-dlp authenticates from a Netscape-format
+    // cookies.txt and the bot/age wall disappears.
+    //
+    // 2026-Q3 — Two sources, per-request wins:
+    //   1. reqCookieFile — the SIGNED-IN USER's own cookies, captured by
+    //      the app from its in-app browser and passed on this request.
+    //      This is what lets a user download their own age-restricted /
+    //      members-only videos without any operator account.
+    //   2. YT_DLP_COOKIES_FILE — operator-wide throwaway account, the
+    //      fallback that keeps public downloads working on blocked IPs.
     const cookieArgs = [];
-    const cookieFile = process.env.YT_DLP_COOKIES_FILE;
+    const cookieFile = reqCookieFile || process.env.YT_DLP_COOKIES_FILE;
     if (cookieFile) {
       try {
         fs.accessSync(cookieFile, fs.constants.R_OK);
         cookieArgs.push('--cookies', cookieFile);
       } catch (_) {
-        console.warn(`[yt] YT_DLP_COOKIES_FILE set but unreadable: ${cookieFile}`);
+        console.warn(`[yt] cookies file set but unreadable: ${cookieFile}`);
       }
     }
 
@@ -506,11 +510,16 @@ function ytCacheSet(videoId, data) {
   _ytCache.set(videoId, { at: Date.now(), data });
 }
 
-async function fetchYouTubeData(url) {
+async function fetchYouTubeData(url, opts = {}) {
   const videoId = extractVideoId(url);
   if (!videoId) throw new Error('Could not extract YouTube video ID');
+  // 2026-Q3 — per-request user cookies (age-restricted / members-only).
+  const reqCookieFile = opts.cookieFile || null;
 
-  const cached = ytCacheGet(videoId);
+  // A per-request cookie means user-specific auth, so a shared cache hit
+  // could serve another (or the public) session's formats. Only trust the
+  // cache for anonymous requests.
+  const cached = reqCookieFile ? null : ytCacheGet(videoId);
   if (cached) {
     console.log(`YouTube: cache hit for ${videoId}`);
     return finalise(cached, url, videoId);
@@ -539,7 +548,7 @@ async function fetchYouTubeData(url) {
     wrap('innertube', withDeadline('innertube', tryInnertube(videoId), 10000)),
     ytdl                && wrap('ytdl-core', withDeadline('ytdl-core', tryYtdlCore(normUrl),  12000)),
     COBALT_API_URL      && wrap('cobalt',    withDeadline('cobalt',    tryCobalt(normUrl),    10000)),
-    ytDlpReady          && wrap('yt-dlp',    withDeadline('yt-dlp',    tryYtDlp(normUrl),     18000)),
+    ytDlpReady          && wrap('yt-dlp',    withDeadline('yt-dlp',    tryYtDlp(normUrl, reqCookieFile), 18000)),
   ].filter(Boolean);
 
   console.log(
@@ -554,7 +563,9 @@ async function fetchYouTubeData(url) {
   }
 
   const data = await firstSuccess(strategies);
-  ytCacheSet(videoId, data);
+  // Don't cache user-authenticated results — they may contain
+  // members-only / age-gated formats specific to that session.
+  if (!reqCookieFile) ytCacheSet(videoId, data);
   return finalise(data, url, videoId);
 }
 

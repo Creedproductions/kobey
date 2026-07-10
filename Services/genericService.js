@@ -15,11 +15,13 @@ const ytdlp = require('./ytDlpRunner');
 // Thin shim around the shared yt-dlp runner so legacy callers in this file
 // keep their existing signature. All the heavy lifting (binary resolution,
 // platform-aware flags, stderr surfacing) is centralised in ytDlpRunner.js.
-function runYtDlp(url, extraArgs = []) {
+function runYtDlp(url, extraArgs = [], cookieFile = null) {
   return ytdlp.run(url, {
     platform: 'generic',
     timeoutMs: 50000,
     extraArgs,
+    // 2026-Q3 — per-request user cookies (age-restricted / private).
+    cookieFile: cookieFile || undefined,
   });
 }
 
@@ -86,12 +88,17 @@ function normaliseFormats(info) {
 
 const { isAgeRestricted } = require('./errorClassifier');
 
-async function downloadGeneric(url) {
+async function downloadGeneric(url, opts = {}) {
   console.log(`🌐 Generic: extracting ${url}`);
+  // 2026-Q3 — Optional per-request cookies file (user's own session),
+  // built by the controller from req.body.cookies. Threaded into every
+  // yt-dlp invocation below so age-restricted / private links the user
+  // is entitled to actually resolve.
+  const cookieFile = opts.cookieFile || null;
 
   let info;
   try {
-    info = await runYtDlp(url);
+    info = await runYtDlp(url, [], cookieFile);
   } catch (e) {
     // ── Age-gate recovery ────────────────────────────────────────────────
     // YouTube (and some embeds) age-gate videos behind "Sign in to confirm
@@ -105,7 +112,7 @@ async function downloadGeneric(url) {
       try {
         info = await runYtDlp(url, [
           '--extractor-args', 'youtube:player_client=web_embedded,tv_embedded,mediaconnect',
-        ]);
+        ], cookieFile);
         console.log('🌐 Generic: ✅ age-gate bypassed via embedded client');
       } catch (e2) {
         console.warn(`🌐 Generic: embedded-client retry also failed: ${String(e2.message).slice(0, 120)}`);
@@ -126,7 +133,7 @@ async function downloadGeneric(url) {
   if (!formats.length) {
     console.log('🌐 Generic: 0 formats from default selector → retrying with permissive -f');
     try {
-      info = await runYtDlp(url, ['-f', 'b*/bv*+ba/b']);
+      info = await runYtDlp(url, ['-f', 'b*/bv*+ba/b'], cookieFile);
       formats = normaliseFormats(info);
     } catch (_) { /* fall through to the clean error below */ }
   }

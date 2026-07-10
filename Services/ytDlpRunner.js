@@ -185,10 +185,18 @@ function run(url, opts = {}) {
     const extraArgs  = Array.isArray(opts.extraArgs) ? opts.extraArgs : [];
 
     // Optional cookies file. Some platforms (IG stories, NSFW tweets,
-    // private FB content) only work with a valid session cookie. The
-    // operator sets this once via env; if absent we skip and rely on the
-    // public extraction paths.
-    const cookiePath = String(process.env.YT_DLP_COOKIES_FILE || '').trim();
+    // private FB content, YouTube age-gate / bot-wall) only work with a
+    // valid session cookie.
+    //
+    // 2026-Q3 — Per-request cookies take precedence. When the caller
+    // passes opts.cookieFile (a Netscape cookies.txt built from the
+    // user's OWN session by Services/requestCookies), we use it instead
+    // of the operator-wide YT_DLP_COOKIES_FILE env. That lets a
+    // signed-in user download their own age-restricted / private media
+    // without the operator baking a shared account into the server.
+    const cookiePath = String(
+      opts.cookieFile || process.env.YT_DLP_COOKIES_FILE || '',
+    ).trim();
     const cookieArgs = cookiePath ? ['--cookies', cookiePath] : [];
 
     const args = [
