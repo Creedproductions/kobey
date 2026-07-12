@@ -286,13 +286,17 @@ async function tryTtdl(url) {
 // We DON'T put it first because it's slower (5–10s) than tikwm (1–2s) on
 // the happy path. Used as the third-line fallback after tikwm and ssstik.
 
-async function tryYtDlpTikTok(url) {
+async function tryYtDlpTikTok(url, opts = {}) {
   if (!ytdlp.isAvailable) {
     throw new Error('yt-dlp: binary not installed');
   }
+  const { cookieFile = null } = opts;
   const info = await ytdlp.run(url, {
     platform: 'tiktok',
     timeoutMs: 20000,
+    // User's TikTok session (Netscape cookies.txt). yt-dlp's TikTok extractor
+    // needs it to reach Stories / private reposts — without it those 404.
+    cookieFile,
   });
   const out = ytdlp.formatTikTokInfo(info);
   if ((!out.video || out.video.length === 0) &&
@@ -438,7 +442,12 @@ function storyToVideoUrl(url) {
 
 // ─── Orchestrator ────────────────────────────────────────────────────────────
 
-async function downloadTikTok(rawUrl) {
+async function downloadTikTok(rawUrl, opts = {}) {
+  // cookieFile (Netscape cookies.txt from the user's TikTok session) is only
+  // consumed by the yt-dlp strategy — the HTTP mirror scrapers ignore the
+  // extra arg. This is what lets logged-in users' Stories/private posts
+  // resolve instead of hitting STORY_ERROR.
+  const { cookieFile = null } = opts;
   // Stage 1 — bail early on live streams with a useful message
   const unsupported = detectUnsupported(rawUrl);
   if (unsupported) throw new Error(unsupported);
@@ -472,7 +481,7 @@ async function downloadTikTok(rawUrl) {
   for (const s of strategies) {
     try {
       console.log(`🎵 TikTok: trying ${s.name}…`);
-      const data = await s.fn(url);
+      const data = await s.fn(url, { cookieFile });
       const ok = (data.video && data.video.length > 0) ||
                  (data.images && data.images.length > 0);
       if (ok) {
@@ -487,9 +496,19 @@ async function downloadTikTok(rawUrl) {
   }
 
   if (isStory) {
-    // The video-ID gamble didn't pay off — this is a genuine ephemeral
-    // story. Give the story-specific explanation, not the generic one.
-    console.warn(`🎵 TikTok: story rewrite failed all strategies — genuine ephemeral story`);
+    // No session was supplied → the user isn't signed into TikTok, and a
+    // login-gated story needs their cookies. Use a strict "requires login"
+    // phrase so the controller maps this to LOGIN_REQUIRED → the app shows
+    // the guided sign-in flow (which then captures the TikTok session and
+    // retries). Without a session there is nothing more we can do here.
+    if (!cookieFile) {
+      console.warn('🎵 TikTok: story failed with no session — requires login');
+      throw new Error(
+        'TikTok Story requires login — sign in to download this story.');
+    }
+    // A session WAS supplied but every strategy still failed → this is a
+    // genuinely ephemeral / already-expired story, not an auth problem.
+    console.warn('🎵 TikTok: story rewrite failed all strategies (with session) — genuine ephemeral story');
     throw new Error(STORY_ERROR);
   }
   throw new Error(`TikTok: all strategies failed — ${errors.join(' | ')}`);

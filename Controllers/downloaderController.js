@@ -1186,7 +1186,13 @@ const platformDownloaders = {
   // in the proxy. TikTok CDN URLs are IP/region-bound and reject direct client
   // requests — the server has to fetch them and stream to the app.
   async tiktok(url, req) {
-    const data = await downloadWithTimeout(() => downloadTikTok(url), 35000);
+    // Thread the user's TikTok session (if signed in) to the scraper chain so
+    // Stories / private reposts / login-gated posts resolve via yt-dlp. This
+    // was the ONLY platform handler that dropped cookies — so every TikTok
+    // Story hit STORY_ERROR even for logged-in users. Mirrors the twitter
+    // handler; DOMAIN_FOR_PLATFORM.tiktok already exists in requestCookies.
+    const data = await withCookieFile(req, 'tiktok', (cf) =>
+      downloadWithTimeout(() => downloadTikTok(url, { cookieFile: cf }), 35000));
     data._req = req;
     return data;
   },
@@ -1206,8 +1212,14 @@ const platformDownloaders = {
     const data = normaliseFacebookData(raw);
     data._req  = req;
     const hasUrl =
-      (Array.isArray(data?.data)  && data.data.some(v  => v?.url)) ||
-      (Array.isArray(data?.media) && data.media.some(v => v?.url)) ||
+      (Array.isArray(data?.data)   && data.data.some(v  => v?.url)) ||
+      (Array.isArray(data?.media)  && data.media.some(v => v?.url)) ||
+      // Photo posts arrive as { photos: [url,…] } from tryFbPhotoPost and are
+      // turned into a (multi-image) carousel by dataFormatters.facebook. Without
+      // this branch the guard threw before the formatter ever ran, so EVERY FB
+      // photo/carousel download failed even though the extractor + formatter
+      // were fully implemented.
+      (Array.isArray(data?.photos) && data.photos.length > 0) ||
       data?.url || data?.sd || data?.hd;
     if (!hasUrl) {
       console.error('📘 Facebook: no URL in normalised data:', JSON.stringify(data).slice(0, 300));
@@ -1480,14 +1492,26 @@ const dataFormatters = {
     // saves the reel twice. For these single-video URLs, keep only the best
     // video item so mediaCount is always 1 and the client saves it once.
     const srcUrl = String(data._sourceUrl || '');
-    const isSingleVideoUrl = /instagram\.com\/(?:reel|reels|tv)\//i.test(srcUrl);
+    const isReelUrl = /instagram\.com\/(?:reel|reels|tv)\//i.test(srcUrl);
+    const isPostUrl = /instagram\.com\/p\//i.test(srcUrl);
+    const videos = mediaItems.filter((it) => it.type === 'video');
     let finalItems = mediaItems;
-    if (isSingleVideoUrl && mediaItems.length > 1) {
-      const videos = mediaItems.filter((it) => it.type === 'video');
-      if (videos.length >= 1) {
-        finalItems = [{ ...videos[0], index: 0 }];
-        console.log(`📸 Reel/TV single-video collapse: ${mediaItems.length} → 1`);
-      }
+    if (isReelUrl && mediaItems.length > 1 && videos.length >= 1) {
+      // Reels / IGTV are ALWAYS a single video — any extra item is a cover or
+      // duplicate rendition. Keep just the best video.
+      finalItems = [{ ...videos[0], index: 0 }];
+      console.log(`📸 Reel/TV single-video collapse: ${mediaItems.length} → 1`);
+    } else if (isPostUrl && mediaItems.length === 2 && videos.length === 1) {
+      // A /p/ post is USUALLY a carousel, but a SINGLE-video /p/ post commonly
+      // leaks [video, cover-image] — exactly 2 items, exactly one video (any
+      // duplicate video renditions were already merged by
+      // deduplicateByBestQuality above). The client renders that as a 2-item
+      // carousel and saves the video TWICE — the reported IG "saves twice"
+      // bug, which only hit /p/ because this collapse previously matched
+      // reel/reels/tv only. Collapse ONLY this exact shape; genuine carousels
+      // (3+ items, all-photo, or multi-video) are left untouched.
+      finalItems = [{ ...videos[0], index: 0 }];
+      console.log('📸 /p/ single-video (video+cover) collapse: 2 → 1');
     }
 
     const first = finalItems[0];
@@ -2253,10 +2277,15 @@ const downloadMedia = async (req, res) => {
       (failedPlatform === 'instagram' && isPublicInstagramUrl) ||
       (failedPlatform === 'twitter'   && isPublicTwitterUrl);
 
+    // TikTok is included so a login-gated Story ("requires login" phrase from
+    // tiktokService, thrown only when the user supplied NO session) routes the
+    // app into the guided sign-in flow. Regular public TikTok videos fail with
+    // "all strategies failed" (no login-wall phrase), so they never hit this.
     if (looksLikeLoginWall && !urlIsPublic &&
         (failedPlatform === 'facebook' ||
          failedPlatform === 'instagram' ||
-         failedPlatform === 'twitter')) {
+         failedPlatform === 'twitter'  ||
+         failedPlatform === 'tiktok')) {
       return res.status(401).json({
         success:   false,
         code:      'LOGIN_REQUIRED',

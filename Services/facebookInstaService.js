@@ -2051,11 +2051,16 @@ async function downloadFacebook(rawUrl, opts = {}) {
       console.warn(`📘 FB Story public path failed: ${e.message}`);
     }
 
+    // "requires login" is a strict phrase the controller maps to
+    // LOGIN_REQUIRED, which routes the app into the guided sign-in flow. FB
+    // stories realistically need the browser-side authenticated download
+    // (FB binds sessions to the sign-in IP, so replayed cookies fail here, and
+    // modern story pages don't expose hd_src/sd_src to scrape) — the sign-in
+    // flow hands off to the in-app browser where the live session works.
     throw new Error(
-      'Facebook Story not accessible. Public-profile stories can sometimes ' +
-      'be downloaded, but this one was either private, restricted, expired, ' +
-      'or no valid session cookie was supplied. Sign in to Facebook in the ' +
-      'app to enable Story downloads.'
+      'Facebook Story requires login. Public-profile stories can sometimes ' +
+      'be downloaded, but this one was private, restricted, expired, or ' +
+      'needs a signed-in session. Sign in to Facebook to download stories.'
     );
   }
 
@@ -2329,6 +2334,10 @@ async function downloadFacebook(rawUrl, opts = {}) {
   };
 
   const errors = [];
+  // Outer wrapper: if every VIDEO strategy throws, the catch below gets one
+  // last-resort shot at photo extraction (for album/permalink photo posts that
+  // aren't the canonical /share/p/ or /photo forms handled at the top).
+  try {
   try {
     return await firstSuccessFastFail(buildPromises(errors), errors, isPermanentError);
   } catch (_) {
@@ -2393,6 +2402,35 @@ async function downloadFacebook(rawUrl, opts = {}) {
             : ' | hint: this URL may require a signed-in session');
       throw new Error(`Facebook: all strategies failed — ${allErrors}${cookieHint}`);
     }
+  }
+  } catch (videoErr) {
+    // ── GAP-2 photo fallback ────────────────────────────────────────────
+    // Album / permalink photo posts that AREN'T the canonical /share/p/ or
+    // /photo forms (already tried at the top of this function) reach here only
+    // after every VIDEO strategy failed. Try photo extraction as a last resort
+    // — but accept ONLY a MULTI-image result. A genuinely-failed video post
+    // yields at most its single og:image thumbnail, so the >1 gate stops us
+    // hijacking a dead video into a bogus single "image" while still recovering
+    // real photo carousels (the Facebook-carousel request).
+    const alreadyTriedPhoto =
+      /\/share\/p\//i.test(rawUrl) || /facebook\.com\/photo/i.test(rawUrl);
+    if (!alreadyTriedPhoto) {
+      try {
+        const photoResult = await withTimeout(
+          tryFbPhotoPost(rawUrl, shareHtml),
+          12000,
+          'fb-photo-fallback',
+        );
+        if (photoResult && Array.isArray(photoResult.photos) &&
+            photoResult.photos.length > 1) {
+          console.log(`📘 ✅ FB photo fallback recovered ${photoResult.photos.length} images`);
+          return photoResult;
+        }
+      } catch (e) {
+        console.warn(`📘 FB photo fallback failed: ${e.message}`);
+      }
+    }
+    throw videoErr;
   }
 }
 
