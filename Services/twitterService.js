@@ -93,7 +93,9 @@ async function tryFxTwitter(tweetId) {
   );
   return sorted.map(v => ({
     quality: v.width && v.height ? `${v.width}x${v.height}` : (v.format || 'HD'),
-    type:    v.format ? `video/${String(v.format).replace('mp4', 'mp4')}` : 'video/mp4',
+    // fxtwitter's `format` is already a full mime ("video/mp4"); a bare "mp4"
+    // gets the video/ prefix. (Previously produced "video/video/mp4".)
+    type:    v.format ? (String(v.format).includes('/') ? String(v.format) : `video/${v.format}`) : 'video/mp4',
     url:     v.url,
   }));
 }
@@ -231,6 +233,54 @@ async function tryBtchDownloader(rawUrl) {
   return out;
 }
 
+// ─── Media liveness probe ─────────────────────────────────────────────────
+//
+// fxTwitter / vxTwitter happily return full metadata (title, thumbnail, and a
+// video.twimg.com URL) even after the underlying media FILE has been taken
+// down — a DMCA copyright claim or a deleted tweet. The CDN then answers the
+// actual byte request with 403 `{"error_code":2,"error_response":"Dmcaed"}`
+// (or 404/410). To the app that looks exactly like the reported bug: the
+// fetch "succeeds" and formats a filename, then the download silently fails.
+//
+// A single tiny Range request here catches that up front so we can throw a
+// clean, classifiable "no longer available" error (→ NOT_FOUND) instead of a
+// false success.
+//
+// SAFE-BY-DEFAULT: only an explicit DMCA 403 / 404 / 410 on the media file is
+// treated as dead. Timeouts, 5xx, other 403s, or any 2xx are treated as LIVE
+// so a transient CDN blip can never block a video that actually works — the
+// real proxied download then gets its own attempt. Returns:
+//   'dmca' | 'deleted'  → confirmed gone (short-circuit)
+//   null                → live or inconclusive (proceed)
+async function probeMediaRemoved(mediaUrl) {
+  try {
+    const r = await axios.get(mediaUrl, {
+      timeout: 6000,
+      headers: {
+        'User-Agent': UA_DESKTOP,
+        Referer:      'https://twitter.com/',
+        Range:        'bytes=0-1',
+      },
+      responseType:     'text',
+      maxContentLength: 8192,   // Range caps this at 2 bytes; guards a no-Range CDN
+      validateStatus:   () => true,
+    });
+    if (r.status === 404 || r.status === 410) return 'deleted';
+    if (r.status === 403) {
+      const body = typeof r.data === 'string' ? r.data.toLowerCase() : '';
+      // Twitter's CDN tags DMCA takedowns with this exact shape. Only treat a
+      // 403 as dead when it carries that signature — a bare 403 could be a
+      // transient/geo hiccup, so we let those through to the real download.
+      if (body.includes('dmca') || body.includes('error_code') || body.includes('error_response')) {
+        return 'dmca';
+      }
+    }
+    return null;
+  } catch (_) {
+    return null; // network blip → assume live, let the real download try
+  }
+}
+
 // ─── Public entry ───────────────────────────────────────────────────────────
 
 async function downloadTwmateData(rawUrl, opts = {}) {
@@ -264,10 +314,35 @@ async function downloadTwmateData(rawUrl, opts = {}) {
       const variants = await fn();
       if (Array.isArray(variants) && variants.length > 0) {
         console.log(`🐦 ✅ ${name} returned ${variants.length} variant(s)`);
+
+        // Verify the media file actually exists before declaring success.
+        // Photo variants (pbs.twimg.com) are skipped — the probe targets the
+        // video CDN. A confirmed DMCA/deleted result short-circuits the whole
+        // chain: no other mirror can resurrect a file the CDN has pulled, and
+        // this spares a pointless (slow) yt-dlp fallback.
+        const top = variants[0];
+        const isVideo = /^video/i.test(String(top?.type || '')) ||
+                        /video\.twimg\.com|\.mp4(\?|$)/i.test(String(top?.url || ''));
+        if (isVideo && top?.url) {
+          const dead = await probeMediaRemoved(top.url);
+          if (dead) {
+            console.warn(`🐦 ⚠ ${name} URL not downloadable (${dead}) — media removed`);
+            throw Object.assign(
+              new Error(dead === 'dmca'
+                ? 'This X/Twitter video was removed due to a copyright (DMCA) claim and is no longer available'
+                : 'This X/Twitter video is no longer available — the tweet was deleted or removed'),
+              { _removed: true },
+            );
+          }
+        }
+
         return variants;
       }
       errors.push(`${name}: empty result`);
     } catch (e) {
+      // A confirmed removal is terminal — stop trying mirrors and surface the
+      // clean message straight to the classifier (→ NOT_FOUND).
+      if (e && e._removed) throw e;
       const msg = e.message || String(e);
       console.warn(`🐦 ❌ ${name}: ${msg.slice(0, 120)}`);
       errors.push(`${name}: ${msg}`);

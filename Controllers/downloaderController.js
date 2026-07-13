@@ -1750,7 +1750,30 @@ const dataFormatters = {
     throw new Error('Facebook formatter: no usable URL found in data');
   },
 
-  twitter(data) {
+  twitter(data, req) {
+    // ── Proxy wrap for video.twimg.com ───────────────────────────────────
+    // Twitter was, until this change, the ONLY video platform that handed
+    // the app a raw CDN URL instead of a /api/proxy-download URL. Direct
+    // client downloads of video.twimg.com bypass three things every working
+    // platform (Instagram/TikTok/Facebook) gets from the proxy:
+    //   1. Content-Disposition → the file saves as a clean "*.mp4" name.
+    //   2. 206→200 normalization → Dio's download() truncates/retries on an
+    //      unexpected 206 (see proxyController); the proxy flattens it.
+    //   3. Server-side Referer/UA → keeps working if X tightens CDN access,
+    //      and surfaces a removed/DMCA'd file as a clean server error the
+    //      classifier can turn into a "no longer available" message instead
+    //      of a raw failure on the phone.
+    // The proxy already ships a `twitter` header profile, so this just wires
+    // it up. req is null only for direct unit-test calls → URLs pass through.
+    const serverBase = req ? getServerBaseUrl(req) : '';
+    const proxyVideo = (cdnUrl) => {
+      if (!cdnUrl) return cdnUrl;
+      const s = String(cdnUrl);
+      if (s.includes('/api/proxy-download'))   return s;
+      if (!serverBase || !/^https?:\/\//i.test(s)) return s;
+      return wrapForProxy(s, 'twitter', 'Twitter Video', serverBase);
+    };
+
     // ── Photo tweets ─────────────────────────────────────────────────────
     // Variants with image/* types come from the /photo/N support in
     // twitterService (fxtwitter media.photos / vxtwitter image mediaURLs).
@@ -1781,7 +1804,7 @@ const dataFormatters = {
     if (data.data && (data.data.HD || data.data.SD)) {
       return {
         title:     'Twitter Video',
-        url:       data.data.HD || data.data.SD || '',
+        url:       proxyVideo(data.data.HD || data.data.SD || ''),
         thumbnail: PLACEHOLDER_THUMBNAIL,
         sizes:     data.data.HD ? ['HD', 'SD'] : ['SD'],
         source:    'twitter',
@@ -1794,19 +1817,19 @@ const dataFormatters = {
                           videoArray[0];
       return {
         title:     'Twitter Video',
-        url:       bestQuality.url || '',
+        url:       proxyVideo(bestQuality.url || ''),
         thumbnail: PLACEHOLDER_THUMBNAIL,
         sizes:     videoArray.map(item => item.quality),
         source:    'twitter',
       };
     }
     if (Array.isArray(data) && data.length > 0) {
-      const bestQuality = data.find(item => item.quality.includes('1280x720')) ||
-                          data.find(item => item.quality.includes('640x360'))  ||
+      const bestQuality = data.find(item => item.quality?.includes('1280x720')) ||
+                          data.find(item => item.quality?.includes('640x360'))  ||
                           data[0];
       return {
         title:     'Twitter Video',
-        url:       bestQuality.url || '',
+        url:       proxyVideo(bestQuality.url || ''),
         thumbnail: PLACEHOLDER_THUMBNAIL,
         sizes:     data.map(item => item.quality),
         source:    'twitter',
@@ -1997,7 +2020,9 @@ const formatData = async (platform, data, req) => {
       source:    platform,
     };
   }
-  if (platform === 'youtube') return formatter(data, req);
+  // youtube + twitter formatters need `req` to build /api/proxy-download URLs
+  // (the others read it from data._req stashed by their downloader handler).
+  if (platform === 'youtube' || platform === 'twitter') return formatter(data, req);
   return formatter(data);
 };
 
