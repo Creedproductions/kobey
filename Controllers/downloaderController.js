@@ -1133,10 +1133,48 @@ const platformDownloaders = {
       return { items, source: 'cookie-api' };
     };
 
+    // ── Strategy: yt-dlp (delayed fallback) ──────────────────────────────
+    // yt-dlp is the one MAINTAINED, non-flaky extractor already on the box.
+    // From a datacenter IP the direct-IG strategies (embed/graphql/page-
+    // scrape) get stripped/blocked, leaving igdl (rapidcdn) as the SOLE
+    // worker — and igdl is flaky (times out, needs 2-3 retries, sometimes
+    // fails outright; see the "igdl attempt N failed" prod logs). yt-dlp is
+    // an INDEPENDENT path: for signed-in users (cookie present) it reliably
+    // pulls the reel; anonymously its extractor still recovers many public
+    // reels. To avoid spawning a subprocess on every request it waits a few
+    // seconds and bails if a fast strategy already won — so the common
+    // igdl-wins-in-1s path never pays for it, and only genuinely struggling
+    // requests (igdl hung) spend a yt-dlp spawn.
+    const runYtDlp = async () => {
+      const ytdlp = require('../Services/ytDlpRunner');
+      if (!ytdlp.isAvailable) throw new Error('yt-dlp: not installed');
+      await new Promise(r => setTimeout(r, 4000));
+      if (raceWon) throw new Error('yt-dlp: skipped (fast path already won)');
+
+      // Per-request cookie file from the user's OWN IG session, if supplied —
+      // this is what makes private / followers-only / age-gated reels work.
+      let cookieFile = null;
+      if (activeIgCookie) {
+        try { cookieFile = requestCookies.writeCookieFile(activeIgCookie, 'instagram'); } catch (_) {}
+      }
+      try {
+        const info  = await ytdlp.run(url, { platform: 'instagram', timeoutMs: 20000, cookieFile });
+        const items = ytdlp.formatInstagramItems(info);
+        if (!items.length) throw new Error('yt-dlp: no media in info');
+        if (isReelUrl && !items.some(it => it.type === 'video')) {
+          throw new Error('yt-dlp: reel URL but only non-video items');
+        }
+        return { items, source: 'yt-dlp' };
+      } finally {
+        if (cookieFile) requestCookies.cleanup(cookieFile);
+      }
+    };
+
     const strategies = [runIgdl()];
     strategies.push(runEmbed());
     strategies.push(runGraphql());
     strategies.push(runPageScrape());
+    strategies.push(runYtDlp());
     if (activeIgCookie) strategies.push(runCookieApi());
     if (ENABLE_SNAPSAVE_IG) strategies.push(runSnapsave());
 
