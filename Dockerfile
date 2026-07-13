@@ -68,8 +68,13 @@ RUN mkdir -p /tmp/yt-dlp && \
 # ========================================
 RUN echo '#!/bin/bash\n\
 echo "🔄 Updating yt-dlp..."\n\
-/opt/yt/bin/pip install --no-cache-dir -U yt-dlp\n\
-echo "✅ yt-dlp updated to: $(yt-dlp --version)"\n\
+if /opt/yt/bin/pip install --no-cache-dir -U yt-dlp; then\n\
+  echo "✅ yt-dlp updated to: $(/opt/yt/bin/yt-dlp --version)"\n\
+else\n\
+  echo "⚠️  yt-dlp update failed — keeping $(/opt/yt/bin/yt-dlp --version)"\n\
+fi\n\
+# Never let a failed/offline update block the server from booting.\n\
+exit 0\n\
 ' > /usr/local/bin/yt-dlp-update.sh && \
     chmod +x /usr/local/bin/yt-dlp-update.sh
 
@@ -101,12 +106,17 @@ RUN mkdir -p /tmp/yt-dlp/cache && \
 # ========================================
 # SETUP NON-ROOT USER
 # ========================================
+# NOTE: /opt/yt (the yt-dlp venv) is chowned to appuser too. It's root-owned
+# from the build stage, but the boot-time self-update (yt-dlp-update.sh) runs
+# as appuser — without this it fails with "Permission denied: /opt/yt/bin/
+# yt-dlp" and silently keeps the stale build-time version.
 RUN useradd -m -u 1001 -s /bin/bash appuser && \
     chown -R appuser:appuser /app && \
     chown -R appuser:appuser /tmp/yt-dlp && \
     chown -R appuser:appuser /tmp/yt-merge && \
     chown -R appuser:appuser /app/config && \
-    chown -R appuser:appuser /app/logs
+    chown -R appuser:appuser /app/logs && \
+    chown -R appuser:appuser /opt/yt
 
 # ========================================
 # SWITCH TO NON-ROOT USER
