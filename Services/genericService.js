@@ -142,9 +142,26 @@ async function downloadGeneric(url, opts = {}) {
     throw new Error('Generic: no usable formats extracted');
   }
 
-  // Pick the highest-quality muxed format as the default download URL.
-  const muxed = formats.filter(f => !f.isAudioOnly && !f.isVideoOnly);
-  const def = muxed[muxed.length - 1] || formats[formats.length - 1];
+  // Pick the default download URL. Preference order:
+  //   1. highest muxed PROGRESSIVE format (a direct file the client can save)
+  //   2. highest muxed format of any kind
+  //   3. highest video-only format (better a silent video than an m4a
+  //      masquerading as one)
+  //   4. whatever is left
+  // The old code fell straight from "muxed" to formats[last] — and since
+  // audio-only formats sort LAST, any DASH-only site (reddit et al) got an
+  // audio track as its "video" default. Manifest URLs (.m3u8/.mpd) are
+  // deprioritised because download clients save them as playlist text, not
+  // media.
+  const isManifest = (f) => /\.(m3u8|mpd)(\?|$)/i.test(f.url || '');
+  const muxed       = formats.filter(f => !f.isAudioOnly && !f.isVideoOnly);
+  const progressive = muxed.filter(f => !isManifest(f));
+  const videoOnly   = formats.filter(f => f.isVideoOnly && !isManifest(f));
+  const def =
+    progressive[progressive.length - 1] ||
+    muxed[muxed.length - 1]             ||
+    videoOnly[videoOnly.length - 1]     ||
+    formats[formats.length - 1];
 
   const extractor = info.extractor_key || info.extractor || 'generic';
 

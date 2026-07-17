@@ -14,6 +14,7 @@ const { downloadTwmateData } = require('../Services/twitterService');
 const { fetchYouTubeData } = require('../Services/youtubeService');
 const { downloadTikTok } = require('../Services/tiktokService');
 const { downloadGeneric } = require('../Services/genericService');
+const { downloadReddit } = require('../Services/redditService');
 const telegram = require('../Services/telegramService');
 const { classify: classifyError } = require('../Services/errorClassifier');
 const requestCookies = require('../Services/requestCookies');
@@ -916,10 +917,13 @@ const platformDownloaders = {
       let lastErr = null;
       // rapidcdn (igdl's upstream) answers in ~1-2s when alive or hangs
       // otherwise, so a real success is never near the cap. Staggered caps
-      // (6/7/8s) fail a dead attempt fast and move to the retry that
-      // usually wins — total worst case 21s, inside the 45s budget.
-      const caps = [6000, 7000, 8000];
-      for (let attempt = 1; attempt <= 3; attempt++) {
+      // (6/7/8/9s) fail a dead attempt fast and move to the retry that
+      // usually wins — total worst case ~31.5s, inside the 45s budget.
+      // Production logs regularly show attempts 1-2 timing out and the
+      // NEXT attempt winning in ~1-2s, so a 4th attempt converts a slice
+      // of total failures into wins.
+      const caps = [6000, 7000, 8000, 9000];
+      for (let attempt = 1; attempt <= caps.length; attempt++) {
         try {
           const d = await downloadWithTimeout(() => igdl(url), caps[attempt - 1]);
           const items = extractItems(d);
@@ -935,9 +939,9 @@ const platformDownloaders = {
         // Brief backoff before retry: rapidcdn rate-limits by burst, so an
         // immediate retry often hits the same throttle. A short pause lets
         // it clear. Skip after the last attempt.
-        if (attempt < 3) await new Promise(r => setTimeout(r, 500));
+        if (attempt < caps.length) await new Promise(r => setTimeout(r, 500));
       }
-      throw new Error(`igdl: ${lastErr?.message || 'failed'} (after 3 attempts)`);
+      throw new Error(`igdl: ${lastErr?.message || 'failed'} (after ${caps.length} attempts)`);
     };
 
     // ── Strategy 2: embed scrape — now for reels too ─────────────────────
@@ -1410,7 +1414,18 @@ const platformDownloaders = {
   //   2. We can override the title / filename per-platform here when yt-dlp's
   //      default extractor leaves something to be desired (e.g. Reddit's
   //      "video_<id>" placeholder when the post title is empty).
-  async reddit(url)      { return downloadWithTimeout(() => downloadGeneric(url), 45000); },
+  // Reddit gets its own service (Services/redditService.js): v.redd.it is
+  // DASH with a SEPARATE audio track, so the plain yt-dlp path used to hand
+  // the client either an .m3u8 manifest or a silent/audio-only file. The
+  // service resolves /s/ share links, extracts via Reddit's .json API
+  // (yt-dlp fallback), and pairs video+audio tracks for the server-side
+  // ffmpeg merge (see dataFormatters.reddit). req is needed for the merge
+  // endpoint's absolute URL.
+  async reddit(url, req) {
+    const data = await downloadWithTimeout(() => downloadReddit(url), 55000);
+    data._req = req;
+    return data;
+  },
   async bilibili(url)    { return downloadWithTimeout(() => downloadGeneric(url), 55000); },
   async bbc(url)         { return downloadWithTimeout(() => downloadGeneric(url), 55000); },
   async vimeo(url)       { return downloadWithTimeout(() => downloadGeneric(url), 45000); },
@@ -2034,7 +2049,33 @@ const dataFormatters = {
   // colour, and filename pattern. The override also stabilises the value when
   // yt-dlp's `extractor_key` capitalisation varies between versions
   // ("BiliBili" vs "bilibili", "Reddit" vs "reddit").
-  reddit(data)      { return { ...dataFormatters.generic(data), source: 'reddit',      title: data?.title || 'Reddit Post' }; },
+  // Reddit needs one extra pass over the generic shape: formats flagged
+  // `needsMerge` by redditService carry a video-only DASH track plus its
+  // sibling audio track. Rewrite those into /api/merge-audio links so the
+  // client downloads ONE muxed mp4 (ffmpeg merges server-side). Without
+  // this the client would save a silent video.
+  reddit(data) {
+    const base = { ...dataFormatters.generic(data), source: 'reddit', title: data?.title || 'Reddit Post' };
+    const req = data?._req;
+    if (req) {
+      const serverBaseUrl = getServerBaseUrl(req);
+      const toMergeUrl = (f) => {
+        if (!f || f.needsMerge !== true || !f.mergeVideoUrl || !f.mergeAudioUrl) return;
+        f.url = `${serverBaseUrl}/api/merge-audio` +
+          `?videoUrl=${encodeURIComponent(f.mergeVideoUrl)}` +
+          `&audioUrl=${encodeURIComponent(f.mergeAudioUrl)}`;
+        delete f.needsMerge; delete f.mergeVideoUrl; delete f.mergeAudioUrl;
+      };
+      (base.formats || []).forEach(toMergeUrl);
+      toMergeUrl(base.selectedQuality);
+      if (base.selectedQuality?.url) base.url = base.selectedQuality.url;
+    }
+    // Carousel/gallery posts from the JSON API
+    if (Array.isArray(data?.mediaItems) && data.mediaItems.length) {
+      base.mediaItems = data.mediaItems;
+    }
+    return base;
+  },
   bilibili(data)    { return { ...dataFormatters.generic(data), source: 'bilibili',    title: data?.title || 'Bilibili Video' }; },
   bbc(data)         { return { ...dataFormatters.generic(data), source: 'bbc',         title: data?.title || 'BBC Video' }; },
   vimeo(data)       { return { ...dataFormatters.generic(data), source: 'vimeo',       title: data?.title || 'Vimeo Video' }; },
@@ -2109,7 +2150,7 @@ const downloadMedia = async (req, res) => {
     // the same URL repeatedly is what causes the intermittent timeouts.
     // Failures are NOT cached and are evicted immediately so a retry gets
     // a fresh attempt.
-    const needsReq = ['youtube', 'facebook', 'tiktok', 'instagram', 'twitter', 'generic'];
+    const needsReq = ['youtube', 'facebook', 'tiktok', 'instagram', 'twitter', 'generic', 'reddit'];
     const coalesceKey = `${platform}:${processedUrl}`;
     // 2026-Q3 — Authenticated requests (user supplied session cookies)
     // MUST bypass the shared in-flight/result cache: the response can
@@ -2331,8 +2372,13 @@ const downloadMedia = async (req, res) => {
       /fb\.watch/i.test(url)                       ||
       /facebook\.com\/(watch|reel|video)/i.test(url) ||
       /facebook\.com\/[^/]+\/(videos|posts)\//i.test(url);
+    // Covers /p/, /reel/, /reels/, /tv/ AND the share-sheet forms the IG
+    // app generates (/share/reel/…, /share/p/…). The old pattern missed
+    // /reels/ and /share/ so those public links could still surface a
+    // bogus LOGIN_REQUIRED when the scrapers failed for server-side
+    // reasons (rate limit, datacenter-IP block).
     const isPublicInstagramUrl =
-      /instagram\.com\/(p|reel|tv)\//i.test(url);
+      /instagram\.com\/(share\/)?(p|reels?|tv)\//i.test(url);
     const isPublicTwitterUrl =
       /(?:x|twitter)\.com\/[^/]+\/status\//i.test(url);
     const urlIsPublic =

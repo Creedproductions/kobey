@@ -4,12 +4,20 @@ const mergeService = require('../Services/mergeService');
 const fs = require('fs');
 
 /**
- * POST /api/merge-audio
- * Merges video and audio streams and returns the merged file
+ * /api/merge-audio — merge a video stream and an audio stream with ffmpeg
+ * and stream back one muxed mp4.
+ *
+ * Accepts BOTH:
+ *   POST { videoUrl, audioUrl }            (legacy body shape)
+ *   GET  ?videoUrl=…&audioUrl=…            (what the formatters emit)
+ *
+ * The GET form is what dataFormatters.reddit / the YouTube MERGE rewrite
+ * produce, so download clients can fetch it like any direct media URL.
+ * HEAD is answered cheaply (no merge) so clients that probe content-type
+ * before downloading don't trigger a full ffmpeg run.
  */
-router.post('/merge-audio', async (req, res) => {
-    const { videoUrl, audioUrl } = req.body;
 
+async function handleMerge(req, res, videoUrl, audioUrl) {
     if (!videoUrl || !audioUrl) {
         return res.status(400).json({
             success: false,
@@ -76,6 +84,27 @@ router.post('/merge-audio', async (req, res) => {
             });
         }
     }
+}
+
+router.post('/merge-audio', (req, res) => {
+    const { videoUrl, audioUrl } = req.body || {};
+    return handleMerge(req, res, videoUrl, audioUrl);
+});
+
+// Cheap HEAD: report the type without running ffmpeg. Some download
+// clients HEAD a URL to decide file extension / audio-vs-video before
+// the real GET; a full merge here would double the work and the wait.
+// MUST be registered BEFORE router.get — Express lets HEAD requests fall
+// through to a matching GET handler, which would run the whole merge.
+router.head('/merge-audio', (req, res) => {
+    res.setHeader('Content-Type', 'video/mp4');
+    res.setHeader('Accept-Ranges', 'none');
+    res.status(200).end();
+});
+
+router.get('/merge-audio', (req, res) => {
+    const { videoUrl, audioUrl } = req.query || {};
+    return handleMerge(req, res, videoUrl, audioUrl);
 });
 
 module.exports = router;

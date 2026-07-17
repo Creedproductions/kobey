@@ -8,6 +8,7 @@ require('./Services/cookieLoader').loadCookies();
 const express = require('express');
 const cors = require('cors');
 const downloaderRoutes = require('./Routes/downloaderRoutes');
+const mergeRoutes = require('./Routes/mergeRoutes');
 const config = require('./Config/config');
 const telegram = require('./Services/telegramService');
 
@@ -31,6 +32,7 @@ const setupMiddleware = () => {
   // Must be registered BEFORE the restricted cors() middleware below.
   const openCors = cors();
   app.use('/api/proxy-download', openCors);
+  app.use('/api/merge-audio',    openCors);
   app.use('/api/proxy-test',     openCors);
   app.use('/api/proxy',          openCors);
   app.use('/api/download',       openCors);
@@ -74,6 +76,11 @@ const setupMiddleware = () => {
 
 const setupRoutes = () => {
   app.use('/api', downloaderRoutes);
+  // ffmpeg video+audio merge endpoint (/api/merge-audio, GET + POST).
+  // Used by the reddit formatter (DASH video + separate audio track) and
+  // the legacy YouTube MERGE: rewrite. Was previously never mounted — the
+  // formatters emitted /api/merge-audio links that 404'd.
+  app.use('/api', mergeRoutes);
 
   app.get('/health', (req, res) => {
     res.status(200).json({

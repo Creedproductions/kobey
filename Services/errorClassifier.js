@@ -87,6 +87,12 @@ const CLASSES = [
       /suspicious (activity|traffic)/i,
       /unusual traffic/i,
       /captcha/i,
+      // Instagram's soft-block for datacenter IPs: HTTP 200 with an empty
+      // media payload on content that is perfectly public in a browser.
+      // yt-dlp surfaces it as "Instagram sent an empty media response" +
+      // generic cookies advice. It is NOT a login wall — a retry (often
+      // from another strategy) usually succeeds, so classify retryable.
+      /empty media response/i,
     ],
     userMessage:
       'The platform is temporarily blocking automated access from our server. ' +
@@ -105,7 +111,12 @@ const CLASSES = [
       /redirected to login/i,
       /authentication required/i,
       /cookie (appears stale|rejected)/i,
-      /use --cookies/i,
+      // NOTE: deliberately NO /use --cookies/ pattern here. yt-dlp appends
+      // "…use --cookies-from-browser or --cookies for the authentication"
+      // as generic ADVICE to many failures that have nothing to do with a
+      // login wall (rate limits, empty responses, datacenter-IP blocks on
+      // fully public posts). Matching it made public IG reels surface as
+      // LOGIN_REQUIRED and pushed users into a pointless sign-in flow.
       /account.*required to (view|access)/i,
     ],
     userMessage: 'This content requires a signed-in session to access.',
