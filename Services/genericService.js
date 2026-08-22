@@ -100,6 +100,19 @@ async function downloadGeneric(url, opts = {}) {
   try {
     info = await runYtDlp(url, [], cookieFile);
   } catch (e) {
+    // Retry genuine access blocks with a Chrome TLS fingerprint. The Docker
+    // image installs yt-dlp's curl-cffi extra; forcing impersonation only on
+    // 403/406 avoids changing behavior for extractors that do not need it.
+    if (/HTTP Error (?:403|406)|Forbidden|Not Acceptable|TLS fingerprint/i.test(e.message || '')) {
+      console.log('🌐 Generic: access block detected → retrying with Chrome impersonation');
+      try {
+        info = await runYtDlp(url, ['--impersonate', 'chrome'], cookieFile);
+        console.log('🌐 Generic: ✅ browser-impersonation retry succeeded');
+      } catch (impersonationError) {
+        console.warn(`🌐 Generic: impersonation retry failed: ${String(impersonationError.message).slice(0, 140)}`);
+      }
+    }
+
     // ── Age-gate recovery ────────────────────────────────────────────────
     // YouTube (and some embeds) age-gate videos behind "Sign in to confirm
     // your age". The embedded/TV player clients historically skip the gate
@@ -107,7 +120,7 @@ async function downloadGeneric(url, opts = {}) {
     // cheap and recovers a real slice of age-restricted links. If a
     // cookies file is configured (YT_DLP_COOKIES_FILE) the runner already
     // sends it on every call — this retry is for the no-cookie case.
-    if (isAgeRestricted(e)) {
+    if (!info && isAgeRestricted(e)) {
       console.log('🌐 Generic: age-gate detected → retrying with embedded player clients');
       try {
         info = await runYtDlp(url, [
@@ -118,7 +131,7 @@ async function downloadGeneric(url, opts = {}) {
         console.warn(`🌐 Generic: embedded-client retry also failed: ${String(e2.message).slice(0, 120)}`);
         throw e; // surface the ORIGINAL age-restriction error for clean classification
       }
-    } else {
+    } else if (!info) {
       throw e;
     }
   }

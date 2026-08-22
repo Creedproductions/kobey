@@ -48,32 +48,52 @@ const jitter = (min, max) => min + Math.floor(Math.random() * (max - min));
 // Rate limit is 1 req/s — retry on code:-1 with backoff before giving up.
 
 async function tryTikwm(url) {
-  const MAX_ATTEMPTS = 3;
+  const MAX_ATTEMPTS = 2;
   let lastErr = null;
 
   // tikwm accepts a bare numeric video id OR a full URL. When we have a
   // canonical /video/<id> URL we strip everything except the id — tikwm's
   // URL parser is strict and rejects various legitimate share URLs but
   // always accepts the numeric id.
-  const idMatch = String(url).match(/\/video\/(\d{6,})/);
+  // Photo/slideshow shares resolve to /photo/<id>, not /video/<id>. yt-dlp
+  // intentionally does not support that URL shape, while tikwm accepts the
+  // numeric aweme id and returns data.images.
+  const idMatch = String(url).match(/\/(?:video|photo)\/(\d{6,})/i);
   const payload = idMatch ? idMatch[1] : url;
 
   for (let i = 0; i < MAX_ATTEMPTS; i++) {
     if (i > 0) await sleep(jitter(1100, 1800)); // respect their 1 req/s ceiling
 
     try {
-      const resp = await axios.post(
-        'https://www.tikwm.com/api/',
-        new URLSearchParams({ url: payload, hd: '1' }).toString(),
-        {
-          timeout: 15000,
-          headers: {
-            'Content-Type': 'application/x-www-form-urlencoded',
-            'User-Agent':   UA_DESKTOP,
-            Accept:         'application/json',
+      const requestConfig = {
+        timeout: 8000,
+        headers: { 'User-Agent': UA_DESKTOP, Accept: 'application/json' },
+      };
+      let resp;
+      try {
+        // GET is intentionally primary. Production Koyeb egress is denied
+        // (403) on the form POST while this equivalent endpoint succeeds.
+        resp = await axios.get('https://www.tikwm.com/api/', {
+          ...requestConfig,
+          params: { url: payload, hd: '1' },
+        });
+      } catch (getError) {
+        // Keep POST as a compatibility fallback in case the provider turns
+        // off query requests. Do not double-wait after a network timeout.
+        if (getError.code === 'ECONNABORTED' || getError.code === 'ETIMEDOUT') throw getError;
+        if (![400, 401, 403, 405, 429].includes(getError.response?.status)) throw getError;
+        resp = await axios.post(
+          'https://www.tikwm.com/api/',
+          new URLSearchParams({ url: payload, hd: '1' }).toString(),
+          {
+            ...requestConfig,
+            headers: {
+              ...requestConfig.headers,
+              'Content-Type': 'application/x-www-form-urlencoded',
+            },
           },
-        }
-      );
+        );
+      }
 
       const body = resp.data;
       if (!body) { lastErr = new Error('tikwm: empty response'); continue; }
@@ -89,7 +109,8 @@ async function tryTikwm(url) {
           audio:     d.music  ? [d.music]  : [],
           ...(d.images && d.images.length > 0 && {
             images: d.images
-              .map(img => typeof img === 'string' ? img : (img?.url || img?.download || ''))
+              .map(img => typeof img === 'string' ? img :
+                (img?.url || img?.download || img?.image_url || img?.url_list?.[0] || ''))
               .filter(u => u && u.startsWith('http')),
           }),
         };
@@ -100,6 +121,7 @@ async function tryTikwm(url) {
       if (body.code !== -1) break;
     } catch (e) {
       lastErr = e;
+      if (e.code === 'ECONNABORTED' || e.code === 'ETIMEDOUT') break;
     }
   }
 
@@ -338,8 +360,8 @@ function looksLikeTtShort(url) {
   return false;
 }
 
-function buildCanonicalFromVideoId(id) {
-  return `https://www.tiktok.com/@x/video/${id}`;
+function extractPostId(url) {
+  return (String(url).match(/\/(?:video|photo)\/(\d{6,})/i) || [])[1] || '';
 }
 
 async function resolveShortUrl(url) {
@@ -358,9 +380,10 @@ async function resolveShortUrl(url) {
     });
     const loc = head.headers?.location || head.headers?.Location || '';
     if (loc) {
-      const idMatch = String(loc).match(/\/video\/(\d{6,})/);
-      if (idMatch) {
-        const canonical = buildCanonicalFromVideoId(idMatch[1]);
+      const postId = extractPostId(loc);
+      if (postId) {
+        const parsed = new URL(loc, url);
+        const canonical = `${parsed.origin}${parsed.pathname}`;
         console.log(`🎵 TikTok: short→canonical (HEAD) ${url} → ${canonical}`);
         return canonical;
       }
@@ -389,9 +412,10 @@ async function resolveShortUrl(url) {
                   resp.request?.responseURL      ||
                   (resp.config?.url !== url ? resp.config?.url : null);
     if (final && final !== url) {
-      const idMatch = String(final).match(/\/video\/(\d{6,})/);
-      if (idMatch) {
-        const canonical = buildCanonicalFromVideoId(idMatch[1]);
+      const postId = extractPostId(final);
+      if (postId) {
+        const parsed = new URL(final, url);
+        const canonical = `${parsed.origin}${parsed.pathname}`;
         console.log(`🎵 TikTok: short→canonical (GET) ${url} → ${canonical}`);
         return canonical;
       }
@@ -514,4 +538,7 @@ async function downloadTikTok(rawUrl, opts = {}) {
   throw new Error(`TikTok: all strategies failed — ${errors.join(' | ')}`);
 }
 
-module.exports = { downloadTikTok };
+module.exports = {
+  downloadTikTok,
+  _test: { extractPostId, looksLikeTtShort },
+};

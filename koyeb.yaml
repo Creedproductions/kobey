@@ -46,7 +46,9 @@ service:
     max: 1
   health:
     path: /health
-    initial_delay: 10
+    # Startup refreshes yt-dlp + curl-cffi before Node begins listening.
+    # Give that network/package step enough time on a nano instance.
+    initial_delay: 45
     period: 30
     timeout: 5
     success_threshold: 1

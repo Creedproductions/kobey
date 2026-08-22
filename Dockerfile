@@ -29,7 +29,9 @@ RUN apt-get update && \
 # ========================================
 RUN python3 -m venv /opt/yt && \
     /opt/yt/bin/pip install --no-cache-dir -U pip setuptools wheel && \
-    /opt/yt/bin/pip install --no-cache-dir -U yt-dlp && \
+    # curl-cffi supplies real browser TLS fingerprints for sites that reject
+    # datacenter Python clients; the default extra includes yt-dlp JS support.
+    /opt/yt/bin/pip install --no-cache-dir -U "yt-dlp[default,curl-cffi]" && \
     # Create symlink
     ln -s /opt/yt/bin/yt-dlp /usr/local/bin/yt-dlp && \
     # Verify installation
@@ -54,21 +56,11 @@ RUN mkdir -p /app/config && \
     echo "--add-header \"Accept-Language: en-US,en;q=0.9\"" >> /app/config/yt-dlp.conf
 
 # ========================================
-# CREATE COOKIE TEMPLATE
-# ========================================
-RUN mkdir -p /tmp/yt-dlp && \
-    echo "# Netscape HTTP Cookie File" > /tmp/yt-dlp/cookies.txt && \
-    echo ".youtube.com	TRUE	/	FALSE	1735689600	CONSENT	YES+cb.20250305-11-p0.en+FX+424" >> /tmp/yt-dlp/cookies.txt && \
-    echo ".youtube.com	TRUE	/	FALSE	1735689600	__Secure-3PSIDCC	" >> /tmp/yt-dlp/cookies.txt && \
-    echo ".youtube.com	TRUE	/	FALSE	1735689600	__Secure-3PAPISID	" >> /tmp/yt-dlp/cookies.txt && \
-    echo ".youtube.com	TRUE	/	FALSE	1735689600	__Secure-3PSID	" >> /tmp/yt-dlp/cookies.txt
-
-# ========================================
 # CREATE UPDATE SCRIPT
 # ========================================
 RUN echo '#!/bin/bash\n\
 echo "🔄 Updating yt-dlp..."\n\
-if /opt/yt/bin/pip install --no-cache-dir -U yt-dlp; then\n\
+if /opt/yt/bin/pip install --no-cache-dir -U "yt-dlp[default,curl-cffi]"; then\n\
   echo "✅ yt-dlp updated to: $(/opt/yt/bin/yt-dlp --version)"\n\
 else\n\
   echo "⚠️  yt-dlp update failed — keeping $(/opt/yt/bin/yt-dlp --version)"\n\
@@ -134,7 +126,6 @@ ENV NODE_ENV=production \
     YT_DLP_BIN=/usr/local/bin/yt-dlp \
     YT_DLP_CONFIG=/app/config/yt-dlp.conf \
     YT_DLP_CACHE_DIR=/tmp/yt-dlp/cache \
-    YT_DLP_COOKIES_FILE=/tmp/yt-dlp/cookies.txt \
     PORT=8000
 
 # ========================================

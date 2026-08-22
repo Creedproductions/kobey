@@ -28,6 +28,7 @@ catch (e) { t(`downloaderController loads (${e.message})`, false); }
 
 console.log('\n── 2. TikTok story/live logic ──');
 {
+  const { _test } = require('../Services/tiktokService');
   // Re-derive the same regexes the service uses (kept in sync by test 1's
   // successful module load + the live smoke test).
   const storyToVideoUrl = (url) => {
@@ -45,6 +46,14 @@ console.log('\n── 2. TikTok story/live logic ──');
     storyToVideoUrl('https://vt.tiktok.com/ZSCw52VJS/') === null);
   t('live URL detected as live', isLive('https://www.tiktok.com/@user1/live'));
   t('story URL NOT flagged as live', !isLive('https://www.tiktok.com/@user1/story/730123'));
+  t('video post id is extracted',
+    _test.extractPostId('https://www.tiktok.com/@user/video/7670208507278298389') === '7670208507278298389');
+  t('photo/slideshow post id is extracted',
+    _test.extractPostId('https://www.tiktok.com/@user/photo/7670208507278298389') === '7670208507278298389');
+  t('vt short URL is recognised',
+    _test.looksLikeTtShort('https://vt.tiktok.com/ZSVSVHVQm/'));
+  t('tiktok /t/ short URL is recognised',
+    _test.looksLikeTtShort('https://www.tiktok.com/t/ZP8WvLG1N/'));
 }
 
 console.log('\n── 3. IG / FB story detection ──');

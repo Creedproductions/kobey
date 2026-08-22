@@ -833,6 +833,10 @@ const normaliseFacebookData = (raw) => {
 
 // ===== PLATFORM-SPECIFIC DOWNLOADERS =====
 
+const downloadGenericWithCookies = (url, req, timeoutMs) =>
+  withCookieFile(req, url, cookieFile =>
+    downloadWithTimeout(() => downloadGeneric(url, { cookieFile }), timeoutMs));
+
 const platformDownloaders = {
 
   // ─── INSTAGRAM ───────────────────────────────────────────────────────────
@@ -1426,16 +1430,16 @@ const platformDownloaders = {
     data._req = req;
     return data;
   },
-  async bilibili(url)    { return downloadWithTimeout(() => downloadGeneric(url), 55000); },
-  async bbc(url)         { return downloadWithTimeout(() => downloadGeneric(url), 55000); },
-  async vimeo(url)       { return downloadWithTimeout(() => downloadGeneric(url), 45000); },
-  async dailymotion(url) { return downloadWithTimeout(() => downloadGeneric(url), 45000); },
-  async twitch(url)      { return downloadWithTimeout(() => downloadGeneric(url), 55000); },
-  async rumble(url)      { return downloadWithTimeout(() => downloadGeneric(url), 45000); },
-  async soundcloud(url)  { return downloadWithTimeout(() => downloadGeneric(url), 45000); },
-  async vk(url)          { return downloadWithTimeout(() => downloadGeneric(url), 45000); },
-  async streamable(url)  { return downloadWithTimeout(() => downloadGeneric(url), 45000); },
-  async odysee(url)      { return downloadWithTimeout(() => downloadGeneric(url), 45000); },
+  async bilibili(url, req)    { return downloadGenericWithCookies(url, req, 55000); },
+  async bbc(url, req)         { return downloadGenericWithCookies(url, req, 55000); },
+  async vimeo(url, req)       { return downloadGenericWithCookies(url, req, 45000); },
+  async dailymotion(url, req) { return downloadGenericWithCookies(url, req, 45000); },
+  async twitch(url, req)      { return downloadGenericWithCookies(url, req, 55000); },
+  async rumble(url, req)      { return downloadGenericWithCookies(url, req, 45000); },
+  async soundcloud(url, req)  { return downloadGenericWithCookies(url, req, 45000); },
+  async vk(url, req)          { return downloadGenericWithCookies(url, req, 45000); },
+  async streamable(url, req)  { return downloadGenericWithCookies(url, req, 45000); },
+  async odysee(url, req)      { return downloadGenericWithCookies(url, req, 45000); },
 };
 
 // ===== DATA FORMATTERS =====
@@ -2150,7 +2154,11 @@ const downloadMedia = async (req, res) => {
     // the same URL repeatedly is what causes the intermittent timeouts.
     // Failures are NOT cached and are evicted immediately so a retry gets
     // a fresh attempt.
-    const needsReq = ['youtube', 'facebook', 'tiktok', 'instagram', 'twitter', 'generic', 'reddit'];
+    const needsReq = [
+      'youtube', 'facebook', 'tiktok', 'instagram', 'twitter', 'generic', 'reddit',
+      'bilibili', 'bbc', 'vimeo', 'dailymotion', 'twitch', 'rumble',
+      'soundcloud', 'vk', 'streamable', 'odysee',
+    ];
     const coalesceKey = `${platform}:${processedUrl}`;
     // 2026-Q3 — Authenticated requests (user supplied session cookies)
     // MUST bypass the shared in-flight/result cache: the response can
