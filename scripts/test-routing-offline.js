@@ -54,6 +54,18 @@ console.log('\n── 2. TikTok story/live logic ──');
     _test.looksLikeTtShort('https://vt.tiktok.com/ZSVSVHVQm/'));
   t('tiktok /t/ short URL is recognised',
     _test.looksLikeTtShort('https://www.tiktok.com/t/ZP8WvLG1N/'));
+  const embedResult = _test.parseTikTokEmbedState({
+    source: { data: { route: { videoData: {
+      itemInfos: { text: 'Photo post', covers: ['https://cdn.example/cover.jpg'] },
+      musicInfos: { playUrl: ['https://cdn.example/music.mp3'] },
+      imagePostInfo: { displayImages: [
+        { urlList: ['https://cdn.example/one.jpg'] },
+        { urlList: ['https://cdn.example/two.jpg'] },
+      ] },
+    } } } },
+  });
+  t('TikTok embed state extracts slideshow images', embedResult.images.length === 2);
+  t('TikTok embed state extracts slideshow audio', embedResult.audio.length === 1);
 }
 
 console.log('\n── 3. IG / FB story detection ──');

@@ -2272,8 +2272,7 @@ const downloadMedia = async (req, res) => {
     // upstream may have set it to the raw title (dirty). Re-sanitizing
     // already-clean input is a safe no-op.
     if (formattedData && typeof formattedData === 'object') {
-      const ext = platform === 'tiktok' ? '.mp4' :
-                  formattedData.isImageSlideshow ? '.jpg' : '.mp4';
+      const ext = formattedData.isImageSlideshow ? '.jpg' : '.mp4';
 
       // Preserve the original rich title in case any client wants it for
       // display (e.g. captions, share text, etc.)

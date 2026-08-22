@@ -328,6 +328,68 @@ async function tryYtDlpTikTok(url, opts = {}) {
   return out;
 }
 
+// ─── TikTok public embed metadata (photo/slideshow primary) ────────────────
+// TikTok's own /embed/v2/<aweme-id> page includes a JSON state payload with
+// imagePostInfo.displayImages. Unlike third-party download mirrors, this uses
+// TikTok's public origin (the same origin used for short-link resolution) and
+// does not require yt-dlp support for /photo/ URLs. It also exposes the music.
+
+function findImagePostData(value, depth = 0) {
+  if (!value || typeof value !== 'object' || depth > 14) return null;
+  if (Array.isArray(value?.imagePostInfo?.displayImages)) return value;
+  for (const child of Object.values(value)) {
+    const found = findImagePostData(child, depth + 1);
+    if (found) return found;
+  }
+  return null;
+}
+
+function parseTikTokEmbedState(rawState) {
+  const state = typeof rawState === 'string' ? JSON.parse(rawState) : rawState;
+  const videoData = findImagePostData(state);
+  if (!videoData) throw new Error('tiktok-embed: no image post data');
+
+  const images = videoData.imagePostInfo.displayImages
+    .map(image => image?.urlList?.find(url => /^https?:\/\//i.test(url || '')) || '')
+    .filter(Boolean);
+  if (!images.length) throw new Error('tiktok-embed: no slideshow images');
+
+  const audio = Array.isArray(videoData.musicInfos?.playUrl)
+    ? videoData.musicInfos.playUrl.filter(url => /^https?:\/\//i.test(url || ''))
+    : [];
+  const covers = videoData.itemInfos?.coversOrigin || videoData.itemInfos?.covers || [];
+
+  return {
+    title: videoData.itemInfos?.text || 'TikTok Slideshow',
+    thumbnail: covers[0] || images[0],
+    video: [],
+    audio,
+    images,
+  };
+}
+
+async function tryTikTokEmbedPhoto(url) {
+  const postId = extractPostId(url);
+  if (!postId || !/\/photo\//i.test(url)) {
+    throw new Error('tiktok-embed: not a photo post');
+  }
+
+  const resp = await axios.get(`https://www.tiktok.com/embed/v2/${postId}`, {
+    timeout: 12000,
+    headers: {
+      'User-Agent': UA_DESKTOP,
+      Accept: 'text/html,application/xhtml+xml',
+      'Accept-Language': 'en-US,en;q=0.9',
+      Referer: 'https://www.tiktok.com/',
+    },
+  });
+  const $ = cheerio.load(typeof resp.data === 'string' ? resp.data : '');
+  const rawState = $('#__FRONTITY_CONNECT_STATE__').html() ||
+                   $('#__FRONTITY_CONNECT_STATE__').text() || '';
+  if (!rawState) throw new Error('tiktok-embed: state payload missing');
+  return parseTikTokEmbedState(rawState);
+}
+
 // ─── URL resolution for short URLs ───────────────────────────────────────────
 //
 // vm.tiktok.com / vt.tiktok.com / tiktok.com/t/<id> URLs are short redirects.
@@ -493,13 +555,25 @@ async function downloadTikTok(rawUrl, opts = {}) {
   // when they work, but more reliable than ttdl (which wraps the same
   // scrapers we already tried). When TikTok pushes a breaking API change,
   // yt-dlp is usually the only thing still working.
-  const strategies = [
-    { name: 'tikwm',       fn: tryTikwm        },
-    { name: 'ssstik',      fn: trySSStik       },
-    { name: 'musicaldown', fn: tryMusicaldown  },
-    { name: 'yt-dlp',      fn: tryYtDlpTikTok  },
-    { name: 'ttdl',        fn: tryTtdl         },
-  ];
+  const isPhoto = /\/photo\/\d+/i.test(url);
+  const strategies = isPhoto
+    ? [
+        // TikTok's own embed JSON is the only path here that does not depend
+        // on a third-party service Koyeb may block. yt-dlp is intentionally
+        // omitted because upstream does not support TikTok /photo/ URLs.
+        { name: 'tiktok-embed', fn: tryTikTokEmbedPhoto },
+        { name: 'tikwm',        fn: tryTikwm             },
+        { name: 'ttdl',         fn: tryTtdl              },
+        { name: 'ssstik',       fn: trySSStik            },
+        { name: 'musicaldown',  fn: tryMusicaldown       },
+      ]
+    : [
+        { name: 'tikwm',       fn: tryTikwm       },
+        { name: 'ssstik',      fn: trySSStik      },
+        { name: 'musicaldown', fn: tryMusicaldown },
+        { name: 'yt-dlp',      fn: tryYtDlpTikTok },
+        { name: 'ttdl',        fn: tryTtdl        },
+      ];
 
   const errors = [];
   for (const s of strategies) {
@@ -540,5 +614,5 @@ async function downloadTikTok(rawUrl, opts = {}) {
 
 module.exports = {
   downloadTikTok,
-  _test: { extractPostId, looksLikeTtShort },
+  _test: { extractPostId, looksLikeTtShort, parseTikTokEmbedState },
 };
