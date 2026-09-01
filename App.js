@@ -11,6 +11,7 @@ const downloaderRoutes = require('./Routes/downloaderRoutes');
 const mergeRoutes = require('./Routes/mergeRoutes');
 const config = require('./Config/config');
 const telegram = require('./Services/telegramService');
+const napsterBot = require('./Services/napsterBotService');
 
 const app = express();
 
@@ -142,6 +143,10 @@ const startServer = () => {
     // Confirm Telegram alerts are wired up. notifyStartup() is silent on
     // failure, so a missing token won't crash the process.
     telegram.notifyStartup({ port: PORT }).catch(() => {});
+
+    // Napster Homes staff bot: Telegram group reminder (8pm EAT) + daily
+    // summary (10pm EAT). No-ops safely when its env vars are missing.
+    try { napsterBot.start(); } catch (e) { console.error('napster-bot start failed:', e.message); }
   });
 
   server.on('error', (error) => {
