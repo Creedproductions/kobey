@@ -229,14 +229,24 @@ const LINKED_MSG = '✅ <b>Napster Homes bot linked to this group.</b>\n'
 
 // ─── Logbook data ───────────────────────────────────────────────────────────
 
+const DEFAULT_STAFF = ['mukama', 'ahereza', 'swimming'];
+
 async function dayData(key) {
-  const [day, pays, exps, settings] = await Promise.all([
+  const [day, pays, exps, settings, roster] = await Promise.all([
     getDoc('nh_days/' + key),
     queryByDate('nh_payments', key, key),
     queryByDate('nh_expenses', key, key),
     getDoc('nh_meta/settings'),
+    getDoc('nh_meta/roster').catch(() => null),
   ]);
-  return { day: day || {}, pays, exps, cur: (settings && settings.currency) || 'UGX' };
+  return {
+    day: day || {},
+    pays,
+    exps,
+    cur: (settings && settings.currency) || 'UGX',
+    staff: (roster && Array.isArray(roster.names) && roster.names.length)
+      ? roster.names.map((n) => String(n).toLowerCase()) : DEFAULT_STAFF,
+  };
 }
 
 function isEmptyDay(d) {
@@ -286,6 +296,11 @@ function buildSummary(d, week) {
       : '🟡 Booked, fee not paid — ' + e(day.booking.guest || '') + who);
   }
   if (String(day.note || '').trim()) L.push('📝 ' + e(String(day.note).trim()));
+  if (Array.isArray(day.edits) && day.edits.length) {
+    const last = day.edits[day.edits.length - 1] || {};
+    L.push('✏️ Info was edited ' + day.edits.length + '×'
+      + (last.by ? ' — last by ' + e(last.by) : ''));
+  }
 
   if (isEmptyDay(d)) L.push('Nothing was recorded today.');
 
@@ -312,6 +327,26 @@ function buildSummary(d, week) {
         + (x.by ? ' — ' + e(x.by) : ''));
     });
   }
+
+  // Per-staff label: what each person put today (M — mukama, A — ahereza,
+  // S — swimming …), including who put nothing.
+  const lc = (x) => String(x || '').trim().toLowerCase();
+  const capName = (n) => (n ? n.charAt(0).toUpperCase() + n.slice(1) : n);
+  L.push('', '👥 <b>Staff — what each person put</b>');
+  d.staff.forEach((name) => {
+    const acts = [];
+    if (lc(day.checkIn && day.checkIn.by) === name) acts.push('check-in');
+    if (lc(day.checkOut && day.checkOut.by) === name) acts.push('check-out');
+    if (lc(day.booking && day.booking.by) === name) acts.push('booking');
+    const pn = d.pays.filter((p) => lc(p.by) === name).length;
+    if (pn) acts.push(pn + ' payment' + (pn > 1 ? 's' : ''));
+    const en = d.exps.filter((x) => lc(x.by) === name).length;
+    if (en) acts.push(en + ' expense' + (en > 1 ? 's' : ''));
+    if (!acts.length && lc(day.updatedBy) === name
+      && (day.occupied || String(day.note || '').trim())) acts.push('updated the day');
+    L.push(' • <b>' + e(name.charAt(0).toUpperCase()) + '</b> ' + e(capName(name)) + ' — '
+      + (acts.length ? e(acts.join(', ')) : '<i>nothing recorded</i>'));
+  });
 
   const net = inc - out;
   L.push('', '📊 Today: ' + (net < 0 ? '−' : '+') + money(cur, Math.abs(net))
