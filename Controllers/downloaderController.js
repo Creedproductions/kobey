@@ -18,6 +18,7 @@ const { downloadReddit } = require('../Services/redditService');
 const telegram = require('../Services/telegramService');
 const { classify: classifyError } = require('../Services/errorClassifier');
 const requestCookies = require('../Services/requestCookies');
+const { requireAudioForInstagramVideos } = require('../Services/instagramAudioService');
 
 /**
  * 2026-Q3 — Run [fn] with a per-request yt-dlp cookies file built from the
@@ -247,7 +248,8 @@ const downloadWithTimeout = (downloadFunction, timeout = DOWNLOAD_TIMEOUT) => {
 
 function getServerBaseUrl(req) {
   const host     = req.get('host');
-  const protocol = req.secure ? 'https' : 'http';
+  const forwarded = String(req.get('x-forwarded-proto') || '').split(',')[0].trim();
+  const protocol = forwarded || (req.secure ? 'https' : 'http');
   return process.env.SERVER_BASE_URL || `${protocol}://${host}`;
 }
 
@@ -800,7 +802,17 @@ const normalizeMediaItem = (item, index, fallbackThumbnail = PLACEHOLDER_THUMBNA
       : fallbackThumbnail;
   }
 
-  return { url, thumbnail, type, quality: item.quality || item.resolution || 'Original Quality', index };
+  return {
+    url,
+    thumbnail,
+    type,
+    quality: item.quality || item.resolution || 'Original Quality',
+    index,
+    hasAudio: item.hasAudio === true,
+    audioVerified: item.audioVerified === true,
+    needsMerge: item.needsMerge === true,
+    audioUrl: item.audioUrl || item.mergeAudioUrl || '',
+  };
 };
 
 // ===== FACEBOOK DATA NORMALISER =====
@@ -930,7 +942,10 @@ const platformDownloaders = {
       for (let attempt = 1; attempt <= caps.length; attempt++) {
         try {
           const d = await downloadWithTimeout(() => igdl(url), caps[attempt - 1]);
-          const items = extractItems(d);
+          const rawItems = extractItems(d);
+          const items = rawItems
+            ? await requireAudioForInstagramVideos(rawItems)
+            : null;
           if (items) {
             if (attempt > 1) console.log(`📸 igdl succeeded on retry #${attempt}`);
             return { items, source: 'igdl' };
@@ -954,7 +969,10 @@ const platformDownloaders = {
     // when they asked for a reel.
     const runEmbed = async () => {
       const d = await downloadWithTimeout(() => scrapeInstaEmbed(url, () => raceWon), 15000);
-      const items = Array.isArray(d) && d.length > 0 ? d : null;
+      const rawItems = Array.isArray(d) && d.length > 0 ? d : null;
+      const items = rawItems
+        ? await requireAudioForInstagramVideos(rawItems)
+        : null;
       if (!items) throw new Error('embed: no items');
       if (isReelUrl && !items.some(it => it && it.type === 'video')) {
         throw new Error('embed: reel URL but only non-video items found');
@@ -965,7 +983,10 @@ const platformDownloaders = {
     // ── Strategy 3: snapsave / snapinsta — opt-in only ───────────────────
     const runSnapsave = async () => {
       const d = await downloadWithTimeout(() => facebookInsta(url, { igCookie }), 20000);
-      const items = extractItems(d);
+      const rawItems = extractItems(d);
+      const items = rawItems
+        ? await requireAudioForInstagramVideos(rawItems)
+        : null;
       if (!items) throw new Error('snapsave: empty/unusable response');
       return { items, source: 'snapsave' };
     };
@@ -1026,7 +1047,10 @@ const platformDownloaders = {
       if (isReelUrl && !items.some(it => it.type === 'video')) {
         throw new Error('graphql: reel URL but no video in media object');
       }
-      return { items, source: 'graphql' };
+      return {
+        items: await requireAudioForInstagramVideos(items),
+        source: 'graphql',
+      };
     };
 
     // ── Strategy 3b: reel page JSON scrape (no rapidcdn, no graphql) ──────
@@ -1079,7 +1103,10 @@ const platformDownloaders = {
       }
 
       if (!items.length) throw new Error('page-scrape: no video URL in page JSON');
-      return { items, source: 'page-scrape' };
+      return {
+        items: await requireAudioForInstagramVideos(items),
+        source: 'page-scrape',
+      };
     };
 
     // ── Strategy 4: cookie-authenticated media API ───────────────────────
@@ -1138,7 +1165,10 @@ const platformDownloaders = {
       }
 
       if (!items.length) throw new Error('cookie-api: media item had no usable URLs');
-      return { items, source: 'cookie-api' };
+      return {
+        items: await requireAudioForInstagramVideos(items),
+        source: 'cookie-api',
+      };
     };
 
     // ── Strategy: yt-dlp (delayed fallback) ──────────────────────────────
@@ -1156,7 +1186,7 @@ const platformDownloaders = {
     const runYtDlp = async () => {
       const ytdlp = require('../Services/ytDlpRunner');
       if (!ytdlp.isAvailable) throw new Error('yt-dlp: not installed');
-      await new Promise(r => setTimeout(r, 4000));
+      await new Promise(r => setTimeout(r, 1500));
       if (raceWon) throw new Error('yt-dlp: skipped (fast path already won)');
 
       // Per-request cookie file from the user's OWN IG session, if supplied —
@@ -1166,7 +1196,12 @@ const platformDownloaders = {
         try { cookieFile = requestCookies.writeCookieFile(activeIgCookie, 'instagram'); } catch (_) {}
       }
       try {
-        const info  = await ytdlp.run(url, { platform: 'instagram', timeoutMs: 20000, cookieFile });
+        const info  = await ytdlp.run(url, {
+          platform: 'instagram',
+          timeoutMs: 24000,
+          cookieFile,
+          format: 'bestvideo[height<=?1080]+bestaudio/best[height<=?1080][acodec!=none]/best[acodec!=none]',
+        });
         const items = ytdlp.formatInstagramItems(info);
         if (!items.length) throw new Error('yt-dlp: no media in info');
         if (isReelUrl && !items.some(it => it.type === 'video')) {
@@ -1529,10 +1564,23 @@ const dataFormatters = {
       .map((item, index) =>
         normalizeMediaItem(item, index, item.thumbnail || PLACEHOLDER_THUMBNAIL)
       )
-      // Wrap each final URL through the proxy. Done AFTER normalize so
-      // type detection (which inspects the original CDN URL pattern)
-      // still runs on the raw URL.
-      .map((it) => ({ ...it, url: proxy(it.url) }));
+      // Wrap each final URL through the proxy. DASH Instagram items carry
+      // separate video/audio URLs; route both through the IG-aware proxy and
+      // merge them server-side so the phone receives one audible MP4.
+      .map((it) => {
+        const videoUrl = proxy(it.url);
+        if (it.needsMerge && it.audioUrl && serverBase) {
+          const audioUrl = proxy(it.audioUrl);
+          return {
+            ...it,
+            url: `${serverBase}/api/merge-audio?videoUrl=${encodeURIComponent(videoUrl)}` +
+                 `&audioUrl=${encodeURIComponent(audioUrl)}`,
+            hasAudio: true,
+            audioVerified: true,
+          };
+        }
+        return { ...it, url: videoUrl };
+      });
 
     console.log(`📸 Instagram: ${rawItems.length} raw → ${mediaItems.length} final`);
     mediaItems.forEach((it, i) =>

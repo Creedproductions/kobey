@@ -352,9 +352,34 @@ function formatInstagramItems(info) {
   const items = [];
 
   const formats = Array.isArray(info.formats) ? info.formats : [];
-  // Prefer muxed formats. yt-dlp's IG extractor returns one per quality.
+  const requested = Array.isArray(info.requested_formats)
+    ? info.requested_formats
+    : [];
+  const isVideo = (f) => f?.url && f.vcodec && f.vcodec !== 'none';
+  const isAudio = (f) => f?.url && f.acodec && f.acodec !== 'none';
+  const isMuxed = (f) => isVideo(f) && isAudio(f);
+
+  // DASH Instagram posts expose video and audio as separate tracks. When
+  // yt-dlp selected a pair, preserve both URLs for our merge endpoint.
+  const requestedVideo = requested.find(f => isVideo(f));
+  const requestedAudio = requested.find(f => isAudio(f) && !isVideo(f));
+  if (requestedVideo && requestedAudio) {
+    return [{
+      url:       requestedVideo.url,
+      audioUrl:  requestedAudio.url,
+      needsMerge: true,
+      hasAudio:  true,
+      audioVerified: true,
+      thumbnail: info.thumbnail || '',
+      type:      'video',
+      quality:   requestedVideo.height ? `${requestedVideo.height}p` : 'Original Quality',
+    }];
+  }
+
+  // Prefer genuinely muxed formats. The old implementation accepted every
+  // format, including DASH video-only tracks, which produced muted files.
   const muxed = formats
-    .filter(f => f.url && typeof f.url === 'string')
+    .filter(f => typeof f?.url === 'string' && isMuxed(f))
     .sort((a, b) => (b.height || 0) - (a.height || 0));
 
   if (muxed.length > 0) {
@@ -362,15 +387,44 @@ function formatInstagramItems(info) {
       items.push({
         url:       f.url,
         thumbnail: info.thumbnail || '',
-        type:      (f.vcodec && f.vcodec !== 'none') ? 'video' : 'image',
+        type:      'video',
+        hasAudio:  true,
+        audioVerified: true,
         quality:   f.height ? `${f.height}p` : 'Original Quality',
       });
     }
-  } else if (info.url && typeof info.url === 'string') {
+  } else {
+    // Older yt-dlp builds may omit requested_formats from --dump-json.
+    // Pair the best video-only and audio-only entries ourselves.
+    const videoOnly = formats
+      .filter(f => typeof f?.url === 'string' && isVideo(f) && !isAudio(f))
+      .sort((a, b) => (b.height || b.tbr || 0) - (a.height || a.tbr || 0));
+    const audioOnly = formats
+      .filter(f => typeof f?.url === 'string' && isAudio(f) && !isVideo(f))
+      .sort((a, b) => (b.abr || b.tbr || 0) - (a.abr || a.tbr || 0));
+    if (videoOnly[0] && audioOnly[0]) {
+      items.push({
+        url:       videoOnly[0].url,
+        audioUrl:  audioOnly[0].url,
+        needsMerge: true,
+        hasAudio:  true,
+        audioVerified: true,
+        thumbnail: info.thumbnail || '',
+        type:      'video',
+        quality:   videoOnly[0].height ? `${videoOnly[0].height}p` : 'Original Quality',
+      });
+    }
+  }
+
+  if (!items.length && info.url && typeof info.url === 'string' &&
+      (!info.vcodec || info.vcodec !== 'none') &&
+      info.acodec && info.acodec !== 'none') {
     items.push({
       url:       info.url,
       thumbnail: info.thumbnail || '',
       type:      'video',
+      hasAudio:  true,
+      audioVerified: true,
       quality:   'Original Quality',
     });
   }
