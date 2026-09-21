@@ -1,5 +1,5 @@
 # Dockerfile
-FROM node:20.18.1-slim
+FROM node:22-slim
 
 WORKDIR /app
 
@@ -31,7 +31,7 @@ RUN python3 -m venv /opt/yt && \
     /opt/yt/bin/pip install --no-cache-dir -U pip setuptools wheel && \
     # curl-cffi supplies real browser TLS fingerprints for sites that reject
     # datacenter Python clients; the default extra includes yt-dlp JS support.
-    /opt/yt/bin/pip install --no-cache-dir -U "yt-dlp[default,curl-cffi]" && \
+    /opt/yt/bin/pip install --no-cache-dir -U "yt-dlp[default,curl-cffi]" bgutil-ytdlp-pot-provider && \
     # Create symlink
     ln -s /opt/yt/bin/yt-dlp /usr/local/bin/yt-dlp && \
     # Verify installation
@@ -47,7 +47,8 @@ RUN mkdir -p /app/config && \
     echo "--no-warnings" >> /app/config/yt-dlp.conf && \
     echo "--no-check-certificate" >> /app/config/yt-dlp.conf && \
     echo "--geo-bypass" >> /app/config/yt-dlp.conf && \
-    echo "--extractor-args youtube:player_client=android_vr,ios,web,web_safari" >> /app/config/yt-dlp.conf && \
+    echo "--js-runtimes node" >> /app/config/yt-dlp.conf && \
+    echo "--extractor-args youtube:player_client=mweb,web_embedded,android_vr" >> /app/config/yt-dlp.conf && \
     echo "--concurrent-fragments 5" >> /app/config/yt-dlp.conf && \
     echo "--throttled-rate 100K" >> /app/config/yt-dlp.conf && \
     echo "--sleep-interval 3" >> /app/config/yt-dlp.conf && \
@@ -81,6 +82,16 @@ COPY package*.json ./
 RUN npm ci --omit=dev --ignore-scripts && \
     npm cache clean --force
 
+# YouTube increasingly requires a short-lived Proof-of-Origin token for
+# datacenter traffic. The provider stays private on localhost; yt-dlp's
+# bgutil plugin discovers it automatically.
+RUN git clone --depth 1 --branch 2.0.0 \
+      https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git /opt/bgutil-provider && \
+    cd /opt/bgutil-provider/server && \
+    npm ci && \
+    npx tsc && \
+    npm cache clean --force
+
 # ========================================
 # COPY APPLICATION CODE
 # ========================================
@@ -108,7 +119,8 @@ RUN useradd -m -u 1001 -s /bin/bash appuser && \
     chown -R appuser:appuser /tmp/yt-merge && \
     chown -R appuser:appuser /app/config && \
     chown -R appuser:appuser /app/logs && \
-    chown -R appuser:appuser /opt/yt
+    chown -R appuser:appuser /opt/yt && \
+    chown -R appuser:appuser /opt/bgutil-provider
 
 # ========================================
 # SWITCH TO NON-ROOT USER
@@ -154,4 +166,4 @@ EXPOSE 8000
 # ENTRYPOINT AND CMD
 # ========================================
 ENTRYPOINT ["/usr/bin/tini", "--"]
-CMD ["sh", "-c", "yt-dlp-update.sh && node App.js"]
+CMD ["/app/scripts/start-production.sh"]

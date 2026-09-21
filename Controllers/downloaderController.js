@@ -1346,13 +1346,14 @@ const platformDownloaders = {
         // 500'd with "format.url.startsWith is not a function".
         data.formats = data.formats.filter(f => typeof f?.url === 'string' && f.url);
         data.formats.forEach(format => {
-          if (typeof format.url === 'string' && format.url.startsWith('MERGE:')) {
-            const parts = format.url.split(':');
-            if (parts.length >= 3) {
-              format.url = `${serverBaseUrl}/api/merge-audio?videoUrl=${encodeURIComponent(parts[1])}&audioUrl=${encodeURIComponent(parts[2])}`;
-            }
+          if (format.needsMerge && format.mergeVideoUrl && format.mergeAudioUrl) {
+            format.url = `${serverBaseUrl}/api/merge-audio?videoUrl=${encodeURIComponent(format.mergeVideoUrl)}&audioUrl=${encodeURIComponent(format.mergeAudioUrl)}`;
           }
         });
+        if (data.selectedQuality?.needsMerge && data.selectedQuality.mergeVideoUrl && data.selectedQuality.mergeAudioUrl) {
+          data.selectedQuality.url = `${serverBaseUrl}/api/merge-audio?videoUrl=${encodeURIComponent(data.selectedQuality.mergeVideoUrl)}&audioUrl=${encodeURIComponent(data.selectedQuality.mergeAudioUrl)}`;
+          data.url = data.selectedQuality.url;
+        }
         if (typeof data.url === 'string' && data.url.startsWith('MERGE:')) {
           const parts = data.url.split(':');
           if (parts.length >= 3)
@@ -1964,12 +1965,11 @@ const dataFormatters = {
 
       const serverBaseUrl = getServerBaseUrl(req);
       qualityOptions.forEach(format => {
-        if (typeof format.url === 'string' && format.url.startsWith('MERGE:')) {
-          const parts = format.url.split(':');
-          if (parts.length >= 3)
-            format.url = `${serverBaseUrl}/api/merge-audio?videoUrl=${encodeURIComponent(parts[1])}&audioUrl=${encodeURIComponent(parts[2])}`;
+        if (format.needsMerge && format.mergeVideoUrl && format.mergeAudioUrl) {
+          format.url = `${serverBaseUrl}/api/merge-audio?videoUrl=${encodeURIComponent(format.mergeVideoUrl)}&audioUrl=${encodeURIComponent(format.mergeAudioUrl)}`;
         }
       });
+      defaultUrl = selectedQuality?.url || defaultUrl;
       if (typeof selectedQuality?.url === 'string' && selectedQuality.url.startsWith('MERGE:')) {
         const parts = selectedQuality.url.split(':');
         if (parts.length >= 3) {

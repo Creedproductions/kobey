@@ -388,7 +388,8 @@ async function tryYtDlp(url, reqCookieFile = null) {
       '--no-warnings',
       '--no-check-certificate',
       '--geo-bypass',
-      '--extractor-args', 'youtube:player_client=android_vr,ios,web,web_safari',
+      '--js-runtimes', 'node',
+      '--extractor-args', 'youtube:player_client=mweb,web_embedded,android_vr',
       // Tightened socket timeout from 15s → 8s. yt-dlp now bails fast
       // when YouTube throttles, freeing the race for the next strategy.
       '--socket-timeout', '8',
@@ -401,7 +402,44 @@ async function tryYtDlp(url, reqCookieFile = null) {
       try {
         const info = JSON.parse(stdout);
         const formats = [];
-        if (info.url) {
+        const sourceFormats = Array.isArray(info.formats) ? info.formats : [];
+        const bestAudio = sourceFormats
+          .filter(f => f.url && f.acodec && f.acodec !== 'none' && (!f.vcodec || f.vcodec === 'none'))
+          .sort((a, b) => (b.abr || b.tbr || 0) - (a.abr || a.tbr || 0))[0];
+
+        const addVideo = (video, fallbackHeight = 720) => {
+          if (!video?.url) return;
+          const hasAudio = Boolean(video.acodec && video.acodec !== 'none');
+          formats.push({
+            url: video.url,
+            quality: `${video.height || fallbackHeight}p`,
+            qualityNum: video.height || fallbackHeight,
+            isAudioOnly: false,
+            hasAudio: hasAudio || Boolean(bestAudio),
+            isVideoOnly: !hasAudio,
+            needsMerge: !hasAudio && Boolean(bestAudio?.url),
+            mergeVideoUrl: !hasAudio ? video.url : null,
+            mergeAudioUrl: !hasAudio ? bestAudio?.url || null : null,
+          });
+        };
+
+        if (Array.isArray(info.requested_formats)) {
+          const requestedVideo = info.requested_formats.find(f => f.vcodec && f.vcodec !== 'none');
+          const requestedAudio = info.requested_formats.find(f => f.acodec && f.acodec !== 'none' && (!f.vcodec || f.vcodec === 'none'));
+          if (requestedVideo?.url && requestedAudio?.url) {
+            formats.push({
+              url: requestedVideo.url,
+              quality: `${requestedVideo.height || info.height || 720}p`,
+              qualityNum: requestedVideo.height || info.height || 720,
+              isAudioOnly: false,
+              hasAudio: true,
+              isVideoOnly: true,
+              needsMerge: true,
+              mergeVideoUrl: requestedVideo.url,
+              mergeAudioUrl: requestedAudio.url,
+            });
+          }
+        } else if (info.url) {
           formats.push({
             url: info.url,
             quality: `${info.height || 720}p`,
@@ -411,19 +449,24 @@ async function tryYtDlp(url, reqCookieFile = null) {
           });
         }
         // Also surface the alternate formats array when info.formats is present
-        if (Array.isArray(info.formats)) {
-          for (const f of info.formats) {
+        if (sourceFormats.length) {
+          for (const f of sourceFormats) {
             if (!f.url) continue;
             const isAudio = f.acodec && f.acodec !== 'none' && (!f.vcodec || f.vcodec === 'none');
             const isVideo = f.vcodec && f.vcodec !== 'none';
             if (!isAudio && !isVideo) continue;
-            formats.push({
-              url: f.url,
-              quality: isAudio ? `${Math.round((f.abr || 128))}kbps` : `${f.height || 0}p`,
-              qualityNum: isAudio ? Math.round(f.abr || 128) * 1000 : (f.height || 0),
-              isAudioOnly: isAudio,
-              hasAudio: !isVideo || (f.acodec && f.acodec !== 'none'),
-            });
+            if (isAudio) {
+              formats.push({
+                url: f.url,
+                quality: `${Math.round(f.abr || 128)}kbps`,
+                qualityNum: Math.round(f.abr || 128) * 1000,
+                isAudioOnly: true,
+                hasAudio: true,
+                isVideoOnly: false,
+              });
+            } else {
+              addVideo(f, info.height || 720);
+            }
           }
         }
         if (!formats.length) throw new Error('yt-dlp: no URL extracted');
@@ -610,17 +653,15 @@ function firstSuccess(wrapped) {
 
 function finalise(data, url, videoId) {
   const isShorts = url.includes('/shorts/');
-  const seen = new Set();
+  const unique = new Map();
+  for (const f of (data.formats || []).sort((a, b) => a.qualityNum - b.qualityNum)) {
+    const key = `${f.isAudioOnly ? 'a' : 'v'}:${f.qualityNum}`;
+    const previous = unique.get(key);
+    const score = x => (x?.hasAudio ? 2 : 0) + (x?.needsMerge ? 1 : 0);
+    if (!previous || score(f) > score(previous)) unique.set(key, f);
+  }
 
-  const options = (data.formats || [])
-    .sort((a, b) => a.qualityNum - b.qualityNum)
-    .filter(f => {
-      const key = `${f.isAudioOnly ? 'a' : 'v'}:${f.qualityNum}`;
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    })
-    .map(f => ({
+  const options = [...unique.values()].map(f => ({
       quality: f.quality,
       qualityNum: f.qualityNum,
       url: f.url,
@@ -629,9 +670,12 @@ function finalise(data, url, videoId) {
       filesize: 'unknown',
       isPremium: !f.isAudioOnly && f.qualityNum > FREE_MAX,
       hasAudio: f.hasAudio,
-      isVideoOnly: false,
+      isVideoOnly: Boolean(f.isVideoOnly),
       isAudioOnly: f.isAudioOnly || false,
-      streamType: f.isAudioOnly ? 'audioOnly' : 'muxed',
+      streamType: f.isAudioOnly ? 'audioOnly' : (f.needsMerge ? 'merged' : 'muxed'),
+      needsMerge: Boolean(f.needsMerge),
+      mergeVideoUrl: f.mergeVideoUrl || null,
+      mergeAudioUrl: f.mergeAudioUrl || null,
     }));
 
   const def =

@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "main": "App.js",
   "engines": {
-    "node": "20.x"
+    "node": ">=22 <23"
   },
   "scripts": {
     "start": "node App.js",

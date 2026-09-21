@@ -88,7 +88,8 @@ const setupRoutes = () => {
       status: 'OK',
       timestamp: new Date().toISOString(),
       environment: NODE_ENV,
-      features: ['downloads'],
+      features: ['downloads', 'youtube-js-runtime', 'youtube-pot-provider'],
+      downloaderRuntime: '2026-09-pot-v1',
       database: 'disabled'
     });
   });
