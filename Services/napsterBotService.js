@@ -19,7 +19,9 @@
 //                             base64 (Firebase console → Project settings →
 //                             Service accounts → Generate new private key).
 //   NAPSTER_TELEGRAM_CHAT_ID  optional manual group-id override.
-//   NAPSTER_BOT_ENABLED=0     disable the whole bot.
+//   NAPSTER_BOT_ENABLED=1     turn the bot ON (off by default since 2026-09-28
+//                             at the owner's request — set to 1 to resume the
+//                             daily group posts).
 //
 // Deliberately dependency-free beyond axios + node-cron (already installed):
 // Firestore is reached over REST with a JWT signed via Node's crypto, so the
@@ -37,7 +39,7 @@ const cron = require('node-cron');
 // Same token strategy (env first, inline fallback) as telegramService.js.
 const FALLBACK_TOKEN = '8738645562:AAEVX9QbrKzMAhP7OJCjHV8PaY1eY14zT10';
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN || FALLBACK_TOKEN;
-const ENABLED = process.env.NAPSTER_BOT_ENABLED !== '0';
+const ENABLED = process.env.NAPSTER_BOT_ENABLED === '1';
 
 const EAT_TZ = 'Africa/Kampala'; // UTC+3, no DST
 const SITE = 'https://creedproductions.github.io/napster-homes/';
@@ -456,7 +458,7 @@ async function poll() {
 // ─── Entry point ────────────────────────────────────────────────────────────
 
 function start() {
-  if (!ENABLED) { log('disabled via NAPSTER_BOT_ENABLED=0'); return; }
+  if (!ENABLED) { log('off by default — set NAPSTER_BOT_ENABLED=1 to enable'); return; }
   if (!TOKEN) { log('no Telegram token — skipping'); return; }
   poll();
   cron.schedule('0 20 * * *', postReminder, { timezone: EAT_TZ });
