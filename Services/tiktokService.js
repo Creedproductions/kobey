@@ -48,7 +48,12 @@ const jitter = (min, max) => min + Math.floor(Math.random() * (max - min));
 // Rate limit is 1 req/s — retry on code:-1 with backoff before giving up.
 
 async function tryTikwm(url) {
-  const MAX_ATTEMPTS = 2;
+  // Production logs (Nov 2026) show the Koyeb egress IP getting an HTTP 403
+  // from tikwm on the first request and succeeding when the user taps
+  // "retry" a few seconds later: the block is a per-IP burst limit, not a
+  // permanent ban. Retry the 403/429 cases here with a longer, jittered
+  // back-off and an alternating User-Agent so the user never has to.
+  const MAX_ATTEMPTS = 4;
   let lastErr = null;
 
   // tikwm accepts a bare numeric video id OR a full URL. When we have a
@@ -62,12 +67,19 @@ async function tryTikwm(url) {
   const payload = idMatch ? idMatch[1] : url;
 
   for (let i = 0; i < MAX_ATTEMPTS; i++) {
-    if (i > 0) await sleep(jitter(1100, 1800)); // respect their 1 req/s ceiling
+    // Respect their 1 req/s ceiling on the first retry; back off harder on
+    // later ones — a 403/429 burst block clears after a couple of seconds.
+    if (i > 0) await sleep(i === 1 ? jitter(1100, 1800) : jitter(2200, 3800));
 
     try {
       const requestConfig = {
         timeout: 8000,
-        headers: { 'User-Agent': UA_DESKTOP, Accept: 'application/json' },
+        headers: {
+          'User-Agent': i % 2 === 0 ? UA_DESKTOP : UA_MOBILE,
+          Accept: 'application/json',
+          Referer: 'https://www.tikwm.com/',
+          Origin: 'https://www.tikwm.com',
+        },
       };
       let resp;
       try {
@@ -122,6 +134,10 @@ async function tryTikwm(url) {
     } catch (e) {
       lastErr = e;
       if (e.code === 'ECONNABORTED' || e.code === 'ETIMEDOUT') break;
+      const status = e.response?.status;
+      // Only the burst-limit statuses are worth another attempt; anything
+      // else (404, 5xx, parse errors) fails over to the next strategy.
+      if (status && ![403, 429, 503].includes(status)) break;
     }
   }
 
@@ -374,20 +390,37 @@ async function tryTikTokEmbedPhoto(url) {
     throw new Error('tiktok-embed: not a photo post');
   }
 
-  const resp = await axios.get(`https://www.tiktok.com/embed/v2/${postId}`, {
-    timeout: 12000,
-    headers: {
-      'User-Agent': UA_DESKTOP,
-      Accept: 'text/html,application/xhtml+xml',
-      'Accept-Language': 'en-US,en;q=0.9',
-      Referer: 'https://www.tiktok.com/',
-    },
-  });
-  const $ = cheerio.load(typeof resp.data === 'string' ? resp.data : '');
-  const rawState = $('#__FRONTITY_CONNECT_STATE__').html() ||
-                   $('#__FRONTITY_CONNECT_STATE__').text() || '';
-  if (!rawState) throw new Error('tiktok-embed: state payload missing');
-  return parseTikTokEmbedState(rawState);
+  // TikTok answers the embed page with 429/503 for a few seconds after a
+  // burst from the same IP (every photo post a user pastes hits this
+  // endpoint first). Those clear quickly, so retry with a jittered pause
+  // instead of handing the failure straight to the next strategy.
+  const MAX_ATTEMPTS = 3;
+  let lastErr = null;
+  for (let i = 0; i < MAX_ATTEMPTS; i++) {
+    if (i > 0) await sleep(jitter(2000, 4000));
+    try {
+      const resp = await axios.get(`https://www.tiktok.com/embed/v2/${postId}`, {
+        timeout: 12000,
+        headers: {
+          'User-Agent': i % 2 === 0 ? UA_DESKTOP : UA_MOBILE,
+          Accept: 'text/html,application/xhtml+xml',
+          'Accept-Language': 'en-US,en;q=0.9',
+          Referer: 'https://www.tiktok.com/',
+        },
+      });
+      const $ = cheerio.load(typeof resp.data === 'string' ? resp.data : '');
+      const rawState = $('#__FRONTITY_CONNECT_STATE__').html() ||
+                       $('#__FRONTITY_CONNECT_STATE__').text() || '';
+      if (!rawState) throw new Error('tiktok-embed: state payload missing');
+      return parseTikTokEmbedState(rawState);
+    } catch (e) {
+      lastErr = e;
+      const status = e.response?.status;
+      if (!status || ![429, 503].includes(status)) break;
+      console.warn(`🎵 tiktok-embed: HTTP ${status}, retrying (${i + 1}/${MAX_ATTEMPTS})`);
+    }
+  }
+  throw lastErr || new Error('tiktok-embed: exhausted retries');
 }
 
 // ─── URL resolution for short URLs ───────────────────────────────────────────
