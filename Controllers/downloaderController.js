@@ -939,9 +939,9 @@ const platformDownloaders = {
       // Production logs regularly show attempts 1-2 timing out and the
       // NEXT attempt winning in ~1-2s, so a 4th attempt converts a slice
       // of total failures into wins.
-      // 2026-11: upstream (tioo.eu.org) has been hanging — 2 attempts only so a
-      // dead igdl never holds the race open once polaris/yt-dlp have failed.
-      const caps = [6000, 8000];
+      // 2026-11: still intermittently recovers from Koyeb on a retry (it was
+      // the only winner from the datacenter IP in prod), so keep all 4.
+      const caps = [6000, 7000, 8000, 9000];
       for (let attempt = 1; attempt <= caps.length; attempt++) {
         try {
           const d = await downloadWithTimeout(() => igdl(url), caps[attempt - 1]);
