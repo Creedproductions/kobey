@@ -20,6 +20,7 @@ const { classify: classifyError } = require('../Services/errorClassifier');
 const requestCookies = require('../Services/requestCookies');
 const { requireAudioForInstagramVideos } = require('../Services/instagramAudioService');
 const { fetchInstagramPolaris } = require('../Services/instagramPolarisService');
+const { fetchInstagramViaFixers, fetchFixerThumbnail } = require('../Services/instagramFixerService');
 
 /**
  * 2026-Q3 — Run [fn] with a per-request yt-dlp cookies file built from the
@@ -921,6 +922,9 @@ const platformDownloaders = {
     // Set to true the moment any strategy wins — checked by runEmbed's
     // scraper between fetches so losers stop hammering Instagram.
     let raceWon = false;
+    // Set just before the race starts; runEmbed defers to it (see there).
+    let fixersPromise = Promise.reject(new Error('fixers: not started'));
+    fixersPromise.catch(() => {});
 
     // ── Strategy 1: igdl with internal auto-retry ────────────────────────
     // Up to 3 attempts, 8s hard cap each (24s worst case, inside the 45s
@@ -980,6 +984,12 @@ const platformDownloaders = {
       if (isReelUrl && !items.some(it => it && it.type === 'video')) {
         throw new Error('embed: reel URL but only non-video items found');
       }
+      // Embed pages are stripped: video carousels come back as cover images
+      // and long carousels are truncated (10 photos → 3). The fixer pool
+      // returns the real, complete post — so embed only counts when the pool
+      // has failed.
+      const fixersOk = await fixersPromise.then(() => true, () => false);
+      if (fixersOk) throw new Error('embed: superseded by fixer pool');
       return { items, source: 'embed' };
     };
 
@@ -1016,6 +1026,57 @@ const platformDownloaders = {
         items: await requireAudioForInstagramVideos(items),
         source: 'polaris-graphql',
       };
+    };
+
+    // ── Strategy 0: embed-fixer pool (PRIMARY from Koyeb, 2026-11) ───────
+    // Instagram refuses signed-out requests from this datacenter IP (polaris
+    // → null, yt-dlp → login wall) and igdl's backend mostly hangs. The
+    // embed fixers (instagramfix / eeinstagram / vxinstagram / toinstagram /
+    // kkinstagram) fetch the post from THEIR side and 302 to the real
+    // cdninstagram file — verified from inside the Koyeb instance: ~0.2-1s,
+    // reels, photos and full carousels, incl. reels gated for signed-out
+    // viewers. If a provider hands back a video-only stream (audio guard
+    // fails) we drop that provider and ask the rest of the pool.
+    const runFixers = async () => {
+      const exclude = [];
+      const silent = [];
+      let lastErr = null;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const { items, source } = await downloadWithTimeout(
+          () => fetchInstagramViaFixers(url, {
+            timeoutMs: 8000, exclude, isCancelled: () => raceWon,
+          }),
+          20000,
+        );
+        try {
+          if (isReelUrl && !items.some(it => it.type === 'video')) {
+            throw new Error('reel URL but no video item');
+          }
+          const [checked, thumb] = await Promise.all([
+            requireAudioForInstagramVideos(items),
+            items.length === 1 && items[0].type === 'video'
+              ? fetchFixerThumbnail(url, 1)
+              : Promise.resolve(''),
+          ]);
+          if (thumb && checked[0] && !checked[0].thumbnail) {
+            checked[0] = { ...checked[0], thumbnail: thumb };
+          }
+          return { items: checked, source };
+        } catch (e) {
+          lastErr = e;
+          console.warn(`📸 ${source} rejected: ${e.message} — trying next fixer`);
+          exclude.push(source.replace(/^fixer:/, ''));
+          if (/audio track missing/i.test(e.message)) silent.push({ items, source });
+        }
+      }
+      // Three independent services all returned the video without an audio
+      // track → the post itself is silent (boomerangs, muted uploads). Serve
+      // it rather than failing or falling back to cover images.
+      if (silent.length === 3) {
+        console.log('📸 fixers: video has no audio on 3 independent services — serving as silent');
+        return { items: silent[0].items, source: `${silent[0].source}:silent` };
+      }
+      throw new Error(`fixers: ${lastErr?.message || 'failed'}`);
     };
 
     // ── Strategy 3b: reel page JSON scrape (no rapidcdn, no graphql) ──────
@@ -1179,7 +1240,8 @@ const platformDownloaders = {
       }
     };
 
-    const strategies = [runIgdl()];
+    fixersPromise = runFixers();
+    const strategies = [fixersPromise, runIgdl()];
     strategies.push(runEmbed());
     strategies.push(runGraphql());
     strategies.push(runPageScrape());
