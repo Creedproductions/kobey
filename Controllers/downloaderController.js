@@ -19,6 +19,7 @@ const telegram = require('../Services/telegramService');
 const { classify: classifyError } = require('../Services/errorClassifier');
 const requestCookies = require('../Services/requestCookies');
 const { requireAudioForInstagramVideos } = require('../Services/instagramAudioService');
+const { fetchInstagramPolaris } = require('../Services/instagramPolarisService');
 
 /**
  * 2026-Q3 — Run [fn] with a per-request yt-dlp cookies file built from the
@@ -938,7 +939,9 @@ const platformDownloaders = {
       // Production logs regularly show attempts 1-2 timing out and the
       // NEXT attempt winning in ~1-2s, so a 4th attempt converts a slice
       // of total failures into wins.
-      const caps = [6000, 7000, 8000, 9000];
+      // 2026-11: upstream (tioo.eu.org) has been hanging — 2 attempts only so a
+      // dead igdl never holds the race open once polaris/yt-dlp have failed.
+      const caps = [6000, 8000];
       for (let attempt = 1; attempt <= caps.length; attempt++) {
         try {
           const d = await downloadWithTimeout(() => igdl(url), caps[attempt - 1]);
@@ -991,65 +994,27 @@ const platformDownloaders = {
       return { items, source: 'snapsave' };
     };
 
-    // ── Strategy 3: Instagram GraphQL (IG's own API) ─────────────────────
-    // POST /api/graphql with the public doc_id resolves public posts and
-    // reels — INCLUDING sponsored/ad reels, whose embed pages are stripped
-    // to thumbnails and where igdl's upstream is flakiest. No cookie needed
-    // for public content; the X-IG-App-ID header is Instagram's own web
-    // app id. Independent of any third-party mirror.
+    // ── Strategy 3: Instagram logged-out GraphQL (IG's own web API) ──────
+    // 2026-11: the PRIMARY anonymous path. igdl's upstream (tioo.eu.org)
+    // stopped answering, embed pages are stripped to thumbnails and the old
+    // doc_id (8845758582119845) returns null — so every IG download failed.
+    // This replays what instagram.com itself does for a signed-out visitor
+    // (home → LSD token + cookies → get_ruling_for_content → graphql
+    // doc_id 27130156389949648, variables {media_id}). ~1-2s, returns the
+    // progressive MP4 (audio muxed) + carousels. See instagramPolarisService.
+    let polarisTitle = '';
     const runGraphql = async () => {
-      const m = url.match(/instagram\.com\/(?:p|reel|reels|tv)\/([A-Za-z0-9_-]+)/);
-      if (!m) throw new Error('graphql: cannot extract shortcode');
-      const shortcode = m[1];
-
-      const resp = await downloadWithTimeout(() => axios.post(
-        'https://www.instagram.com/api/graphql',
-        new URLSearchParams({
-          variables: JSON.stringify({
-            shortcode,
-            fetch_tagged_user_count: null,
-            hoisted_comment_id: null,
-            hoisted_reply_id: null,
-          }),
-          doc_id: '8845758582119845',
-        }).toString(),
-        {
-          timeout: 12000,
-          validateStatus: () => true,
-          headers: {
-            'Content-Type':     'application/x-www-form-urlencoded',
-            'User-Agent':       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-            'X-IG-App-ID':      '936619743392459',
-            'X-FB-LSD':         'AVqbxe3J_YA',
-            'X-ASBD-ID':        '129477',
-            Origin:             'https://www.instagram.com',
-            Referer:            `https://www.instagram.com/reel/${shortcode}/`,
-          },
-        }
-      ), 13000);
-
-      const media = resp.data?.data?.xdt_shortcode_media;
-      if (!media) throw new Error(`graphql: no xdt_shortcode_media (status ${resp.status})`);
-
-      const items = [];
-      const push = (node) => {
-        if (node.is_video && node.video_url) {
-          items.push({ url: node.video_url, type: 'video', thumbnail: node.display_url || '' });
-        } else if (node.display_url) {
-          items.push({ url: node.display_url, type: 'image', thumbnail: node.display_url });
-        }
-      };
-      const edges = media.edge_sidecar_to_children?.edges;
-      if (Array.isArray(edges) && edges.length) edges.forEach(e => push(e.node || {}));
-      else push(media);
-
-      if (!items.length) throw new Error('graphql: media object had no usable URLs');
+      const { items, title } = await downloadWithTimeout(
+        () => fetchInstagramPolaris(url, { timeoutMs: 9000 }),
+        22000,
+      );
       if (isReelUrl && !items.some(it => it.type === 'video')) {
-        throw new Error('graphql: reel URL but no video in media object');
+        throw new Error('polaris: reel URL but no video in media object');
       }
+      polarisTitle = title || '';
       return {
         items: await requireAudioForInstagramVideos(items),
-        source: 'graphql',
+        source: 'polaris-graphql',
       };
     };
 
@@ -1186,7 +1151,8 @@ const platformDownloaders = {
     const runYtDlp = async () => {
       const ytdlp = require('../Services/ytDlpRunner');
       if (!ytdlp.isAvailable) throw new Error('yt-dlp: not installed');
-      await new Promise(r => setTimeout(r, 1500));
+      // polaris-graphql usually wins in 1-2s; only spawn yt-dlp when it hasn't.
+      await new Promise(r => setTimeout(r, 3500));
       if (raceWon) throw new Error('yt-dlp: skipped (fast path already won)');
 
       // Per-request cookie file from the user's OWN IG session, if supplied —
@@ -1256,7 +1222,8 @@ const platformDownloaders = {
     // (/reel/, /reels/, /tv/) posts and collapse any video+cover or
     // multi-rendition duplicates down to one item (prevents the client
     // saving a reel twice).
-    return { _items: winner.items, _source: winner.source, _req: req, _sourceUrl: url };
+    const _title = winner.source === 'polaris-graphql' ? polarisTitle : '';
+    return { _items: winner.items, _source: winner.source, _req: req, _sourceUrl: url, ...(_title ? { _title } : {}) };
   },
 
   // ─── TIKTOK ───────────────────────────────────────────────────────────────
