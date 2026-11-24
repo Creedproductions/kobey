@@ -353,7 +353,7 @@ async function tryCobalt(url) {
   };
 }
 
-async function tryYtDlp(url, reqCookieFile = null) {
+async function tryYtDlp(url, reqCookieFile = null, playerClients = null) {
   return new Promise((resolve, reject) => {
     const bin = resolveYtDlpPath();
 
@@ -392,7 +392,8 @@ async function tryYtDlp(url, reqCookieFile = null) {
       '--no-check-certificate',
       '--geo-bypass',
       '--js-runtimes', 'node',
-      // No forced player_client: yt-dlp's own default client set (kept
+      ...(playerClients ? ['--extractor-args', `youtube:player_client=${playerClients}`] : []),
+      // No forced player_client by default: yt-dlp's own default client set (kept
       // current by the boot-time self-update and backed by the bgutil PO
       // token provider) is the only one that still returns audio-only
       // streams, and it does so with less work than the old
@@ -487,6 +488,19 @@ async function tryYtDlp(url, reqCookieFile = null) {
       }
     });
   });
+}
+
+// Datacenter IPs often get "Sign in to confirm you're not a bot" from the
+// default clients while the embedded/VR clients still answer, so a bot-wall
+// error retries once with those clients before giving up.
+async function tryYtDlpWithBotWallRetry(url, reqCookieFile) {
+  try {
+    return await tryYtDlp(url, reqCookieFile);
+  } catch (e) {
+    if (!/not a bot|sign in to confirm/i.test(e.message)) throw e;
+    console.log('[yt-dlp] bot wall on default clients, retrying with mweb,web_embedded,android_vr');
+    return tryYtDlp(url, reqCookieFile, 'mweb,web_embedded,android_vr');
+  }
 }
 
 // ─── Per-strategy hard deadline ──────────────────────────────────────────────
@@ -587,7 +601,7 @@ async function fetchYouTubeData(url, opts = {}) {
   const firstWave = [
     wrap('vidfly',    withDeadline('vidfly',    tryVidfly(normUrl),     8000)),
     COBALT_API_URL && wrap('cobalt', withDeadline('cobalt', tryCobalt(normUrl), 10000)),
-    ytDlpReady     && wrap('yt-dlp', withDeadline('yt-dlp', tryYtDlp(normUrl, reqCookieFile), YT_DLP_DEADLINE_MS)),
+    ytDlpReady     && wrap('yt-dlp', withDeadline('yt-dlp', tryYtDlpWithBotWallRetry(normUrl, reqCookieFile), YT_DLP_DEADLINE_MS)),
   ].filter(Boolean);
   const secondWave = () => [
     wrap('innertube', withDeadline('innertube', tryInnertube(videoId), 10000)),
