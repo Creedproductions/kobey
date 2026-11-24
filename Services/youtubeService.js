@@ -5,6 +5,9 @@ const fs = require('fs');
 const { execFile } = require('child_process');
 
 const FREE_MAX = 360;
+// yt-dlp needs ~2 CPU-seconds per YouTube lookup; on a nano instance that
+// is 15-25s of wall time, so the old 18s ceiling killed it every time.
+const YT_DLP_DEADLINE_MS = Number(process.env.YT_DLP_YOUTUBE_TIMEOUT_MS) || 40000;
 const COBALT_API_URL = (process.env.COBALT_API_URL || '').replace(/\/+$/, '');
 
 // Resolve yt-dlp once at boot. The previous `execFile('yt-dlp', …)` relied on
@@ -389,12 +392,14 @@ async function tryYtDlp(url, reqCookieFile = null) {
       '--no-check-certificate',
       '--geo-bypass',
       '--js-runtimes', 'node',
-      '--extractor-args', 'youtube:player_client=mweb,web_embedded,android_vr',
-      // Tightened socket timeout from 15s → 8s. yt-dlp now bails fast
-      // when YouTube throttles, freeing the race for the next strategy.
+      // No forced player_client: yt-dlp's own default client set (kept
+      // current by the boot-time self-update and backed by the bgutil PO
+      // token provider) is the only one that still returns audio-only
+      // streams, and it does so with less work than the old
+      // mweb,web_embedded,android_vr chain.
       '--socket-timeout', '8',
       '--dump-json', url,
-    ], { timeout: 18000, maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
+    ], { timeout: YT_DLP_DEADLINE_MS, maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
       if (err) {
         const msg = (stderr || err.message || '').slice(0, 200);
         return reject(new Error(`yt-dlp: ${msg}`));
@@ -571,41 +576,39 @@ async function fetchYouTubeData(url, opts = {}) {
   const normUrl = normalizeUrl(url);
   console.log(`YouTube: racing for ${videoId}`);
 
-  // Build the strategy list with per-strategy deadlines so a single hung
-  // upstream can't blow the request budget. Numbers reflect the slowest
-  // *successful* response we've observed plus a small safety margin.
-  //
-  //   vidfly       : ~1s on cache hit, fail-fast otherwise → 8s
-  //   innertube    : ~3-6s when YouTube's player JS is fresh           → 10s
-  //   ytdl-core    : ~4-12s, hits bot detection often                  → 12s
-  //   cobalt       : optional self-hosted endpoint                     → 10s
-  //   yt-dlp       : 8-15s when present; SKIPPED when binary missing    → 18s
-  //
-  // SKIPPED strategies (yt-dlp without a binary, ytdl-core not installed,
-  // cobalt without COBALT_API_URL) do NOT participate in the race at all —
-  // previously they ran and immediately failed, taking up an event-loop
-  // slot for nothing.
+  // Per-strategy deadlines stop one hung upstream from blowing the request
+  // budget. Strategies whose dependency is missing (yt-dlp binary, ytdl-core,
+  // COBALT_API_URL) are left out of the race entirely.
   const ytDlpReady = isYtDlpAvailable();
-  const strategies = [
+  // On a small instance the strategies compete for very little CPU, and
+  // innertube / ytdl-core spend most of it deciphering player JS only to
+  // fail. yt-dlp therefore runs first alongside the cheap network-only
+  // sources; the CPU-heavy JS strategies run only if that wave fails.
+  const firstWave = [
     wrap('vidfly',    withDeadline('vidfly',    tryVidfly(normUrl),     8000)),
+    COBALT_API_URL && wrap('cobalt', withDeadline('cobalt', tryCobalt(normUrl), 10000)),
+    ytDlpReady     && wrap('yt-dlp', withDeadline('yt-dlp', tryYtDlp(normUrl, reqCookieFile), YT_DLP_DEADLINE_MS)),
+  ].filter(Boolean);
+  const secondWave = () => [
     wrap('innertube', withDeadline('innertube', tryInnertube(videoId), 10000)),
-    ytdl                && wrap('ytdl-core', withDeadline('ytdl-core', tryYtdlCore(normUrl),  12000)),
-    COBALT_API_URL      && wrap('cobalt',    withDeadline('cobalt',    tryCobalt(normUrl),    10000)),
-    ytDlpReady          && wrap('yt-dlp',    withDeadline('yt-dlp',    tryYtDlp(normUrl, reqCookieFile), 18000)),
+    ytdl && wrap('ytdl-core', withDeadline('ytdl-core', tryYtdlCore(normUrl), 12000)),
   ].filter(Boolean);
 
   console.log(
-    `YouTube strategies: ${strategies.length} active ` +
-    `(yt-dlp=${ytDlpReady ? 'on' : 'OFF'}, ` +
-    `cobalt=${COBALT_API_URL ? 'on' : 'OFF'}, ` +
-    `ytdl-core=${ytdl ? 'on' : 'OFF'})`
+    `YouTube strategies: yt-dlp=${ytDlpReady ? 'on' : 'OFF'}, ` +
+    `cobalt=${COBALT_API_URL ? 'on' : 'OFF'}, ytdl-core=${ytdl ? 'on' : 'OFF'}`
   );
 
-  if (!strategies.length) {
-    throw new Error('YouTube: no strategies available');
+  let data;
+  try {
+    data = await firstSuccess(firstWave);
+  } catch (firstErr) {
+    try {
+      data = await firstSuccess(secondWave());
+    } catch (secondErr) {
+      throw new Error(`${firstErr.message} | ${secondErr.message.replace(/^YouTube all sources failed: /, '')}`);
+    }
   }
-
-  const data = await firstSuccess(strategies);
   // Don't cache user-authenticated results — they may contain
   // members-only / age-gated formats specific to that session.
   if (!reqCookieFile) ytCacheSet(videoId, data);
