@@ -907,15 +907,35 @@ const platformDownloaders = {
     const ENABLE_SNAPSAVE_IG = process.env.IG_USE_SNAPSAVE === '1';
     const isReelUrl = /instagram\.com\/reel\//i.test(url);
 
+    // btch-downloader's igdl sometimes returns a non-media link such as
+    // "https://snapsave.app&dl=1" for a reel. Treating that as success sent
+    // visitors to a proxy URL that 502s, so items without a real media
+    // address are dropped and the strategy counts as failed.
+    const isUsableMediaUrl = (raw) => {
+      if (typeof raw !== 'string' || !raw) return false;
+      try {
+        const u = new URL(raw);
+        if (!/^https?:$/.test(u.protocol)) return false;
+        if (!/^[a-z0-9.-]+$/i.test(u.hostname) || !u.hostname.includes('.')) return false;
+        return u.pathname.length > 1 || u.search.length > 1;
+      } catch (_) {
+        return false;
+      }
+    };
+    const pickItems = (list) => {
+      const good = list.filter(it => it && isUsableMediaUrl(it.url || it.download || it.src || ''));
+      if (good.length < list.length) {
+        console.warn(`⚠️ IG: dropped ${list.length - good.length} item(s) with no usable media URL`);
+      }
+      return good.length > 0 ? good : null;
+    };
     const extractItems = (res) => {
       if (!res) return null;
-      if (Array.isArray(res))           return res.length > 0 ? res        : null;
-      if (Array.isArray(res.data))      return res.data.length   > 0 ? res.data   : null;
-      if (Array.isArray(res.result))    return res.result.length > 0 ? res.result : null;
-      if (Array.isArray(res.media))     return res.media.length  > 0 ? res.media  : null;
-      if (res.status === true && Array.isArray(res.data))
-        return res.data.length > 0 ? res.data : null;
-      if (res.url || res.download)      return [res];
+      if (Array.isArray(res))           return pickItems(res);
+      if (Array.isArray(res.data))      return pickItems(res.data);
+      if (Array.isArray(res.result))    return pickItems(res.result);
+      if (Array.isArray(res.media))     return pickItems(res.media);
+      if (res.url || res.download)      return pickItems([res]);
       return null;
     };
 
