@@ -26,71 +26,63 @@ class MergeService {
         console.log(`📹 Video URL: ${videoUrl.substring(0, 100)}...`);
         console.log(`🎵 Audio URL: ${audioUrl.substring(0, 100)}...`);
 
+        // Stream-copy both tracks first: re-encoding the audio pinned the
+        // nano instance's CPU long enough for Koyeb health checks to fail and
+        // the whole service to answer 502. AAC encoding is only the fallback
+        // for audio codecs MP4 cannot hold.
+        try {
+            return await this._runFfmpeg(videoUrl, audioUrl, outputPath, ['-c:a', 'copy']);
+        } catch (copyErr) {
+            console.warn(`⚠️ Audio copy failed (${copyErr.message}); retrying with AAC encode`);
+            return this._runFfmpeg(videoUrl, audioUrl, outputPath, ['-c:a', 'aac', '-b:a', '160k']);
+        }
+    }
+
+    _runFfmpeg(videoUrl, audioUrl, outputPath, audioArgs) {
         return new Promise((resolve, reject) => {
             const ffmpegArgs = [
+                '-hide_banner', '-loglevel', 'error', '-stats',
                 '-i', videoUrl,
                 '-i', audioUrl,
+                '-map', '0:v:0', '-map', '1:a:0',
                 '-c:v', 'copy',
-                '-c:a', 'aac',
-                '-b:a', '192k',
-                '-strict', 'experimental',
-                '-movflags', '+faststart', // Enable streaming
+                ...audioArgs,
+                '-movflags', '+faststart',
                 '-y',
                 outputPath
             ];
 
-            const ffmpeg = spawn('ffmpeg', ffmpegArgs);
+            // Lowest CPU priority so the web server keeps answering requests
+            // and health checks while a merge runs.
+            const ffmpeg = spawn('nice', ['-n', '19', 'ffmpeg', ...ffmpegArgs]);
 
             let stderr = '';
-            let lastProgress = 0;
+            let settled = false;
+            const done = (fn, v) => { if (!settled) { settled = true; clearTimeout(timer); fn(v); } };
 
             ffmpeg.stderr.on('data', (data) => {
-                const text = data.toString();
-                stderr += text;
-
-                // Parse FFmpeg progress
-                const timeMatch = text.match(/time=(\d+):(\d+):(\d+\.\d+)/);
-                if (timeMatch) {
-                    const hours = parseInt(timeMatch[1]);
-                    const minutes = parseInt(timeMatch[2]);
-                    const seconds = parseFloat(timeMatch[3]);
-                    const currentTime = hours * 3600 + minutes * 60 + seconds;
-
-                    if (currentTime > lastProgress) {
-                        lastProgress = currentTime;
-                        console.log(`⏳ Merging... ${currentTime.toFixed(1)}s processed`);
-                    }
-                }
+                stderr = (stderr + data.toString()).slice(-4000);
             });
 
             ffmpeg.on('close', (code) => {
-                if (code === 0) {
-                    console.log('✅ FFmpeg merge successful');
-
-                    // Verify output file exists
-                    if (fs.existsSync(outputPath)) {
-                        const stats = fs.statSync(outputPath);
-                        console.log(`📦 Output file size: ${(stats.size / 1024 / 1024).toFixed(2)} MB`);
-                        resolve(outputPath);
-                    } else {
-                        reject(new Error('Output file not found after merge'));
-                    }
+                if (code === 0 && fs.existsSync(outputPath)) {
+                    const stats = fs.statSync(outputPath);
+                    console.log(`✅ FFmpeg merge successful (${(stats.size / 1024 / 1024).toFixed(2)} MB)`);
+                    done(resolve, outputPath);
                 } else {
-                    console.error('❌ FFmpeg merge failed with code:', code);
-                    console.error('FFmpeg stderr:', stderr);
-                    reject(new Error(`FFmpeg failed with code ${code}`));
+                    console.error('❌ FFmpeg merge failed with code:', code, stderr.slice(-600));
+                    done(reject, new Error(`FFmpeg failed with code ${code}`));
                 }
             });
 
             ffmpeg.on('error', (error) => {
                 console.error('❌ FFmpeg spawn error:', error);
-                reject(error);
+                done(reject, error);
             });
 
-            // Set timeout (5 minutes)
-            setTimeout(() => {
-                ffmpeg.kill();
-                reject(new Error('FFmpeg merge timeout'));
+            const timer = setTimeout(() => {
+                ffmpeg.kill('SIGKILL');
+                done(reject, new Error('FFmpeg merge timeout'));
             }, 5 * 60 * 1000);
         });
     }
