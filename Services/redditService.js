@@ -288,6 +288,108 @@ async function ytdlpFallback(url) {
   return data;
 }
 
+
+// ─── Cloudflare relay + public embed page ───────────────────────────────────
+// Reddit now answers 403 "Blocked" to datacenter IPs (Koyeb included) for the
+// share-link redirect, the .json API and normal post pages. Two things still
+// work: Cloudflare's network (our ud-relay Worker), and embed.reddit.com,
+// whose HTML carries `packaged-media-json` — MP4 renditions WITH audio
+// already muxed (packaged-media.redd.it), so no ffmpeg merge is needed.
+const RELAY_URL    = process.env.REDDIT_RELAY_URL || 'https://relay.creedmotions.store/fetch';
+const RELAY_ORIGIN = process.env.REDDIT_RELAY_ORIGIN || 'https://redditdownloader.creedmotions.store';
+
+const unescapeHtml = (t) => String(t || '')
+  .replace(/&quot;/g, '"').replace(/&#x27;|&#39;/g, "'").replace(/&lt;/g, '<')
+  .replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+
+async function getPage(url, { relay = false, timeout = 12000 } = {}) {
+  const target = relay ? `${RELAY_URL}?url=${encodeURIComponent(url)}` : url;
+  const resp = await axios.get(target, {
+    timeout,
+    maxRedirects: relay ? 0 : 5,
+    responseType: 'text',
+    transformResponse: [d => d],
+    validateStatus: () => true,
+    headers: relay
+      ? { Origin: RELAY_ORIGIN, 'User-Agent': UA_DESKTOP }
+      : { 'User-Agent': UA_DESKTOP, Accept: 'text/html,application/xhtml+xml', 'Accept-Language': 'en-US,en;q=0.9' },
+  });
+  const finalUrl = relay ? (resp.headers['x-relay-final-url'] || url) : (resp.request?.res?.responseUrl || url);
+  const status = relay ? Number(resp.headers['x-relay-status'] || resp.status) : resp.status;
+  return { status, finalUrl, body: String(resp.data || '') };
+}
+
+async function resolveShareViaRelay(url) {
+  try {
+    const r = await getPage(url, { relay: true });
+    if (/\/comments\//i.test(r.finalUrl)) return r.finalUrl.split('?')[0];
+  } catch (e) { console.warn(`👽 Reddit: relay share resolve failed: ${e.message}`); }
+  return url;
+}
+
+function embedUrlFor(canonical) {
+  const u = new URL(canonical);
+  return `https://embed.reddit.com${u.pathname.replace(/\/?$/, '/')}`;
+}
+
+function parseEmbed(html, canonical) {
+  const h1 = (html.match(/<h1[^>]*>([^<]{1,300})<\/h1>/i) || [])[1];
+  const slug = (canonical.match(/\/comments\/[a-z0-9]+\/([^/?#]+)/i) || [])[1];
+  const ogTitle = (html.match(/<meta property="og:title" content="([^"]*)"/i) || [])[1];
+  const title = unescapeHtml(h1 || (ogTitle && !/heart of the internet/i.test(ogTitle) ? ogTitle : '') || (slug ? slug.replace(/_/g, ' ') : '') ||
+                (html.match(/<title>([^<]*)<\/title>/i) || [])[1] || 'Reddit Post').replace(/\s*:\s*r\/\w+$/i, '').trim();
+  const thumb = unescapeHtml((html.match(/<meta property="og:image" content="([^"]*)"/i) || [])[1] || '') || null;
+  const pm = html.match(/packaged-media-json="([^"]+)"/i);
+  if (pm) {
+    let data = null;
+    try { data = JSON.parse(unescapeHtml(pm[1])); } catch (_) {}
+    const perms = data?.playbackMp4s?.permutations || [];
+    const formats = perms
+      .map(p => ({ url: p?.source?.url, h: p?.source?.dimensions?.height || 0 }))
+      .filter(p => p.url)
+      .map(p => ({
+        quality: p.h ? `${p.h}p` : 'Original Quality', qualityNum: p.h, url: p.url,
+        type: 'video/mp4', extension: 'mp4', filesize: 'unknown', isPremium: false,
+        hasAudio: true, isVideoOnly: false, isAudioOnly: false, streamType: 'muxed',
+      }))
+      .sort((a, b) => b.qualityNum - a.qualityNum);
+    if (formats.length) {
+      return {
+        success: true, platform: 'reddit', extractor: 'reddit-embed',
+        title, thumbnail: thumb, duration: data?.playbackMp4s?.duration || 0, uploader: '',
+        url: formats[0].url, formats, allFormats: formats, selectedQuality: formats[0],
+      };
+    }
+  }
+  // Image / gallery posts: collect full-size i.redd.it images.
+  const imgs = [...new Set((html.match(/https:\/\/i\.redd\.it\/[A-Za-z0-9_-]+\.(?:jpe?g|png|gif|webp)/g) || []))];
+  if (imgs.length > 1) {
+    const items = imgs.map(u => ({ url: u, thumbnail: u, type: 'image', quality: 'Original Quality' }));
+    return { success: true, platform: 'reddit', extractor: 'reddit-embed', title, thumbnail: thumb || imgs[0],
+             duration: 0, uploader: '', url: imgs[0], formats: [], allFormats: [], selectedQuality: null, mediaItems: items };
+  }
+  if (imgs.length === 1) {
+    return { success: true, platform: 'reddit', extractor: 'reddit-embed', title, thumbnail: thumb || imgs[0],
+             duration: 0, uploader: '', url: imgs[0], formats: [], allFormats: [], selectedQuality: null };
+  }
+  throw new Error('Reddit embed: no media in embed page');
+}
+
+async function tryEmbed(canonical) {
+  const embed = embedUrlFor(canonical);
+  let lastErr;
+  for (const relay of [false, true]) {
+    try {
+      const r = await getPage(embed, { relay });
+      if (r.status !== 200) throw new Error(`embed status ${r.status}${relay ? ' (relay)' : ''}`);
+      const data = parseEmbed(r.body, canonical);
+      console.log(`👽 Reddit: ✅ embed page${relay ? ' via relay' : ''} (${data.mediaItems ? data.mediaItems.length + ' item(s)' : data.selectedQuality?.quality || 'image'})`);
+      return data;
+    } catch (e) { lastErr = e; console.warn(`👽 Reddit: embed${relay ? ' via relay' : ''} failed — ${e.message}`); }
+  }
+  throw lastErr || new Error('Reddit embed failed');
+}
+
 // ─── Public entry ───────────────────────────────────────────────────────────
 async function downloadReddit(url) {
   let resolved = url;
@@ -296,12 +398,22 @@ async function downloadReddit(url) {
     if (resolved !== url) console.log(`👽 Reddit: share link resolved → ${resolved.slice(0, 100)}`);
   }
 
+  // Direct redirect is blocked from datacenter IPs → resolve through the relay.
+  if (!/\/comments\//i.test(resolved)) {
+    const viaRelay = await resolveShareViaRelay(url);
+    if (viaRelay !== url) { resolved = viaRelay; console.log(`👽 Reddit: share link resolved via relay → ${resolved.slice(0, 100)}`); }
+  }
+
   try {
     const data = await tryRedditJson(resolved);
     console.log(`👽 Reddit: ✅ JSON API (${data.mediaItems ? `${data.mediaItems.length} item(s)` : data.selectedQuality?.quality || 'media'})`);
     return data;
   } catch (e) {
-    console.warn(`👽 Reddit: JSON API failed (${String(e.message).slice(0, 120)}) → yt-dlp fallback`);
+    console.warn(`👽 Reddit: JSON API failed (${String(e.message).slice(0, 120)}) → embed page`);
+  }
+
+  if (/\/comments\//i.test(resolved)) {
+    try { return await tryEmbed(resolved); } catch (_) { /* fall through */ }
   }
 
   return ytdlpFallback(resolved);
