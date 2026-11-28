@@ -168,6 +168,58 @@ const guessExtFromContentType = (ct) => {
   return '';
 };
 
+
+// ─── Content sniffing ────────────────────────────────────────────────────────
+// Many CDNs (tikcdn/ssstik, some Instagram/Facebook mirrors) answer with
+// "application/octet-stream" or no type at all. Without an extension the
+// browser saves e.g. "Google_Pixel_Ug" — macOS/Windows then show it as an
+// unknown/text document. We read the first bytes and name the file from
+// what it really is. HTML/JSON bodies are upstream error pages, not media.
+const EXT_MIME = {
+  '.mp4': 'video/mp4', '.m4a': 'audio/mp4', '.mov': 'video/quicktime', '.webm': 'video/webm',
+  '.mp3': 'audio/mpeg', '.ogg': 'audio/ogg', '.jpg': 'image/jpeg', '.png': 'image/png',
+  '.webp': 'image/webp', '.gif': 'image/gif', '.m3u8': 'application/vnd.apple.mpegurl',
+};
+const GENERIC_CT = (ct) => !ct || /octet-stream|binary|text\/plain|application\/unknown|x-download|force-download/i.test(ct);
+
+const sniffExt = (b) => {
+  if (!b || b.length < 4) return '';
+  const ascii = b.slice(0, 16).toString('latin1');
+  if (b.length >= 12 && b.slice(4, 8).toString('latin1') === 'ftyp') {
+    const brand = b.slice(8, 12).toString('latin1');
+    if (/^M4A|^M4B|^M4P|^F4A/.test(brand)) return '.m4a';
+    if (/^qt/.test(brand)) return '.mov';
+    return '.mp4';
+  }
+  if (b[0] === 0x1a && b[1] === 0x45 && b[2] === 0xdf && b[3] === 0xa3) return '.webm';
+  if (b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return '.jpg';
+  if (b[0] === 0x89 && ascii.slice(1, 4) === 'PNG') return '.png';
+  if (ascii.startsWith('RIFF') && ascii.slice(8, 12) === 'WEBP') return '.webp';
+  if (ascii.startsWith('GIF8')) return '.gif';
+  if (ascii.startsWith('OggS')) return '.ogg';
+  if (ascii.startsWith('ID3') || (b[0] === 0xff && (b[1] & 0xe0) === 0xe0)) return '.mp3';
+  if (ascii.startsWith('#EXTM3U')) return '.m3u8';
+  return '';
+};
+const looksLikeErrorPage = (b) => {
+  if (!b || !b.length) return false;
+  const head = b.slice(0, 64).toString('utf8').trimStart().toLowerCase();
+  return head.startsWith('<!doctype') || head.startsWith('<html') || head.startsWith('<?xml') || head.startsWith('{') || head.startsWith('[');
+};
+const extFromUrl = (u) => {
+  try { const m = new URL(u).pathname.match(/\.(mp4|m4a|mov|webm|mp3|ogg|jpe?g|png|webp|gif|m3u8)$/i); return m ? '.' + m[1].toLowerCase().replace('jpeg', 'jpg') : ''; } catch (_) { return ''; }
+};
+
+// Read the first bytes of a Node stream without consuming them.
+const peekStream = (stream, ms = 10000) => new Promise((resolve) => {
+  let done = false;
+  const finish = (buf) => { if (done) return; done = true; clearTimeout(t); stream.removeListener('data', onData); stream.removeListener('end', onEnd); stream.removeListener('error', onEnd); resolve(buf); };
+  const onData = (chunk) => { stream.pause(); stream.unshift(chunk); finish(chunk); };
+  const onEnd = () => finish(Buffer.alloc(0));
+  const t = setTimeout(() => { stream.pause(); finish(null); }, ms);
+  stream.on('data', onData); stream.once('end', onEnd); stream.once('error', onEnd);
+});
+
 // ─── Main handler ────────────────────────────────────────────────────────────
 
 const UA_TIKTOK_APP =
@@ -338,9 +390,30 @@ const proxyDownload = async (req, res) => {
 
   // Always set a sensible Content-Disposition so the client saves the file
   // with our intended name rather than the upstream's generic filename.
-  const ext      = guessExtFromContentType(ct);
-  const fname    = safeFilename(req.query.filename, ext);
-  res.setHeader('Content-Disposition', `attachment; filename="${fname}"`);
+  // Work out the real type: content-type → first bytes → URL path → hint.
+  let ext = guessExtFromContentType(ct);
+  let head = null;
+  if (reqMethod !== 'HEAD' && !clientSentRange && upstream.status < 400 && upstream.data && (GENERIC_CT(ct) || !ext)) {
+    head = await peekStream(upstream.data);
+    if (head && upstream.status < 300 && looksLikeErrorPage(head)) {
+      console.warn(`   ↳ upstream sent an HTML/JSON page instead of media [${platform}]`);
+      upstream.data.destroy();
+      for (const h of ['Content-Type', 'Content-Length', 'Content-Range', 'Accept-Ranges', 'Content-Encoding', 'ETag', 'Last-Modified']) res.removeHeader(h);
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      res.status(502).json({ error: 'The source returned a web page instead of the media file. Please fetch the link again.', platform });
+      return;
+    }
+    const sniffed = sniffExt(head);
+    if (sniffed) { ext = sniffed; req.query.filename = String(req.query.filename || 'video').replace(/\.[a-z0-9]{2,5}$/i, ''); }
+  }
+  if (!ext) ext = extFromUrl(targetUrl) || extFromUrl(req.query.url || '');
+  const hint = String(req.query.ext || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  if (!ext && hint) ext = '.' + hint;
+  if (!ext) ext = '.mp4';   // last resort: every server platform here serves video by default
+  const fname = safeFilename(req.query.filename, ext);
+  const nameExt = (fname.match(/\.[a-z0-9]{2,5}$/i) || [''])[0].toLowerCase();
+  if (GENERIC_CT(ct) && EXT_MIME[nameExt]) res.setHeader('Content-Type', EXT_MIME[nameExt]);
+  res.setHeader('Content-Disposition', `attachment; filename="${fname}"; filename*=UTF-8''${encodeURIComponent(fname)}`);
 
   // CORS — open by default since this is a download endpoint
   res.setHeader('Access-Control-Allow-Origin', '*');
